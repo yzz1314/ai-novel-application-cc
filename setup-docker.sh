@@ -1,0 +1,137 @@
+#!/bin/bash
+
+# Docker配置脚本
+
+set -e
+
+echo "🐳 创建Docker配置..."
+
+cd novel-system
+
+# docker-compose.yml
+cat > docker-compose.yml << 'COMPOSE'
+version: '3.8'
+
+services:
+  # PostgreSQL数据库
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: novel-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    networks:
+      - novel-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Java后端服务
+  java-service:
+    build:
+      context: ./java-services
+      dockerfile: Dockerfile
+    container_name: novel-java-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE}
+      PYTHON_SERVICE_URL: http://python-service:8000
+      PROJECT_BASE_PATH: /workspace
+    volumes:
+      - ./workspace:/workspace
+    ports:
+      - "${JAVA_SERVICE_PORT}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      python-service:
+        condition: service_healthy
+    networks:
+      - novel-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Python AI服务
+  python-service:
+    build:
+      context: ./python-services
+      dockerfile: Dockerfile
+    container_name: novel-python-service
+    environment:
+      PROJECT_BASE_PATH: /workspace
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS}
+      MAX_CHUNK_SIZE: ${MAX_CHUNK_SIZE}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP}
+    volumes:
+      - ./workspace:/workspace
+    ports:
+      - "${PYTHON_SERVICE_PORT}:8000"
+    networks:
+      - novel-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # React前端
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL}
+    container_name: novel-frontend
+    ports:
+      - "${FRONTEND_PORT}:80"
+    depends_on:
+      - java-service
+    networks:
+      - novel-network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  novel-network:
+    driver: bridge
+COMPOSE
+
+# docker/postgres/init.sql
+mkdir -p docker/postgres
+cat > docker/postgres/init.sql << 'INITSQL'
+-- 初始化数据库脚本
+
+-- 启用pgvector扩展
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- 创建schema
+CREATE SCHEMA IF NOT EXISTS novel_system;
+
+-- 设置默认schema
+SET search_path TO novel_system, public;
+
+-- 初始化完成
+SELECT 'Database initialized successfully' AS status;
+INITSQL
+
+echo "✅ Docker配置创建完成"
+

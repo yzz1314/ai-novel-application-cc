@@ -1,0 +1,53 @@
+spring:
+  application:
+    name: novel-system
+  
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/novel_system}
+    username: ${SPRING_DATASOURCE_USERNAME:novel_user}
+    password: ${SPRING_DATASOURCE_PASSWORD:password}
+    driver-class-name: org.postgresql.Driver
+  
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+  
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 20MB
+
+server:
+  port: 8080
+  
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+# Python服务配置
+python:
+  service:
+    url: ${PYTHON_SERVICE_URL:http://localhost:8000}
+
+# 文件存储配置
+file:
+  storage:
+    base-path: ${PROJECT_BASE_PATH:/workspace}
+
+# 日志配置
+logging:
+  level:
+    root: INFO
+    com.novel.system: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %logger{36} - %msg%n"

@@ -1,0 +1,11 @@
+# 应用配置
+app:
+  name: "Novel System"
+  version: "1.0.0"
+  
+# 默认配置
+defaults:
+  chunk_size: 2500
+  chunk_overlap: 200
+  single_chapter_words: 3000
+  recent_chapter_window: 3

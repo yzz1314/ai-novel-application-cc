@@ -1,0 +1,49 @@
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build output
+target/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
+# Dependencies and local env
+node_modules/
+venv/
+.venv/
+.env
+.env.local
+
+# Workspace runtime data
+workspace/projects/*/
+workspace/logs/*.log
+workspace/tmp/*
+novel-system/workspace/projects/*/
+novel-system/workspace/logs/*.log
+novel-system/workspace/tmp/*
+!workspace/projects/.gitkeep
+!workspace/logs/.gitkeep
+!workspace/tmp/.gitkeep
+!novel-system/workspace/projects/.gitkeep
+!novel-system/workspace/logs/.gitkeep
+!novel-system/workspace/tmp/.gitkeep
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets
+*.key
+*.pem

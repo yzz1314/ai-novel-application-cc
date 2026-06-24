@@ -1,0 +1,41 @@
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+target/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
+# Dependencies
+node_modules/
+venv/
+.env
+
+# Workspace
+workspace/projects/*/
+workspace/logs/*.log
+workspace/tmp/*
+!workspace/projects/.gitkeep
+!workspace/logs/.gitkeep
+!workspace/tmp/.gitkeep
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets
+.env.local
+*.key

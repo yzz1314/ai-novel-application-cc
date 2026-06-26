@@ -5,6 +5,7 @@ import lombok.Data;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 @Data
 @Builder
@@ -20,6 +21,8 @@ public class SkillResponse {
     private Integer priority;
     private List<String> scope;
     private List<String> conflicts;
+    private List<Map<String, Object>> sourceTrace;
+    private List<Map<String, Object>> evidenceItems;
     private String qualityStatus;
     private Integer qualityScore;
     private String qualityCheckedAt;

@@ -262,6 +262,21 @@ const ProjectDetail: React.FC = () => {
       ),
     },
     {
+      title: '来源',
+      key: 'sourceTrace',
+      width: 110,
+      render: (_: any, record: any) => {
+        const sourceCount = (record.sourceTrace || []).length;
+        const evidenceCount = (record.evidenceItems || []).length;
+        return (
+          <Space size={4} direction="vertical">
+            <Tag color={sourceCount ? 'blue' : 'default'}>{sourceCount}来源</Tag>
+            <Text type="secondary">{evidenceCount}证据</Text>
+          </Space>
+        );
+      },
+    },
+    {
       title: '审批',
       dataIndex: 'approvalStatus',
       key: 'approvalStatus',
@@ -939,7 +954,46 @@ const ProjectDetail: React.FC = () => {
         open={!!skillDrawer}
         onClose={() => setSkillDrawer(null)}
       >
-        <Paragraph style={{ whiteSpace: 'pre-wrap' }}>{skillDrawer?.content}</Paragraph>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          {(skillDrawer?.sourceTrace || []).length > 0 && (
+            <Card title="来源追踪" size="small">
+              <List
+                size="small"
+                dataSource={skillDrawer.sourceTrace || []}
+                renderItem={(item: any) => (
+                  <List.Item>
+                    <Space size="small" wrap>
+                      <Tag>{item.type}</Tag>
+                      <Text>{item.name}</Text>
+                      {item.path && <Text type="secondary">{item.path}</Text>}
+                      {item.evidence && <Text type="secondary">{item.evidence}</Text>}
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            </Card>
+          )}
+          {(skillDrawer?.evidenceItems || []).length > 0 && (
+            <Card title="证据片段" size="small">
+              <List
+                size="small"
+                dataSource={(skillDrawer.evidenceItems || []).slice(0, 8)}
+                renderItem={(item: any) => (
+                  <List.Item>
+                    <Space direction="vertical" size={2}>
+                      <Space size="small" wrap>
+                        <Tag color="blue">{item.type}</Tag>
+                        {item.path && <Text type="secondary">{item.path}{item.line ? `:${item.line}` : ''}</Text>}
+                      </Space>
+                      <Text>{item.text}</Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            </Card>
+          )}
+          <Paragraph style={{ whiteSpace: 'pre-wrap' }}>{skillDrawer?.content}</Paragraph>
+        </Space>
       </Drawer>
 
       <Modal

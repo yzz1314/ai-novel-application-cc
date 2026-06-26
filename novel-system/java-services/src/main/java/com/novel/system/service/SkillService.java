@@ -43,6 +43,9 @@ public class SkillService {
     private static final Pattern FRONTMATTER_PATTERN = Pattern.compile("\\A---\\s*\\R(.*?)\\R---\\s*\\R", Pattern.DOTALL);
     private static final Pattern FIRST_HEADING_PATTERN = Pattern.compile("(?m)^#\\s+(.+?)\\s*$");
     private static final Pattern TEMPLATE_PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{[^}]+}}|____+");
+    private static final Pattern SAMPLE_LINE_PATTERN = Pattern.compile("(?m)^\\s*-\\s*《?([^《》\\n（(]+)》?[（(].*?$");
+    private static final Pattern FREQUENCY_LINE_PATTERN = Pattern.compile("(?m)^.*(?:出现率|期望频率|占比|percentage)[:：]?\\s*([0-9]+(?:\\.[0-9]+)?)%?.*$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern EXAMPLE_BLOCK_PATTERN = Pattern.compile("(?s)(?:示例|示例片段|修改示例)[:：]?\\s*```\\s*(.*?)\\s*```");
     private static final DateTimeFormatter SNAPSHOT_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
 
     private final ProjectService projectService;
@@ -484,6 +487,8 @@ public class SkillService {
         entry.put("priority", skill.getPriority());
         entry.put("scope", skill.getScope() != null ? skill.getScope() : List.of());
         entry.put("conflicts", skill.getConflicts() != null ? skill.getConflicts() : List.of());
+        entry.put("sourceTrace", skill.getSourceTrace() != null ? skill.getSourceTrace() : List.of());
+        entry.put("evidenceItems", skill.getEvidenceItems() != null ? skill.getEvidenceItems() : List.of());
         entry.put("qualityStatus", skill.getQualityStatus());
         entry.put("qualityScore", skill.getQualityScore());
         entry.put("qualityCheckedAt", skill.getQualityCheckedAt());
@@ -547,6 +552,8 @@ public class SkillService {
             Map<String, Object> enabled = enabledConfig.getOrDefault(skillName, Collections.emptyMap());
             String type = asString(enabled.get("type"), inferType(skillName));
             List<String> explicitConflicts = asStringList(frontmatter.getOrDefault("conflicts_with", frontmatter.get("conflictsWith")));
+            List<Map<String, Object>> sourceTrace = buildSourceTrace(projectId, skillName, content, frontmatter, enabled);
+            List<Map<String, Object>> evidenceItems = buildEvidenceItems(projectId, skillName, content, frontmatter);
 
             return SkillResponse.builder()
                 .name(skillName)
@@ -559,6 +566,8 @@ public class SkillService {
                 .priority(asInteger(enabled.get("priority"), defaultPriority(type)))
                 .scope(asStringList(enabled.get("scope")))
                 .conflicts(explicitConflicts)
+                .sourceTrace(sourceTrace)
+                .evidenceItems(evidenceItems)
                 .qualityStatus(asString(enabled.get("quality_status"), "unchecked"))
                 .qualityScore(asInteger(enabled.get("quality_score"), null))
                 .qualityCheckedAt(asString(enabled.get("quality_checked_at"), ""))
@@ -762,6 +771,201 @@ public class SkillService {
         return item;
     }
 
+    private List<Map<String, Object>> buildSourceTrace(
+            String projectId,
+            String skillName,
+            String content,
+            Map<String, Object> frontmatter,
+            Map<String, Object> enabled) {
+        List<Map<String, Object>> trace = new ArrayList<>();
+        addTraceItem(trace, "skill_file", skillName, "skills/local/" + skillName + ".md", "Skill Markdown 文件");
+
+        String generatedFrom = asString(
+            frontmatter.getOrDefault("generated_from", frontmatter.get("generatedFrom")),
+            ""
+        );
+        if (!generatedFrom.isBlank()) {
+            addTraceItem(trace, "generated_from", generatedFrom, "", "frontmatter.generated_from");
+        }
+
+        for (String sample : sampleNamesFrom(frontmatter.getOrDefault("sample_books", frontmatter.get("sampleBooks")))) {
+            addTraceItem(trace, "sample_book", sample, "", "frontmatter.sample_books");
+        }
+        for (String sample : sampleNamesFrom(frontmatter.getOrDefault("source_samples", frontmatter.get("sourceSamples")))) {
+            addTraceItem(trace, "source_sample", sample, "", "frontmatter.source_samples");
+        }
+        for (String sample : sampleNamesFrom(enabled.get("source_samples"))) {
+            addTraceItem(trace, "source_sample", sample, "", "enabled.yaml");
+        }
+        for (String sample : sampleNamesFrom(extractSampleSection(content))) {
+            addTraceItem(trace, "sample_book", sample, "", "Skill正文样本书籍");
+        }
+
+        Path projectRoot = projectRoot(projectId);
+        List<Path> analysisArtifacts = List.of(
+            projectRoot.resolve("analysis").resolve("cross_book").resolve("cross_book_synthesis.md"),
+            projectRoot.resolve("analysis").resolve("cross_book").resolve("technique_summary.json")
+        );
+        for (Path artifact : analysisArtifacts) {
+            if (Files.exists(artifact)) {
+                addTraceItem(trace, "analysis_artifact", artifact.getFileName().toString(), relative(projectId, artifact), "项目分析产物");
+            }
+        }
+
+        return deduplicateTrace(trace);
+    }
+
+    private List<Map<String, Object>> buildEvidenceItems(
+            String projectId,
+            String skillName,
+            String content,
+            Map<String, Object> frontmatter) {
+        List<Map<String, Object>> evidence = new ArrayList<>();
+        Object rawEvidence = frontmatter.getOrDefault("evidence", frontmatter.get("evidence_items"));
+        if (rawEvidence instanceof List<?> list) {
+            int index = 1;
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> raw) {
+                    Map<String, Object> evidenceItem = new LinkedHashMap<>();
+                    raw.forEach((key, value) -> evidenceItem.put(String.valueOf(key), value));
+                    evidenceItem.putIfAbsent("id", "frontmatter_" + index);
+                    evidenceItem.putIfAbsent("source", "frontmatter");
+                    evidence.add(evidenceItem);
+                } else if (item != null) {
+                    evidence.add(evidenceItem("frontmatter_" + index, "frontmatter", String.valueOf(item), "", 0));
+                }
+                index++;
+            }
+        }
+
+        Matcher frequencyMatcher = FREQUENCY_LINE_PATTERN.matcher(content);
+        int frequencyIndex = 1;
+        while (frequencyMatcher.find() && frequencyIndex <= 8) {
+            String line = frequencyMatcher.group(0).trim();
+            evidence.add(evidenceItem(
+                "frequency_" + frequencyIndex,
+                "frequency",
+                line.length() > 180 ? line.substring(0, 180) : line,
+                "skills/local/" + skillName + ".md",
+                lineNumber(content, frequencyMatcher.start())
+            ));
+            frequencyIndex++;
+        }
+
+        Matcher exampleMatcher = EXAMPLE_BLOCK_PATTERN.matcher(content);
+        int exampleIndex = 1;
+        while (exampleMatcher.find() && exampleIndex <= 5) {
+            String snippet = exampleMatcher.group(1).trim().replaceAll("\\s+", " ");
+            if (!snippet.isBlank()) {
+                evidence.add(evidenceItem(
+                    "example_" + exampleIndex,
+                    "example",
+                    snippet.length() > 220 ? snippet.substring(0, 220) : snippet,
+                    "skills/local/" + skillName + ".md",
+                    lineNumber(content, exampleMatcher.start())
+                ));
+                exampleIndex++;
+            }
+        }
+
+        if (Files.exists(projectRoot(projectId).resolve("analysis").resolve("cross_book").resolve("technique_summary.json"))) {
+            evidence.add(evidenceItem(
+                "technique_summary",
+                "analysis_artifact",
+                "引用项目 technique_summary.json 作为技巧统计来源",
+                "analysis/cross_book/technique_summary.json",
+                0
+            ));
+        }
+
+        return evidence;
+    }
+
+    private void addTraceItem(List<Map<String, Object>> trace, String type, String name, String path, String evidence) {
+        if (name == null || name.isBlank()) {
+            return;
+        }
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("type", type);
+        item.put("name", name.trim());
+        item.put("path", path == null ? "" : path);
+        item.put("evidence", evidence == null ? "" : evidence);
+        trace.add(item);
+    }
+
+    private List<Map<String, Object>> deduplicateTrace(List<Map<String, Object>> trace) {
+        Set<String> seen = new LinkedHashSet<>();
+        List<Map<String, Object>> deduped = new ArrayList<>();
+        for (Map<String, Object> item : trace) {
+            String key = item.get("type") + "|" + item.get("name") + "|" + item.get("path");
+            if (seen.add(key)) {
+                deduped.add(item);
+            }
+        }
+        return deduped;
+    }
+
+    private List<String> sampleNamesFrom(Object value) {
+        if (value == null) {
+            return List.of();
+        }
+        if (value instanceof List<?> list) {
+            return list.stream()
+                .map(String::valueOf)
+                .map(String::trim)
+                .filter(text -> !text.isBlank())
+                .toList();
+        }
+        String text = String.valueOf(value).trim();
+        if (text.isBlank()) {
+            return List.of();
+        }
+        String[] parts = text.split("[,，、;；\\n]+");
+        List<String> names = new ArrayList<>();
+        for (String part : parts) {
+            String name = part.replace("《", "").replace("》", "").trim();
+            if (!name.isBlank()) {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    private List<String> extractSampleSection(String content) {
+        List<String> samples = new ArrayList<>();
+        Matcher matcher = SAMPLE_LINE_PATTERN.matcher(content);
+        while (matcher.find() && samples.size() < 12) {
+            String sample = matcher.group(1).trim();
+            if (!sample.isBlank()) {
+                samples.add(sample);
+            }
+        }
+        return samples;
+    }
+
+    private Map<String, Object> evidenceItem(String id, String type, String text, String path, int line) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", id);
+        item.put("type", type);
+        item.put("text", text);
+        item.put("path", path);
+        if (line > 0) {
+            item.put("line", line);
+        }
+        return item;
+    }
+
+    private int lineNumber(String content, int offset) {
+        int line = 1;
+        int limit = Math.min(offset, content.length());
+        for (int index = 0; index < limit; index++) {
+            if (content.charAt(index) == '\n') {
+                line++;
+            }
+        }
+        return line;
+    }
+
     private void writeText(Path file, String content) {
         try {
             Files.createDirectories(file.getParent());
@@ -884,6 +1088,16 @@ public class SkillService {
                 if (!overlap.isEmpty() && left.getPriority().equals(right.getPriority())) {
                     conflicts.add(conflictItem("priority_tie", "info", left.getName(), right.getName(),
                         "相同 scope 下优先级相同，路由结果可能不稳定: " + String.join(",", overlap)));
+                }
+                if (!overlap.isEmpty()) {
+                    List<String> semanticConflicts = semanticRuleConflicts(
+                        skillContent(projectId, left.getName()),
+                        skillContent(projectId, right.getName())
+                    );
+                    for (String topic : semanticConflicts) {
+                        conflicts.add(conflictItem("semantic_rule_conflict", "warning", left.getName(), right.getName(),
+                            "同一 scope 下对「" + topic + "」存在必须/禁止式规则冲突"));
+                    }
                 }
             }
         }
@@ -1172,6 +1386,74 @@ public class SkillService {
         item.put("skillB", right);
         item.put("message", message);
         return item;
+    }
+
+    private List<String> semanticRuleConflicts(String leftContent, String rightContent) {
+        Map<String, String> topics = Map.ofEntries(
+            Map.entry("第一人称", "first_person"),
+            Map.entry("第三人称", "third_person"),
+            Map.entry("快节奏", "fast_pace"),
+            Map.entry("慢节奏", "slow_pace"),
+            Map.entry("多视角", "multi_pov"),
+            Map.entry("单视角", "single_pov"),
+            Map.entry("章末钩子", "ending_hook"),
+            Map.entry("心理描写", "inner_monologue"),
+            Map.entry("战斗场面", "battle_scene"),
+            Map.entry("日常铺垫", "slice_of_life"),
+            Map.entry("伏笔", "foreshadowing"),
+            Map.entry("提前揭示", "early_reveal")
+        );
+        Map<String, Integer> leftSignals = semanticSignals(leftContent, topics);
+        Map<String, Integer> rightSignals = semanticSignals(rightContent, topics);
+        List<String> conflicts = new ArrayList<>();
+        for (Map.Entry<String, String> topic : topics.entrySet()) {
+            int left = leftSignals.getOrDefault(topic.getValue(), 0);
+            int right = rightSignals.getOrDefault(topic.getValue(), 0);
+            if (left != 0 && right != 0 && left + right == 0) {
+                conflicts.add(topic.getKey());
+            }
+        }
+        return conflicts;
+    }
+
+    private Map<String, Integer> semanticSignals(String content, Map<String, String> topics) {
+        Map<String, Integer> signals = new LinkedHashMap<>();
+        if (content == null || content.isBlank()) {
+            return signals;
+        }
+        String normalized = content.toLowerCase(Locale.ROOT);
+        for (Map.Entry<String, String> topic : topics.entrySet()) {
+            String text = topic.getKey().toLowerCase(Locale.ROOT);
+            int polarity = polarityAroundTopic(normalized, text);
+            if (polarity != 0) {
+                signals.put(topic.getValue(), polarity);
+            }
+        }
+        return signals;
+    }
+
+    private int polarityAroundTopic(String normalized, String topic) {
+        int position = normalized.indexOf(topic);
+        if (position < 0) {
+            return 0;
+        }
+        int start = Math.max(0, position - 16);
+        int end = Math.min(normalized.length(), position + topic.length() + 16);
+        String window = normalized.substring(start, end);
+        boolean positive = containsAny(window, "必须", "保持", "强化", "优先", "增加", "使用", "应当", "需要");
+        boolean negative = containsAny(window, "禁止", "不得", "避免", "不要", "减少", "弱化", "不应");
+        if (positive == negative) {
+            return 0;
+        }
+        return positive ? 1 : -1;
+    }
+
+    private String skillContent(String projectId, String skillName) {
+        try {
+            return Files.readString(resolveSkillFile(projectId, skillName), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private long fileSize(Path file) {

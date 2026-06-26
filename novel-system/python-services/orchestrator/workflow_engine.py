@@ -27,7 +27,7 @@ import asyncio
 import re
 from copy import deepcopy
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agents.base import BaseAgent
 from schemas.agent_request import AgentRequest
@@ -174,8 +174,8 @@ class WorkflowEngine:
                     checkpoint_ref = self._save_running_checkpoint(request, workflow_id, state)
                     continue
 
-                node_response = await self._run_agent_node(request, node, state, node_id)
-                node_dump = node_response.model_dump(mode="json")
+                node_response, node_metadata = await self._run_agent_node(request, node, state, node_id)
+                node_dump = self._node_response_dump(node_response, node_metadata)
                 state["node_results"][node_id] = node_dump
                 state["last_node_id"] = node_id
                 output_refs.extend(node_response.output_refs or [])
@@ -261,7 +261,7 @@ class WorkflowEngine:
         node: Dict[str, Any],
         state: Dict[str, Any],
         node_id: str,
-    ) -> AgentResponse:
+    ) -> Tuple[AgentResponse, Dict[str, Any]]:
         agent_name = node.get("agent") or node.get("agent_name")
         if not agent_name:
             raise ValueError(f"Workflow node {node_id} is missing agent")
@@ -273,23 +273,41 @@ class WorkflowEngine:
         task_type = node.get("task_type") or agent_name
         input_refs = self._resolve(node.get("input_refs", {}), request, state)
         parameters = self._resolve(node.get("parameters", {}), request, state)
+        resolved_input_refs = input_refs if isinstance(input_refs, dict) else {}
+        resolved_parameters = parameters if isinstance(parameters, dict) else {}
         node_request = AgentRequest(
             task_id=f"{request.task_id}_{node_id}",
             project_id=request.project_id,
             task_type=task_type,
             user_input=request.user_input,
-            input_refs=input_refs if isinstance(input_refs, dict) else {},
+            input_refs=resolved_input_refs,
             model_profile_id=request.model_profile_id,
             skill_ids=request.skill_ids,
-            parameters=parameters if isinstance(parameters, dict) else {},
-            config=parameters if isinstance(parameters, dict) else {},
+            parameters=resolved_parameters,
+            config=resolved_parameters,
         )
+        node_metadata = {
+            "node_id": node_id,
+            "type": node.get("type", "agent"),
+            "agent": agent_name,
+            "task_type": task_type,
+            "input_refs": resolved_input_refs,
+            "parameters": resolved_parameters,
+        }
 
         agent = registry[agent_name]
         if self.llm_client and hasattr(self.llm_client, "profile_context"):
             async with self.llm_client.profile_context(request.model_profile_id, task_type):
-                return await agent.run(node_request)
-        return await agent.run(node_request)
+                response = await agent.run(node_request)
+                return response, node_metadata
+        response = await agent.run(node_request)
+        return response, node_metadata
+
+    def _node_response_dump(self, response: AgentResponse, node_metadata: Dict[str, Any]) -> Dict[str, Any]:
+        dump = response.model_dump(mode="json")
+        for key, value in node_metadata.items():
+            dump.setdefault(key, value)
+        return dump
 
     async def _run_parallel_node(
         self,
@@ -332,7 +350,7 @@ class WorkflowEngine:
         # fail_fast=True cancels still-running branches on the first failure.
         fail_fast = bool(node.get("fail_fast", False))
 
-        async def run_branch(branch_node: Dict[str, Any], branch_id: str) -> AgentResponse:
+        async def run_branch(branch_node: Dict[str, Any], branch_id: str) -> Tuple[AgentResponse, Dict[str, Any]]:
             return await self._run_agent_node(request, branch_node, state, branch_id)
 
         tasks: Dict[asyncio.Task, str] = {}
@@ -351,7 +369,7 @@ class WorkflowEngine:
             for task in done:
                 branch_id = tasks[task]
                 try:
-                    result = task.result()
+                    result, metadata = task.result()
                 except Exception as exc:  # noqa: BLE001 - record and continue
                     branch_statuses[branch_id] = "failed"
                     failed_branches.append(branch_id)
@@ -361,7 +379,7 @@ class WorkflowEngine:
                         "error": str(exc),
                     }
                     continue
-                dump = result.model_dump(mode="json")
+                dump = self._node_response_dump(result, metadata)
                 state["node_results"][branch_id] = dump
                 branch_statuses[branch_id] = result.status
                 output_refs.extend(result.output_refs or [])

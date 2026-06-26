@@ -205,7 +205,12 @@ async def test_workflow_resume_approval_continues_after_gate(tmp_path):
     assert resumed.structured_output["status"] == "success"
     assert resumed.structured_output["waiting_for_human"] is None
     assert resumed.structured_output["node_results"]["review_gate"]["decision"]["approved"] is True
-    assert resumed.structured_output["node_results"]["after_gate"]["status"] == "success"
+    after_gate = resumed.structured_output["node_results"]["after_gate"]
+    assert after_gate["status"] == "success"
+    assert after_gate["node_id"] == "after_gate"
+    assert after_gate["agent"] == "echo"
+    assert after_gate["task_type"] == "echo"
+    assert after_gate["parameters"] == {"approved_context": "chapter-1"}
     assert resumed.metrics["workflow_nodes_completed"] == 2
 
 
@@ -279,6 +284,10 @@ async def test_workflow_parallel_branches_feed_downstream_node(tmp_path):
     assert results["fanout"]["status"] == "success"
     assert results["fanout"]["branch_count"] == 2
     assert results["fanout"]["branch_statuses"] == {"branch_a": "success", "branch_b": "success"}
+    assert results["branch_a"]["node_id"] == "branch_a"
+    assert results["branch_a"]["agent"] == "echo"
+    assert results["branch_a"]["task_type"] == "echo"
+    assert results["branch_a"]["parameters"] == {"sample_id": "sample_a"}
     assert results["branch_a"]["structured_output"]["parameters"]["sample_id"] == "sample_a"
     assert results["branch_b"]["structured_output"]["parameters"]["sample_id"] == "sample_b"
     assert results["after_parallel"]["structured_output"]["parameters"]["branch_count"] == 2

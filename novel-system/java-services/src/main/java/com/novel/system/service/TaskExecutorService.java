@@ -150,13 +150,87 @@ public class TaskExecutorService {
             return;
         }
 
-        if ("sample_import".equals(task.getTaskType())) {
-            Object sampleId = taskValue(task, "sample_id");
+        syncTaskArtifacts(
+            task.getId(),
+            task.getProjectId(),
+            task.getTaskType(),
+            task.getInputRefs(),
+            task.getParameters(),
+            task.getResult()
+        );
+
+        if ("workflow".equals(task.getTaskType()) || "workflow".equals(task.getAgentName())) {
+            syncWorkflowNodeArtifacts(task);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void syncWorkflowNodeArtifacts(Task task) {
+        Map<String, Object> result = task.getResult();
+        Object nodeResultsValue = result != null ? result.get("node_results") : null;
+        if (!(nodeResultsValue instanceof Map<?, ?> nodeResults)) {
+            return;
+        }
+
+        nodeResults.forEach((nodeId, nodeResultValue) -> {
+            if (!(nodeResultValue instanceof Map<?, ?> nodeResult)) {
+                return;
+            }
+            Map<String, Object> nodeResultMap = (Map<String, Object>) nodeResult;
+            Object statusValue = nodeResultMap.get("status");
+            String nodeStatus = statusValue != null ? statusValue.toString() : "";
+            if (!"success".equalsIgnoreCase(nodeStatus) && !"partial".equalsIgnoreCase(nodeStatus)) {
+                return;
+            }
+
+            String taskType = stringValue(nodeResultMap.get("task_type"));
+            if (taskType == null || taskType.isBlank()) {
+                taskType = taskTypeFromAgentName(stringValue(nodeResultMap.get("agent_name")));
+            }
+            if (taskType == null || taskType.isBlank()) {
+                taskType = taskTypeFromAgentName(stringValue(nodeResultMap.get("agent")));
+            }
+            if (taskType == null || taskType.isBlank()) {
+                return;
+            }
+
+            Map<String, Object> inputRefs = asMutableMap(nodeResultMap.get("input_refs"));
+            Map<String, Object> parameters = asMutableMap(nodeResultMap.get("parameters"));
+            Map<String, Object> structuredOutput = asMutableMap(nodeResultMap.get("structured_output"));
+            try {
+                syncTaskArtifacts(
+                    task.getId() + ":" + nodeId,
+                    task.getProjectId(),
+                    taskType,
+                    inputRefs,
+                    parameters,
+                    structuredOutput
+                );
+            } catch (Exception e) {
+                log.warn(
+                    "Failed to sync workflow node artifact for task {} node {}: {}",
+                    task.getId(),
+                    nodeId,
+                    e.getMessage(),
+                    e
+                );
+            }
+        });
+    }
+
+    private void syncTaskArtifacts(
+            String taskId,
+            String projectId,
+            String taskType,
+            Map<String, Object> inputRefs,
+            Map<String, Object> parameters,
+            Map<String, Object> result) {
+        if ("sample_import".equals(taskType)) {
+            Object sampleId = taskValue(inputRefs, parameters, "sample_id");
             if (sampleId == null) {
                 return;
             }
 
-            Map<String, Object> result = task.getResult();
             String title = result != null && result.get("title") != null
                 ? result.get("title").toString()
                 : null;
@@ -164,30 +238,30 @@ public class TaskExecutorService {
             Integer totalChapters = toInteger(result != null ? result.get("total_chapters") : null);
 
             sampleService.updateSampleMetadata(sampleId.toString(), title, totalChars, totalChapters);
-            sampleService.syncSampleStructureFromWorkspace(task.getProjectId(), sampleId.toString());
+            sampleService.syncSampleStructureFromWorkspace(projectId, sampleId.toString());
             sampleService.updateSampleStatus(sampleId.toString(), com.novel.system.entity.Sample.SampleStatus.CHUNKED);
-        } else if ("full_text_analysis".equals(task.getTaskType()) || "analysis_repair".equals(task.getTaskType())) {
-            Object sampleId = taskValue(task, "sample_id");
+        } else if ("full_text_analysis".equals(taskType) || "analysis_repair".equals(taskType)) {
+            Object sampleId = taskValue(inputRefs, parameters, "sample_id");
             if (sampleId != null) {
-                sampleService.syncSampleStructureFromWorkspace(task.getProjectId(), sampleId.toString());
-                analysisResultService.syncAnalysisResultsFromWorkspace(task.getProjectId(), sampleId.toString());
+                sampleService.syncSampleStructureFromWorkspace(projectId, sampleId.toString());
+                analysisResultService.syncAnalysisResultsFromWorkspace(projectId, sampleId.toString());
                 sampleService.updateSampleStatus(sampleId.toString(), com.novel.system.entity.Sample.SampleStatus.ANALYZED);
             }
-        } else if ("skill_generation".equals(task.getTaskType())) {
-            skillService.syncSkillProfile(task.getProjectId());
-        } else if ("outline_generation".equals(task.getTaskType()) || "outline_review".equals(task.getTaskType())) {
-            Object bookId = taskValue(task, "book_id");
+        } else if ("skill_generation".equals(taskType)) {
+            skillService.syncSkillProfile(projectId);
+        } else if ("outline_generation".equals(taskType) || "outline_review".equals(taskType)) {
+            Object bookId = taskValue(inputRefs, parameters, "book_id");
             outlineArtifactService.syncOutlineFromWorkspace(
-                task.getProjectId(),
+                projectId,
                 bookId != null ? bookId.toString() : "default"
             );
-        } else if ("chapter_writing".equals(task.getTaskType()) || "chapter_revision".equals(task.getTaskType())) {
-            Object bookId = taskValue(task, "book_id");
-            Integer volumeNumber = toInteger(taskValue(task, "volume_number"));
-            Integer chapterNumber = toInteger(taskValue(task, "chapter_number"));
+        } else if ("chapter_writing".equals(taskType) || "chapter_revision".equals(taskType)) {
+            Object bookId = taskValue(inputRefs, parameters, "book_id");
+            Integer volumeNumber = toInteger(taskValue(inputRefs, parameters, "volume_number"));
+            Integer chapterNumber = toInteger(taskValue(inputRefs, parameters, "chapter_number"));
             if (bookId != null && volumeNumber != null && chapterNumber != null) {
                 chapterArtifactService.syncChapterFromWorkspace(
-                    task.getProjectId(),
+                    projectId,
                     bookId.toString(),
                     volumeNumber,
                     chapterNumber,
@@ -195,43 +269,76 @@ public class TaskExecutorService {
                 );
             }
         } else if (
-            "memory_extraction".equals(task.getTaskType())
-                || "continuity_check".equals(task.getTaskType())
-                || "memory_audit".equals(task.getTaskType())
+            "memory_extraction".equals(taskType)
+                || "continuity_check".equals(taskType)
+                || "memory_audit".equals(taskType)
         ) {
             try {
-                memoryArtifactService.syncMemoryFromWorkspace(task.getProjectId(), task.getParameters());
+                memoryArtifactService.syncMemoryFromWorkspace(projectId, parameters);
             } catch (Exception e) {
-                log.warn("Failed to sync memory artifact for task {}: {}", task.getId(), e.getMessage(), e);
+                log.warn("Failed to sync memory artifact for task {}: {}", taskId, e.getMessage(), e);
             }
-        } else if ("graph_build".equals(task.getTaskType())) {
+        } else if ("graph_build".equals(taskType)) {
             try {
-                Object bookId = taskValue(task, "book_id");
+                Object bookId = taskValue(inputRefs, parameters, "book_id");
                 Map<String, Object> syncRequest = new HashMap<>();
                 if (bookId != null) {
                     syncRequest.put("book_id", bookId.toString());
                 }
-                graphArtifactDbService.syncGraphFromWorkspace(task.getProjectId(), syncRequest);
+                graphArtifactDbService.syncGraphFromWorkspace(projectId, syncRequest);
             } catch (Exception e) {
-                log.warn("Failed to sync graph artifact for task {}: {}", task.getId(), e.getMessage(), e);
+                log.warn("Failed to sync graph artifact for task {}: {}", taskId, e.getMessage(), e);
             }
-        } else if ("retrieval_index".equals(task.getTaskType())) {
+        } else if ("retrieval_index".equals(taskType)) {
             try {
-                retrievalArtifactDbService.syncRetrievalFromWorkspace(task.getProjectId(), task.getParameters());
+                retrievalArtifactDbService.syncRetrievalFromWorkspace(projectId, parameters);
             } catch (Exception e) {
-                log.warn("Failed to sync retrieval artifact for task {}: {}", task.getId(), e.getMessage(), e);
+                log.warn("Failed to sync retrieval artifact for task {}: {}", taskId, e.getMessage(), e);
             }
         }
     }
 
-    private Object taskValue(Task task, String key) {
-        if (task.getInputRefs() != null && task.getInputRefs().containsKey(key)) {
-            return task.getInputRefs().get(key);
+    private Object taskValue(Map<String, Object> inputRefs, Map<String, Object> parameters, String key) {
+        if (inputRefs != null && inputRefs.containsKey(key)) {
+            return inputRefs.get(key);
         }
-        if (task.getParameters() != null && task.getParameters().containsKey(key)) {
-            return task.getParameters().get(key);
+        if (parameters != null && parameters.containsKey(key)) {
+            return parameters.get(key);
         }
         return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> asMutableMap(Object value) {
+        if (value instanceof Map<?, ?> mapValue) {
+            return new HashMap<>((Map<String, Object>) mapValue);
+        }
+        return new HashMap<>();
+    }
+
+    private String stringValue(Object value) {
+        return value != null ? value.toString() : null;
+    }
+
+    private String taskTypeFromAgentName(String agentName) {
+        if (agentName == null || agentName.isBlank()) {
+            return null;
+        }
+        return switch (agentName) {
+            case "SampleImportAgent", "sample_import" -> "sample_import";
+            case "FullTextAnalysisAgent", "full_text_analysis" -> "full_text_analysis";
+            case "AnalysisRepairAgent", "analysis_repair" -> "analysis_repair";
+            case "SkillGeneratorAgent", "skill_generation" -> "skill_generation";
+            case "OutlineGeneratorAgent", "outline_generation" -> "outline_generation";
+            case "OutlineReviewAgent", "outline_review" -> "outline_review";
+            case "ChapterWriterAgent", "chapter_writing" -> "chapter_writing";
+            case "RevisionAgent", "chapter_revision" -> "chapter_revision";
+            case "MemoryExtractorAgent", "memory_extraction" -> "memory_extraction";
+            case "MemoryQueryAgent", "memory_query" -> "memory_query";
+            case "GraphBuilderAgent", "graph_build" -> "graph_build";
+            case "RetrievalIndexAgent", "retrieval_index" -> "retrieval_index";
+            default -> null;
+        };
     }
 
     private Integer toInteger(Object value) {

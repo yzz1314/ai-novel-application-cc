@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 @Slf4j
 @Service
@@ -38,7 +39,11 @@ import java.util.regex.Pattern;
 public class ModelProfileService {
 
     private static final Pattern SAFE_PROFILE_ID = Pattern.compile("^[A-Za-z0-9_-]+$");
+    private static final Pattern SAFE_VERSION_ID = Pattern.compile("^model_profiles_\\d{17}$");
     private static final DateTimeFormatter SNAPSHOT_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
+    private static final String STORE_FILENAME = "model_profiles.json";
+    private static final String SNAPSHOT_PREFIX = "model_profiles_";
+    private static final String JSON_SUFFIX = ".json";
     private static final List<String> MODEL_KEYS = List.of(
         "mainModel",
         "fastModel",
@@ -205,6 +210,89 @@ public class ModelProfileService {
         return response;
     }
 
+    @Transactional
+    public List<Map<String, Object>> listVersions() {
+        ensureInitialized();
+        Path configDir = storeFile().getParent();
+        if (!Files.exists(configDir)) {
+            return List.of();
+        }
+        try (Stream<Path> paths = Files.list(configDir)) {
+            return paths
+                .filter(this::isVersionFile)
+                .sorted(Comparator.comparing(this::versionIdFromFile).reversed())
+                .map(file -> versionSummary(file, readStore(file)))
+                .toList();
+        } catch (IOException e) {
+            throw new RuntimeException("读取模型配置版本列表失败", e);
+        }
+    }
+
+    @Transactional
+    public Map<String, Object> getVersion(String versionId) {
+        ensureInitialized();
+        Path file = versionFile(versionId);
+        if (!Files.exists(file)) {
+            throw new ResourceNotFoundException("模型配置版本不存在: " + versionId);
+        }
+        Map<String, Object> store = readStore(file);
+        Map<String, Object> response = versionSummary(file, store);
+        response.put("profiles", sanitizeProfileList(store));
+        response.put("store", sanitizeStore(store));
+        return response;
+    }
+
+    @Transactional
+    public Map<String, Object> restoreVersion(String versionId, Map<String, Object> request) {
+        ensureInitialized();
+        Path file = versionFile(versionId);
+        if (!Files.exists(file)) {
+            throw new ResourceNotFoundException("模型配置版本不存在: " + versionId);
+        }
+
+        Map<String, Object> store = readStore(file);
+        List<Map<String, Object>> profiles = profileList(store);
+        if (profiles.isEmpty()) {
+            throw new IllegalArgumentException("模型配置版本不包含可恢复的配置: " + versionId);
+        }
+
+        Path previousSnapshot = exportStoreSnapshot(true);
+        modelProfileRepository.deleteAll();
+        for (Map<String, Object> profile : profiles) {
+            String profileId = asString(profile.get("profileId"), "");
+            validateProfileId(profileId);
+            modelProfileRepository.save(buildEntity(profileId, profile, null));
+        }
+
+        String defaultProfileId = asString(store.get("defaultProfileId"), "");
+        if (defaultProfileId.isBlank() || !modelProfileRepository.existsById(defaultProfileId)) {
+            defaultProfileId = profiles.stream()
+                .map(profile -> asString(profile.get("profileId"), ""))
+                .filter(profileId -> !profileId.isBlank())
+                .findFirst()
+                .orElse("");
+        }
+        if (!defaultProfileId.isBlank()) {
+            clearDefaultProfile();
+            ModelProfile defaultProfile = getEntity(defaultProfileId);
+            defaultProfile.setDefaultProfile(true);
+            modelProfileRepository.save(defaultProfile);
+        }
+
+        exportStoreSnapshot(false);
+
+        Map<String, Object> options = request == null ? Map.of() : request;
+        Map<String, Object> response = versionSummary(file, store);
+        response.put("status", "restored");
+        response.put("restoredProfileCount", profiles.size());
+        response.put("defaultProfileId", defaultProfileId);
+        response.put("previousSnapshotPath", previousSnapshot == null ? "" : relativeConfigPath(previousSnapshot));
+        response.put("actor", asString(options.get("actor"), "system"));
+        response.put("note", asString(options.get("note"), ""));
+        response.put("restoredAt", LocalDateTime.now().toString());
+        return response;
+    }
+
     private void ensureInitialized() {
         if (modelProfileRepository.count() > 0) {
             return;
@@ -239,6 +327,10 @@ public class ModelProfileService {
         if (!Files.exists(file)) {
             return defaultStore();
         }
+        return readStore(file);
+    }
+
+    private Map<String, Object> readStore(Path file) {
         try {
             return objectMapper.readValue(file.toFile(), new TypeReference<>() {});
         } catch (IOException e) {
@@ -246,18 +338,103 @@ public class ModelProfileService {
         }
     }
 
-    private void exportStoreSnapshot(boolean snapshotBeforeWrite) {
+    private Path exportStoreSnapshot(boolean snapshotBeforeWrite) {
         Path file = storeFile();
+        Path snapshot = null;
         try {
             Files.createDirectories(file.getParent());
             if (snapshotBeforeWrite && Files.exists(file)) {
-                Path snapshot = file.getParent().resolve("model_profiles_" + LocalDateTime.now().format(SNAPSHOT_TIMESTAMP) + ".json");
+                snapshot = nextSnapshotFile(file.getParent());
                 Files.copy(file, snapshot);
             }
             objectMapper.writerWithDefaultPrettyPrinter().writeValue(file.toFile(), exportStore());
+            return snapshot;
         } catch (IOException e) {
             throw new RuntimeException("写入模型配置兼容文件失败", e);
         }
+    }
+
+    private Path nextSnapshotFile(Path configDir) {
+        LocalDateTime timestamp = LocalDateTime.now();
+        Path snapshot = configDir.resolve(SNAPSHOT_PREFIX + timestamp.format(SNAPSHOT_TIMESTAMP) + JSON_SUFFIX);
+        while (Files.exists(snapshot)) {
+            timestamp = timestamp.plusNanos(1_000_000);
+            snapshot = configDir.resolve(SNAPSHOT_PREFIX + timestamp.format(SNAPSHOT_TIMESTAMP) + JSON_SUFFIX);
+        }
+        return snapshot;
+    }
+
+    private boolean isVersionFile(Path path) {
+        String filename = path.getFileName().toString();
+        return Files.isRegularFile(path)
+            && filename.startsWith(SNAPSHOT_PREFIX)
+            && filename.endsWith(JSON_SUFFIX)
+            && !STORE_FILENAME.equals(filename)
+            && SAFE_VERSION_ID.matcher(stripSuffix(filename, JSON_SUFFIX)).matches();
+    }
+
+    private Path versionFile(String versionId) {
+        validateVersionId(versionId);
+        return storeFile().getParent().resolve(versionId + JSON_SUFFIX).normalize();
+    }
+
+    private Map<String, Object> versionSummary(Path file, Map<String, Object> store) {
+        List<Map<String, Object>> profiles = profileList(store);
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("versionId", versionIdFromFile(file));
+        summary.put("path", relativeConfigPath(file));
+        summary.put("storeVersion", asString(store.get("version"), ""));
+        summary.put("storage", asString(store.get("storage"), ""));
+        summary.put("defaultProfileId", asString(store.get("defaultProfileId"), ""));
+        summary.put("profileCount", profiles.size());
+        summary.put("profileIds", profiles.stream().map(profile -> asString(profile.get("profileId"), "")).filter(id -> !id.isBlank()).toList());
+        summary.put("createdAt", createdAtFromVersionFile(file));
+        summary.put("updatedAt", asString(store.get("updatedAt"), ""));
+        return summary;
+    }
+
+    private List<Map<String, Object>> sanitizeProfileList(Map<String, Object> store) {
+        return profileList(store).stream()
+            .map(profile -> sanitizeProfile(profile, false))
+            .toList();
+    }
+
+    private Map<String, Object> sanitizeStore(Map<String, Object> store) {
+        Map<String, Object> sanitized = new LinkedHashMap<>(store);
+        sanitized.put("profiles", sanitizeProfileList(store));
+        sanitized.put("secretsSanitized", true);
+        return sanitized;
+    }
+
+    private String versionIdFromFile(Path file) {
+        return stripSuffix(file.getFileName().toString(), JSON_SUFFIX);
+    }
+
+    private String createdAtFromVersionFile(Path file) {
+        String timestamp = stripSuffix(stripPrefix(file.getFileName().toString(), SNAPSHOT_PREFIX), JSON_SUFFIX);
+        try {
+            return LocalDateTime.parse(timestamp, SNAPSHOT_TIMESTAMP).toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private String relativeConfigPath(Path path) {
+        Path base = Paths.get(basePath).normalize();
+        Path normalized = path.normalize();
+        try {
+            return base.relativize(normalized).toString().replace('\\', '/');
+        } catch (IllegalArgumentException e) {
+            return normalized.toString();
+        }
+    }
+
+    private String stripPrefix(String value, String prefix) {
+        return value != null && value.startsWith(prefix) ? value.substring(prefix.length()) : value;
+    }
+
+    private String stripSuffix(String value, String suffix) {
+        return value != null && value.endsWith(suffix) ? value.substring(0, value.length() - suffix.length()) : value;
     }
 
     private Map<String, Object> exportStore() {
@@ -550,8 +727,14 @@ public class ModelProfileService {
         }
     }
 
+    private void validateVersionId(String versionId) {
+        if (versionId == null || !SAFE_VERSION_ID.matcher(versionId).matches()) {
+            throw new IllegalArgumentException("非法模型配置版本ID: " + versionId);
+        }
+    }
+
     private Path storeFile() {
-        return Paths.get(basePath, "config", "model_profiles.json").normalize();
+        return Paths.get(basePath, "config", STORE_FILENAME).normalize();
     }
 
     private String encryptIfNeeded(String secret) {

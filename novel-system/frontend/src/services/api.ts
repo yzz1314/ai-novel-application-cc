@@ -33,6 +33,10 @@ export const modelProfileApi = {
   getList: () => request<any[]>(api.get('/model-profiles')),
   getDefault: () => request(api.get('/model-profiles/default')),
   create: (data: any) => request(api.post('/model-profiles', data || {})),
+  getVersions: () => request<any[]>(api.get('/model-profiles/versions')),
+  getVersion: (versionId: string) => request(api.get(`/model-profiles/versions/${versionId}`)),
+  restoreVersion: (versionId: string, data?: any) =>
+    request(api.post(`/model-profiles/versions/${versionId}/restore`, data || {})),
   get: (profileId: string) => request(api.get(`/model-profiles/${profileId}`)),
   update: (profileId: string, data: any) => request(api.patch(`/model-profiles/${profileId}`, data || {})),
   delete: (profileId: string) => request(api.delete(`/model-profiles/${profileId}`)),

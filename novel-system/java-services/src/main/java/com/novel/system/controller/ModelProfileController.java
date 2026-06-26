@@ -38,6 +38,23 @@ public class ModelProfileController {
         return ResponseEntity.ok(modelProfileService.createProfile(request));
     }
 
+    @GetMapping("/versions")
+    public ResponseEntity<List<Map<String, Object>>> listVersions() {
+        return ResponseEntity.ok(modelProfileService.listVersions());
+    }
+
+    @GetMapping("/versions/{versionId}")
+    public ResponseEntity<Map<String, Object>> getVersion(@PathVariable String versionId) {
+        return ResponseEntity.ok(modelProfileService.getVersion(versionId));
+    }
+
+    @PostMapping("/versions/{versionId}/restore")
+    public ResponseEntity<Map<String, Object>> restoreVersion(
+            @PathVariable String versionId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(modelProfileService.restoreVersion(versionId, request));
+    }
+
     @GetMapping("/{profileId}")
     public ResponseEntity<Map<String, Object>> getProfile(@PathVariable String profileId) {
         return ResponseEntity.ok(modelProfileService.getProfile(profileId));

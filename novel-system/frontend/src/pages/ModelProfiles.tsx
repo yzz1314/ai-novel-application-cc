@@ -9,7 +9,6 @@ import {
   Form,
   Input,
   InputNumber,
-  Modal,
   Popconfirm,
   Row,
   Select,
@@ -25,8 +24,11 @@ import {
   CheckCircleOutlined,
   DeleteOutlined,
   EditOutlined,
+  FileSearchOutlined,
+  HistoryOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RollbackOutlined,
   StarOutlined,
 } from '@ant-design/icons';
 import { modelProfileApi } from '../services/api';
@@ -48,6 +50,11 @@ const ModelProfiles: React.FC = () => {
   const [editingProfile, setEditingProfile] = useState<any>(null);
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState<any>(null);
+  const [versions, setVersions] = useState<any[]>([]);
+  const [versionDrawerOpen, setVersionDrawerOpen] = useState(false);
+  const [versionDetail, setVersionDetail] = useState<any>(null);
+  const [versionLoading, setVersionLoading] = useState(false);
+  const [restoringVersion, setRestoringVersion] = useState<string | null>(null);
   const [form] = Form.useForm();
 
   useEffect(() => {
@@ -59,12 +66,14 @@ const ModelProfiles: React.FC = () => {
   const loadProfiles = async () => {
     try {
       setLoading(true);
-      const [profileData, defaultData] = await Promise.all([
+      const [profileData, defaultData, versionData] = await Promise.all([
         modelProfileApi.getList().catch(() => []),
         modelProfileApi.getDefault().catch(() => null),
+        modelProfileApi.getVersions().catch(() => []),
       ]);
       setProfiles(profileData || []);
       setDefaultProfile(defaultData);
+      setVersions(versionData || []);
     } catch (error) {
       message.error('加载模型配置失败');
     } finally {
@@ -162,6 +171,48 @@ const ModelProfiles: React.FC = () => {
     }
   };
 
+  const openVersionDrawer = async () => {
+    setVersionDrawerOpen(true);
+    try {
+      setVersionLoading(true);
+      const data = await modelProfileApi.getVersions();
+      setVersions(data || []);
+    } catch (error) {
+      message.error('加载模型配置版本失败');
+    } finally {
+      setVersionLoading(false);
+    }
+  };
+
+  const openVersion = async (version: any) => {
+    try {
+      setVersionLoading(true);
+      const data = await modelProfileApi.getVersion(version.versionId);
+      setVersionDetail(data);
+    } catch (error) {
+      message.error('加载模型配置版本详情失败');
+    } finally {
+      setVersionLoading(false);
+    }
+  };
+
+  const restoreVersion = async (version: any) => {
+    try {
+      setRestoringVersion(version.versionId);
+      await modelProfileApi.restoreVersion(version.versionId, {
+        actor: 'frontend',
+        note: 'restore from model profile versions drawer',
+      });
+      message.success('模型配置版本已恢复');
+      setVersionDetail(null);
+      await loadProfiles();
+    } catch (error) {
+      message.error('恢复模型配置版本失败');
+    } finally {
+      setRestoringVersion(null);
+    }
+  };
+
   const columns = useMemo(() => [
     {
       title: '配置',
@@ -223,6 +274,59 @@ const ModelProfiles: React.FC = () => {
     },
   ], [defaultProfileId]);
 
+  const versionColumns = useMemo(() => [
+    {
+      title: '版本',
+      dataIndex: 'versionId',
+      key: 'versionId',
+      render: (value: string) => <Text code>{value}</Text>,
+    },
+    {
+      title: '配置数',
+      dataIndex: 'profileCount',
+      key: 'profileCount',
+      width: 90,
+    },
+    {
+      title: '默认配置',
+      dataIndex: 'defaultProfileId',
+      key: 'defaultProfileId',
+      width: 160,
+      render: (value: string) => value ? <Tag color="gold">{value}</Tag> : <Text type="secondary">未设置</Text>,
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'createdAt',
+      key: 'createdAt',
+      width: 190,
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 180,
+      render: (_: any, record: any) => (
+        <Space size="small">
+          <Button type="link" icon={<FileSearchOutlined />} onClick={() => openVersion(record)}>查看</Button>
+          <Popconfirm
+            title="恢复这个模型配置版本？"
+            description="恢复前会自动保存当前模型配置快照。"
+            okText="恢复"
+            cancelText="取消"
+            onConfirm={() => restoreVersion(record)}
+          >
+            <Button
+              type="link"
+              icon={<RollbackOutlined />}
+              loading={restoringVersion === record.versionId}
+            >
+              恢复
+            </Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ], [restoringVersion]);
+
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Card>
@@ -233,6 +337,7 @@ const ModelProfiles: React.FC = () => {
           </div>
           <Space>
             <Button icon={<ReloadOutlined />} onClick={loadProfiles}>刷新</Button>
+            <Button icon={<HistoryOutlined />} onClick={openVersionDrawer}>版本 {versions.length}</Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建配置</Button>
           </Space>
         </Space>
@@ -342,6 +447,72 @@ const ModelProfiles: React.FC = () => {
                   title: '说明',
                   dataIndex: 'message',
                   key: 'message',
+                },
+              ]}
+            />
+          </Card>
+        )}
+      </Drawer>
+
+      <Drawer
+        title="模型配置版本"
+        width={900}
+        open={versionDrawerOpen}
+        onClose={() => {
+          setVersionDrawerOpen(false);
+          setVersionDetail(null);
+        }}
+        extra={<Button icon={<ReloadOutlined />} loading={versionLoading} onClick={openVersionDrawer}>刷新</Button>}
+      >
+        <Table
+          size="small"
+          loading={versionLoading}
+          rowKey="versionId"
+          dataSource={versions}
+          columns={versionColumns}
+          pagination={{ pageSize: 8 }}
+        />
+
+        {versionDetail && (
+          <Card size="small" title="版本详情" style={{ marginTop: 16 }}>
+            <Descriptions column={2} size="small">
+              <Descriptions.Item label="版本">
+                <Text code>{versionDetail.versionId}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="配置数">{versionDetail.profileCount}</Descriptions.Item>
+              <Descriptions.Item label="默认配置">{versionDetail.defaultProfileId || '未设置'}</Descriptions.Item>
+              <Descriptions.Item label="路径">{versionDetail.path}</Descriptions.Item>
+            </Descriptions>
+            <Table
+              size="small"
+              rowKey="profileId"
+              dataSource={versionDetail.profiles || []}
+              pagination={false}
+              style={{ marginTop: 12 }}
+              columns={[
+                {
+                  title: '配置',
+                  key: 'profile',
+                  render: (_: any, record: any) => (
+                    <Space direction="vertical" size={0}>
+                      <Space>
+                        <Text strong>{record.profileName || record.profileId}</Text>
+                        {record.profileId === versionDetail.defaultProfileId && <Tag color="gold">默认</Tag>}
+                      </Space>
+                      <Text type="secondary">{record.profileId}</Text>
+                    </Space>
+                  ),
+                },
+                {
+                  title: '主模型',
+                  key: 'mainModel',
+                  render: (_: any, record: any) => <ModelTag model={record.mainModel} />,
+                },
+                {
+                  title: '更新时间',
+                  dataIndex: 'updatedAt',
+                  key: 'updatedAt',
+                  width: 190,
                 },
               ]}
             />

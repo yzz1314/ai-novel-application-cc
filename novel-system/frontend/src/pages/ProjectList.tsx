@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Card, Table, Button, Space, Tag, Modal, Form, Input, message } from 'antd';
+import { Card, Table, Button, Space, Tag, Modal, Form, Input, Select, message } from 'antd';
 import { PlusOutlined, EyeOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { projectApi } from '../services/api';
@@ -9,11 +9,35 @@ interface Project {
   id: string;
   projectName: string;
   description: string;
-  genre: string;
+  sampleGroupType: string;
   status: string;
   createdAt: string;
   sampleCount: number;
 }
+
+const sampleGroupLabels: Record<string, string> = {
+  SAME_AUTHOR: '同作者样本',
+  SAME_GENRE: '同类型样本',
+  MIXED: '混合样本',
+};
+
+const statusLabels: Record<string, string> = {
+  CREATED: '已创建',
+  INGESTING: '导入中',
+  ANALYZED: '已分析',
+  OUTLINING: '大纲中',
+  WRITING: '创作中',
+  ARCHIVED: '已归档',
+};
+
+const statusColors: Record<string, string> = {
+  CREATED: 'default',
+  INGESTING: 'processing',
+  ANALYZED: 'blue',
+  OUTLINING: 'purple',
+  WRITING: 'green',
+  ARCHIVED: 'default',
+};
 
 const ProjectList: React.FC = () => {
   const navigate = useNavigate();
@@ -30,8 +54,8 @@ const ProjectList: React.FC = () => {
     id: project.id,
     projectName: project.projectName || project.name || project.title || project.id,
     description: project.description || '',
-    genre: project.genre || project.sampleGroupType || project.sample_group_type || '-',
-    status: (project.status || '').toLowerCase(),
+    sampleGroupType: project.sampleGroupType || project.sample_group_type || 'SAME_GENRE',
+    status: (project.status || 'CREATED').toUpperCase(),
     createdAt: project.createdAt || project.created_at || '',
     sampleCount: project.sampleCount || 0,
   });
@@ -63,10 +87,12 @@ const ProjectList: React.FC = () => {
       key: 'description',
     },
     {
-      title: '类型',
-      dataIndex: 'genre',
-      key: 'genre',
-      render: (genre) => <Tag color="blue">{genre}</Tag>,
+      title: '样本分组',
+      dataIndex: 'sampleGroupType',
+      key: 'sampleGroupType',
+      render: (sampleGroupType) => (
+        <Tag color="blue">{sampleGroupLabels[sampleGroupType] || sampleGroupType}</Tag>
+      ),
     },
     {
       title: '样本数量',
@@ -77,14 +103,9 @@ const ProjectList: React.FC = () => {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      render: (status) => {
-        const colorMap: Record<string, string> = {
-          'active': 'green',
-          'completed': 'blue',
-          'archived': 'default'
-        };
-        return <Tag color={colorMap[status] || 'default'}>{status}</Tag>;
-      },
+      render: (status) => (
+        <Tag color={statusColors[status] || 'default'}>{statusLabels[status] || status}</Tag>
+      ),
     },
     {
       title: '创建时间',
@@ -122,7 +143,7 @@ const ProjectList: React.FC = () => {
       await projectApi.create({
         name: values.projectName,
         description: values.description,
-        sampleGroupType: 'SAME_GENRE',
+        sampleGroupType: values.sampleGroupType,
       });
       message.success('项目创建成功');
       setModalVisible(false);
@@ -138,7 +159,9 @@ const ProjectList: React.FC = () => {
   const handleDelete = async (projectId: string) => {
     Modal.confirm({
       title: '确认删除',
-      content: '删除后数据将无法恢复，是否继续？',
+      content: '删除后项目会归档，是否继续？',
+      okText: '确认',
+      cancelText: '取消',
       onOk: async () => {
         try {
           await projectApi.delete(projectId);
@@ -182,6 +205,8 @@ const ProjectList: React.FC = () => {
           form.resetFields();
         }}
         confirmLoading={loading}
+        okText="创建"
+        cancelText="取消"
       >
         <Form
           form={form}
@@ -205,11 +230,18 @@ const ProjectList: React.FC = () => {
             />
           </Form.Item>
           <Form.Item
-            name="genre"
-            label="小说类型"
-            rules={[{ required: true, message: '请输入小说类型' }]}
+            name="sampleGroupType"
+            label="样本分组类型"
+            initialValue="SAME_GENRE"
+            rules={[{ required: true, message: '请选择样本分组类型' }]}
           >
-            <Input placeholder="例如：玄幻、都市、历史" />
+            <Select
+              options={[
+                { value: 'SAME_GENRE', label: sampleGroupLabels.SAME_GENRE },
+                { value: 'SAME_AUTHOR', label: sampleGroupLabels.SAME_AUTHOR },
+                { value: 'MIXED', label: sampleGroupLabels.MIXED },
+              ]}
+            />
           </Form.Item>
         </Form>
       </Modal>

@@ -3,10 +3,13 @@ LLM客户端
 统一的LLM调用接口，支持多种模型
 """
 import asyncio
+import copy
+import hashlib
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Dict, Any, Optional
+import time
+from typing import Dict, Any, Optional, List
 from litellm import acompletion
 import json
 import re
@@ -41,6 +44,9 @@ class LLMClient:
         self.logger = get_logger("LLMClient")
         self.model_config = model_config or self._get_default_config()
         self.profile_store_path = Path(settings.PROJECT_BASE_PATH) / "config" / "model_profiles.json"
+        self.response_cache: Dict[str, Dict[str, Any]] = {}
+        self.rate_limit_state: Dict[str, float] = {}
+        self.rate_limit_lock = asyncio.Lock()
 
     def _get_default_config(self) -> Dict:
         """获取默认模型配置"""
@@ -84,48 +90,71 @@ class LLMClient:
             }
         """
         config = self._resolve_model_config(kwargs)
-        self._set_model_metadata(config)
-        if settings.MOCK_LLM or config.get("mock"):
-            return self._mock_generate(prompt, response_format=response_format, config=config)
-
-        messages = [{"role": "user", "content": prompt}]
-
-        # 如果要求JSON格式
-        if response_format == "json":
-            config["response_format"] = {"type": "json_object"}
-            # 在prompt中明确要求JSON
-            messages[0]["content"] = f"{prompt}\n\n请以JSON格式返回结果。"
-
-        try:
-            self.logger.info(f"Calling LLM: {config['model']}")
-
-            response = await acompletion(
-                model=config["model"],
-                messages=messages,
-                temperature=config.get("temperature", 0.7),
-                max_tokens=config.get("max_tokens", config.get("maxTokens", 4000)),
-                api_key=config.get("api_key"),
-                api_base=config.get("api_base"),
-                **config.get("extra_params", {})
-            )
-
-            result = {
-                "content": response.choices[0].message.content,
-                "usage": {
-                    "prompt_tokens": response.usage.prompt_tokens,
-                    "completion_tokens": response.usage.completion_tokens,
-                    "model_profile_id": config.get("model_profile_id"),
-                    "model_role": config.get("model_role"),
-                    "model": config.get("model")
+        started_at = time.monotonic()
+        cache_key = self._build_cache_key(prompt, response_format, config)
+        if self._cache_enabled(config):
+            cached = self._cache_get(cache_key, config)
+            if cached:
+                cached_usage = cached.get("usage", {})
+                cached_config = {
+                    **config,
+                    "model": cached_usage.get("model", config.get("model")),
+                    "model_role": cached_usage.get("model_role", config.get("model_role")),
+                    "provider": cached_usage.get("provider", config.get("provider")),
+                    "mock": cached_usage.get("mock", config.get("mock")),
                 }
-            }
+                result = self._finalize_gateway_result(
+                    cached,
+                    cached_config,
+                    cache_hit=True,
+                    cache_key=cache_key,
+                    fallback_used=bool(cached_usage.get("fallback_used")),
+                    fallback_attempts=int(cached_usage.get("fallback_attempts", 0) or 0),
+                    errors=cached_usage.get("fallback_errors", []),
+                    started_at=started_at,
+                )
+                self.logger.info(f"LLM cache hit: {cached_config.get('model')}")
+                return result
 
-            self.logger.info(f"LLM call successful. Tokens: {result['usage']}")
-            return result
-
-        except Exception as e:
-            self.logger.error(f"LLM generation failed: {str(e)}")
-            raise Exception(f"LLM生成失败: {str(e)}")
+        candidates = self._candidate_model_configs(config)
+        errors: List[Dict[str, Any]] = []
+        for attempt_index, candidate in enumerate(candidates):
+            fallback_used = attempt_index > 0
+            try:
+                result = await self._generate_once(prompt, response_format, candidate)
+                result = self._finalize_gateway_result(
+                    result,
+                    candidate,
+                    cache_hit=False,
+                    cache_key=cache_key,
+                    fallback_used=fallback_used,
+                    fallback_attempts=attempt_index,
+                    errors=errors,
+                    started_at=started_at,
+                )
+                if self._cache_enabled(config):
+                    self._cache_set(cache_key, result)
+                return result
+            except Exception as exc:
+                errors.append({
+                    "model": candidate.get("model"),
+                    "model_role": candidate.get("model_role"),
+                    "provider": candidate.get("provider"),
+                    "error": str(exc),
+                })
+                if attempt_index < len(candidates) - 1:
+                    self.logger.warning(
+                        f"LLM call failed for {candidate.get('model')}; trying fallback: {exc}"
+                    )
+                    continue
+                self._set_model_metadata(candidate, {
+                    "cache_hit": False,
+                    "fallback_used": fallback_used,
+                    "fallback_attempts": attempt_index,
+                    "gateway_errors": errors,
+                })
+                self.logger.error(f"LLM generation failed after fallbacks: {str(exc)}")
+                raise Exception(f"LLM生成失败: {str(exc)}")
 
     async def generate_with_retry(self, prompt: str,
                                   max_retries: int = 3,
@@ -150,13 +179,16 @@ class LLMClient:
     def current_model_metadata(self) -> Dict[str, Any]:
         return dict(_model_metadata_context.get() or {})
 
-    def _set_model_metadata(self, config: Dict[str, Any]):
-        _model_metadata_context.set({
+    def _set_model_metadata(self, config: Dict[str, Any], extra: Optional[Dict[str, Any]] = None):
+        metadata = {
             "model_profile_id": config.get("model_profile_id"),
             "model_role": config.get("model_role"),
             "model": config.get("model"),
             "mock": bool(config.get("mock") or settings.MOCK_LLM),
-        })
+            "provider": config.get("provider"),
+        }
+        metadata.update(extra or {})
+        _model_metadata_context.set(metadata)
 
     def _resolve_model_config(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
         context = _profile_context.get() or {}
@@ -181,6 +213,7 @@ class LLMClient:
         if config:
             config["model_profile_id"] = profile_id
             config["model_role"] = model_key
+            config["fallback_models"] = self._normalize_fallback_models(profile.get("fallbackModels"), profile_id)
         return config
 
     def _load_profile(self, profile_id: str) -> Optional[Dict[str, Any]]:
@@ -202,14 +235,225 @@ class LLMClient:
             return {}
         provider = model.get("provider", "")
         normalized = {
+            "provider": provider or "openai",
             "model": model.get("model") or self.model_config.get("model"),
             "temperature": model.get("temperature", self.model_config.get("temperature", 0.7)),
             "max_tokens": model.get("max_tokens", model.get("maxTokens", self.model_config.get("max_tokens", 4000))),
+            "top_p": model.get("top_p", model.get("topP")),
+            "timeout": model.get("timeout"),
             "api_key": model.get("api_key", model.get("apiKey") or self._provider_api_key(provider)),
             "api_base": model.get("api_base", model.get("endpoint") or self._provider_api_base(provider)),
             "mock": bool(model.get("mock") or provider == "mock"),
+            "cache_enabled": model.get("cache_enabled", model.get("cacheEnabled", True)),
+            "cache_ttl_seconds": model.get("cache_ttl_seconds", model.get("cacheTtlSeconds", 3600)),
+            "rate_limit_rpm": model.get("rate_limit_rpm", model.get("rateLimitRpm", model.get("requestsPerMinute"))),
+            "min_interval_ms": model.get("min_interval_ms", model.get("minIntervalMs")),
+            "input_cost_per_1k": model.get("input_cost_per_1k", model.get("inputCostPer1K")),
+            "output_cost_per_1k": model.get("output_cost_per_1k", model.get("outputCostPer1K")),
+            "extra_params": model.get("extra_params", model.get("extraParams", {})),
         }
         return {key: value for key, value in normalized.items() if value not in ("", None)}
+
+    def _normalize_fallback_models(self, value: Any, profile_id: str) -> List[Dict[str, Any]]:
+        fallbacks: List[Dict[str, Any]] = []
+        if not isinstance(value, list):
+            return fallbacks
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                continue
+            config = self._normalize_model_config(item)
+            if not config:
+                continue
+            config["model_profile_id"] = profile_id
+            config["model_role"] = f"fallbackModel[{index}]"
+            config["fallback_index"] = index
+            fallbacks.append(config)
+        return fallbacks
+
+    def _candidate_model_configs(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+        primary = dict(config)
+        fallback_models = primary.get("fallback_models") or []
+        candidates = [primary]
+        for fallback in fallback_models:
+            merged = {
+                **self.model_config,
+                **fallback,
+                "model_profile_id": primary.get("model_profile_id"),
+                "cache_enabled": primary.get("cache_enabled", fallback.get("cache_enabled", True)),
+                "cache_ttl_seconds": primary.get("cache_ttl_seconds", fallback.get("cache_ttl_seconds", 3600)),
+            }
+            candidates.append(merged)
+        return candidates
+
+    async def _generate_once(self, prompt: str, response_format: Optional[str], config: Dict[str, Any]) -> Dict[str, Any]:
+        self._set_model_metadata(config)
+        if settings.MOCK_LLM or config.get("mock"):
+            return self._mock_generate(prompt, response_format=response_format, config=config)
+
+        messages = [{"role": "user", "content": prompt}]
+        call_kwargs = {
+            "model": config["model"],
+            "messages": messages,
+            "temperature": config.get("temperature", 0.7),
+            "max_tokens": config.get("max_tokens", config.get("maxTokens", 4000)),
+            "api_key": config.get("api_key"),
+            "api_base": config.get("api_base"),
+            **(config.get("extra_params") or {}),
+        }
+        if config.get("top_p") is not None:
+            call_kwargs["top_p"] = config.get("top_p")
+        if config.get("timeout") is not None:
+            call_kwargs["timeout"] = config.get("timeout")
+
+        if response_format == "json":
+            call_kwargs["response_format"] = {"type": "json_object"}
+            messages[0]["content"] = f"{prompt}\n\n请以JSON格式返回结果。"
+
+        await self._apply_rate_limit(config)
+        self.logger.info(f"Calling LLM: {config['model']}")
+        response = await acompletion(**call_kwargs)
+        usage = self._response_usage(response)
+        result = {
+            "content": response.choices[0].message.content,
+            "usage": usage,
+        }
+        self.logger.info(f"LLM call successful. Tokens: {result['usage']}")
+        return result
+
+    def _response_usage(self, response: Any) -> Dict[str, Any]:
+        usage = getattr(response, "usage", None)
+        if isinstance(usage, dict):
+            prompt_tokens = usage.get("prompt_tokens", usage.get("promptTokens", 0))
+            completion_tokens = usage.get("completion_tokens", usage.get("completionTokens", 0))
+        else:
+            prompt_tokens = getattr(usage, "prompt_tokens", 0)
+            completion_tokens = getattr(usage, "completion_tokens", 0)
+        return {
+            "prompt_tokens": int(prompt_tokens or 0),
+            "completion_tokens": int(completion_tokens or 0),
+        }
+
+    async def _apply_rate_limit(self, config: Dict[str, Any]):
+        min_interval = self._min_interval_seconds(config)
+        if min_interval <= 0:
+            return
+        key = f"{config.get('model_profile_id') or 'env'}:{config.get('model')}"
+        async with self.rate_limit_lock:
+            now = time.monotonic()
+            next_allowed = self.rate_limit_state.get(key, 0.0)
+            wait_seconds = max(0.0, next_allowed - now)
+            if wait_seconds > 0:
+                self.logger.info(f"Rate limiting LLM call for {wait_seconds:.2f}s: {key}")
+                await asyncio.sleep(wait_seconds)
+            self.rate_limit_state[key] = time.monotonic() + min_interval
+
+    def _min_interval_seconds(self, config: Dict[str, Any]) -> float:
+        min_interval_ms = self._as_float(config.get("min_interval_ms"), 0.0)
+        rpm = self._as_float(config.get("rate_limit_rpm"), 0.0)
+        intervals = []
+        if min_interval_ms > 0:
+            intervals.append(min_interval_ms / 1000.0)
+        if rpm > 0:
+            intervals.append(60.0 / rpm)
+        return max(intervals) if intervals else 0.0
+
+    def _build_cache_key(self, prompt: str, response_format: Optional[str], config: Dict[str, Any]) -> str:
+        payload = {
+            "prompt": prompt,
+            "response_format": response_format or "text",
+            "model": config.get("model"),
+            "temperature": config.get("temperature"),
+            "max_tokens": config.get("max_tokens", config.get("maxTokens")),
+            "top_p": config.get("top_p"),
+            "model_profile_id": config.get("model_profile_id"),
+            "model_role": config.get("model_role"),
+        }
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _cache_enabled(self, config: Dict[str, Any]) -> bool:
+        return bool(config.get("cache_enabled", True))
+
+    def _cache_get(self, key: str, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        cached = self.response_cache.get(key)
+        if not cached:
+            return None
+        ttl = self._as_float(config.get("cache_ttl_seconds"), 3600.0)
+        if ttl > 0 and time.time() - float(cached.get("cached_at", 0)) > ttl:
+            self.response_cache.pop(key, None)
+            return None
+        return copy.deepcopy(cached.get("response"))
+
+    def _cache_set(self, key: str, result: Dict[str, Any]):
+        self.response_cache[key] = {
+            "cached_at": time.time(),
+            "response": copy.deepcopy(result),
+        }
+
+    def _finalize_gateway_result(
+            self,
+            result: Dict[str, Any],
+            config: Dict[str, Any],
+            cache_hit: bool,
+            cache_key: str,
+            fallback_used: bool,
+            fallback_attempts: int,
+            errors: List[Dict[str, Any]],
+            started_at: float) -> Dict[str, Any]:
+        finalized = copy.deepcopy(result)
+        usage = finalized.setdefault("usage", {})
+        prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+        total_tokens = prompt_tokens + completion_tokens
+        cost = self._estimate_cost(prompt_tokens, completion_tokens, config)
+        if cache_hit and "estimated_cost_usd" in usage:
+            cost = {
+                "estimated_cost_usd": usage.get("estimated_cost_usd"),
+                "cost_estimated": usage.get("cost_estimated", False),
+            }
+        usage.update({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "model_profile_id": config.get("model_profile_id"),
+            "model_role": config.get("model_role"),
+            "model": config.get("model"),
+            "provider": config.get("provider"),
+            "mock": bool(config.get("mock") or settings.MOCK_LLM),
+            "cache_hit": cache_hit,
+            "cache_key": cache_key,
+            "fallback_used": fallback_used,
+            "fallback_attempts": fallback_attempts,
+            "fallback_errors": errors,
+            "gateway_latency_ms": int((time.monotonic() - started_at) * 1000),
+            "estimated_cost_usd": cost.get("estimated_cost_usd"),
+            "cost_estimated": cost.get("cost_estimated"),
+        })
+        self._set_model_metadata(config, {
+            "cache_hit": cache_hit,
+            "fallback_used": fallback_used,
+            "fallback_attempts": fallback_attempts,
+            "total_tokens": total_tokens,
+            "estimated_cost_usd": cost.get("estimated_cost_usd"),
+            "cost_estimated": cost.get("cost_estimated"),
+            "gateway_latency_ms": usage["gateway_latency_ms"],
+        })
+        return finalized
+
+    def _estimate_cost(self, prompt_tokens: int, completion_tokens: int, config: Dict[str, Any]) -> Dict[str, Any]:
+        input_rate = self._as_float(config.get("input_cost_per_1k"), None)
+        output_rate = self._as_float(config.get("output_cost_per_1k"), None)
+        if input_rate is None or output_rate is None:
+            return {"estimated_cost_usd": 0.0, "cost_estimated": False}
+        cost = (prompt_tokens / 1000.0 * input_rate) + (completion_tokens / 1000.0 * output_rate)
+        return {"estimated_cost_usd": round(cost, 6), "cost_estimated": True}
+
+    def _as_float(self, value: Any, default: Optional[float]) -> Optional[float]:
+        try:
+            if value is None or value == "":
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     def _provider_api_key(self, provider: str) -> Optional[str]:
         if provider == "anthropic":

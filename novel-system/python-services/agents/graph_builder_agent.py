@@ -5,9 +5,10 @@
 import json
 import re
 import uuid
+from collections import Counter, defaultdict, deque
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Set
 
 from agents.base import BaseAgent
 from schemas.agent_request import AgentRequest
@@ -55,6 +56,8 @@ class GraphBuilderAgent(BaseAgent):
                 "graph_id": graph.graph_id,
                 "total_nodes": graph.node_count,
                 "total_edges": graph.edge_count,
+                "connected_components": graph.statistics.get("connected_components", 0),
+                "top_nodes_by_centrality": graph.statistics.get("top_nodes_by_centrality", []),
                 "graph_file": str(graph_files[0]),
                 "graph_files": [str(path) for path in graph_files]
             }
@@ -277,8 +280,337 @@ class GraphBuilderAgent(BaseAgent):
         graph.edge_count = len(graph.edges)
         if graph.nodes:
             graph.last_updated_chapter = max(node.last_updated for node in graph.nodes)
+        graph.statistics, graph.analysis = self._analyze_graph(graph)
 
         return graph
+
+    def _analyze_graph(self, graph: KnowledgeGraph) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        nodes = graph.nodes
+        edges = graph.edges
+        node_by_id = {node.node_id: node for node in nodes}
+        adjacency: Dict[str, Set[str]] = {node.node_id: set() for node in nodes}
+        incoming = Counter()
+        outgoing = Counter()
+        relation_types: Dict[str, Counter] = defaultdict(Counter)
+        edge_type_distribution = Counter()
+
+        for edge in edges:
+            if edge.source_id not in node_by_id or edge.target_id not in node_by_id:
+                continue
+            adjacency.setdefault(edge.source_id, set()).add(edge.target_id)
+            adjacency.setdefault(edge.target_id, set()).add(edge.source_id)
+            outgoing[edge.source_id] += 1
+            incoming[edge.target_id] += 1
+            relation_types[edge.source_id][edge.edge_type] += 1
+            relation_types[edge.target_id][edge.edge_type] += 1
+            edge_type_distribution[edge.edge_type] += 1
+
+        degree = {node_id: len(neighbors) for node_id, neighbors in adjacency.items()}
+        n = len(nodes)
+        density = 0.0 if n < 2 else len(edges) / (n * (n - 1))
+        average_degree = 0.0 if n == 0 else sum(degree.values()) / n
+        components = self._connected_components(adjacency)
+        degree_centrality = {
+            node_id: (value / (n - 1) if n > 1 else 0.0)
+            for node_id, value in degree.items()
+        }
+        betweenness = self._betweenness_centrality(adjacency)
+        articulation_points = self._articulation_points(adjacency)
+
+        top_degree = self._top_node_scores(node_by_id, degree, "degree", limit=10)
+        top_centrality = self._top_node_scores(node_by_id, degree_centrality, "degreeCentrality", limit=10)
+        top_betweenness = self._top_node_scores(node_by_id, betweenness, "betweennessCentrality", limit=10)
+        bridge_nodes = [
+            self._node_summary(node_by_id[node_id], {
+                "degree": degree.get(node_id, 0),
+                "degreeCentrality": round(degree_centrality.get(node_id, 0.0), 6),
+                "betweennessCentrality": round(betweenness.get(node_id, 0.0), 6),
+            })
+            for node_id in sorted(
+                articulation_points,
+                key=lambda item: (betweenness.get(item, 0.0), degree.get(item, 0)),
+                reverse=True
+            )
+            if node_id in node_by_id
+        ][:10]
+
+        relationship_analysis = []
+        for node in nodes:
+            node_id = node.node_id
+            rel_types = dict(relation_types.get(node_id, Counter()))
+            top_relations = self._top_relations(node_id, edges, node_by_id)
+            relationship_analysis.append({
+                "node_id": node_id,
+                "node_name": node.name,
+                "node_type": node.node_type,
+                "total_relations": incoming[node_id] + outgoing[node_id],
+                "incoming_relations": incoming[node_id],
+                "outgoing_relations": outgoing[node_id],
+                "relation_types": rel_types,
+                "top_relations": top_relations,
+                "degree_centrality": round(degree_centrality.get(node_id, 0.0), 6),
+                "betweenness_centrality": round(betweenness.get(node_id, 0.0), 6),
+            })
+        relationship_analysis.sort(
+            key=lambda item: (item["degree_centrality"], item["betweenness_centrality"], item["total_relations"]),
+            reverse=True
+        )
+
+        key_paths = self._key_paths(node_by_id, adjacency, top_centrality[:6])
+        isolated_nodes = [
+            self._node_summary(node, {"degree": degree.get(node.node_id, 0)})
+            for node in nodes
+            if degree.get(node.node_id, 0) == 0
+        ][:20]
+
+        statistics = {
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
+            "node_type_distribution": dict(Counter(node.node_type for node in nodes)),
+            "edge_type_distribution": dict(edge_type_distribution),
+            "average_degree": round(average_degree, 4),
+            "density": round(density, 6),
+            "connected_components": len(components),
+            "largest_component_size": max((len(component) for component in components), default=0),
+            "top_nodes_by_degree": top_degree,
+            "top_nodes_by_centrality": top_centrality,
+            "top_nodes_by_betweenness": top_betweenness,
+        }
+        analysis = {
+            "generated_at": datetime.now().isoformat(),
+            "component_summary": [
+                {
+                    "component_id": f"component_{index + 1}",
+                    "size": len(component),
+                    "nodes": [self._node_summary(node_by_id[node_id]) for node_id in component[:12] if node_id in node_by_id],
+                }
+                for index, component in enumerate(components[:10])
+            ],
+            "bridge_nodes": bridge_nodes,
+            "isolated_nodes": isolated_nodes,
+            "relationship_analysis": relationship_analysis[:20],
+            "key_paths": key_paths,
+            "warnings": self._graph_warnings(nodes, edges, components, isolated_nodes),
+        }
+        return statistics, analysis
+
+    def _connected_components(self, adjacency: Dict[str, Set[str]]) -> List[List[str]]:
+        visited: Set[str] = set()
+        components: List[List[str]] = []
+        for node_id in adjacency:
+            if node_id in visited:
+                continue
+            queue = deque([node_id])
+            visited.add(node_id)
+            component = []
+            while queue:
+                current = queue.popleft()
+                component.append(current)
+                for neighbor in adjacency.get(current, set()):
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append(neighbor)
+            components.append(component)
+        components.sort(key=len, reverse=True)
+        return components
+
+    def _betweenness_centrality(self, adjacency: Dict[str, Set[str]]) -> Dict[str, float]:
+        nodes = list(adjacency.keys())
+        scores = {node_id: 0.0 for node_id in nodes}
+        if len(nodes) < 3:
+            return scores
+
+        for source in nodes:
+            stack: List[str] = []
+            predecessors: Dict[str, List[str]] = {node_id: [] for node_id in nodes}
+            sigma = dict.fromkeys(nodes, 0.0)
+            sigma[source] = 1.0
+            distance = dict.fromkeys(nodes, -1)
+            distance[source] = 0
+            queue = deque([source])
+
+            while queue:
+                vertex = queue.popleft()
+                stack.append(vertex)
+                for neighbor in adjacency.get(vertex, set()):
+                    if distance[neighbor] < 0:
+                        queue.append(neighbor)
+                        distance[neighbor] = distance[vertex] + 1
+                    if distance[neighbor] == distance[vertex] + 1:
+                        sigma[neighbor] += sigma[vertex]
+                        predecessors[neighbor].append(vertex)
+
+            dependency = dict.fromkeys(nodes, 0.0)
+            while stack:
+                vertex = stack.pop()
+                for predecessor in predecessors[vertex]:
+                    if sigma[vertex]:
+                        dependency[predecessor] += (sigma[predecessor] / sigma[vertex]) * (1 + dependency[vertex])
+                if vertex != source:
+                    scores[vertex] += dependency[vertex]
+
+        scale = 1 / ((len(nodes) - 1) * (len(nodes) - 2)) if len(nodes) > 2 else 1.0
+        return {node_id: value * scale for node_id, value in scores.items()}
+
+    def _articulation_points(self, adjacency: Dict[str, Set[str]]) -> Set[str]:
+        visited: Set[str] = set()
+        discovery: Dict[str, int] = {}
+        low: Dict[str, int] = {}
+        parent: Dict[str, Optional[str]] = {}
+        points: Set[str] = set()
+        time = 0
+
+        def dfs(node_id: str):
+            nonlocal time
+            visited.add(node_id)
+            discovery[node_id] = time
+            low[node_id] = time
+            time += 1
+            children = 0
+            for neighbor in adjacency.get(node_id, set()):
+                if neighbor not in visited:
+                    parent[neighbor] = node_id
+                    children += 1
+                    dfs(neighbor)
+                    low[node_id] = min(low[node_id], low[neighbor])
+                    if parent.get(node_id) is None and children > 1:
+                        points.add(node_id)
+                    if parent.get(node_id) is not None and low[neighbor] >= discovery[node_id]:
+                        points.add(node_id)
+                elif neighbor != parent.get(node_id):
+                    low[node_id] = min(low[node_id], discovery[neighbor])
+
+        for node_id in adjacency:
+            if node_id not in visited:
+                parent[node_id] = None
+                dfs(node_id)
+        return points
+
+    def _top_node_scores(
+        self,
+        node_by_id: Dict[str, GraphNode],
+        scores: Dict[str, Any],
+        score_key: str,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        items = []
+        for node_id, score in scores.items():
+            node = node_by_id.get(node_id)
+            if not node:
+                continue
+            value = round(float(score), 6) if isinstance(score, float) else score
+            items.append(self._node_summary(node, {score_key: value}))
+        return sorted(items, key=lambda item: item.get(score_key, 0), reverse=True)[:limit]
+
+    def _top_relations(
+        self,
+        node_id: str,
+        edges: List[GraphEdge],
+        node_by_id: Dict[str, GraphNode]
+    ) -> List[Dict[str, Any]]:
+        relations = []
+        for edge in edges:
+            other_id = None
+            direction = None
+            if edge.source_id == node_id:
+                other_id = edge.target_id
+                direction = "outgoing"
+            elif edge.target_id == node_id:
+                other_id = edge.source_id
+                direction = "incoming"
+            if not other_id:
+                continue
+            other = node_by_id.get(other_id)
+            relations.append({
+                "edge_id": edge.edge_id,
+                "edge_type": edge.edge_type,
+                "direction": direction,
+                "node_id": other_id,
+                "node_name": other.name if other else other_id,
+                "node_type": other.node_type if other else "",
+                "weight": edge.weight,
+            })
+        return sorted(relations, key=lambda item: item["weight"], reverse=True)[:8]
+
+    def _key_paths(
+        self,
+        node_by_id: Dict[str, GraphNode],
+        adjacency: Dict[str, Set[str]],
+        top_nodes: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        node_ids = [item["node_id"] for item in top_nodes if item.get("node_id") in node_by_id]
+        paths = []
+        for index, source in enumerate(node_ids):
+            for target in node_ids[index + 1:]:
+                path = self._shortest_path(adjacency, source, target, max_depth=5)
+                if path and len(path) > 1:
+                    paths.append({
+                        "source": self._node_summary(node_by_id[source]),
+                        "target": self._node_summary(node_by_id[target]),
+                        "length": len(path) - 1,
+                        "path": [self._node_summary(node_by_id[node_id]) for node_id in path if node_id in node_by_id],
+                    })
+        return sorted(paths, key=lambda item: item["length"])[:10]
+
+    def _shortest_path(
+        self,
+        adjacency: Dict[str, Set[str]],
+        source: str,
+        target: str,
+        max_depth: int
+    ) -> Optional[List[str]]:
+        queue = deque([[source]])
+        visited = {source}
+        while queue:
+            path = queue.popleft()
+            current = path[-1]
+            if current == target:
+                return path
+            if len(path) > max_depth:
+                continue
+            for neighbor in adjacency.get(current, set()):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(path + [neighbor])
+        return None
+
+    def _graph_warnings(
+        self,
+        nodes: List[GraphNode],
+        edges: List[GraphEdge],
+        components: List[List[str]],
+        isolated_nodes: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        warnings = []
+        if nodes and not edges:
+            warnings.append({
+                "code": "GRAPH_HAS_NO_EDGES",
+                "severity": "warning",
+                "message": "图谱已有节点但缺少关系边，建议补充人物关系、剧情涉及角色或设定关联。",
+            })
+        if len(components) > 1:
+            warnings.append({
+                "code": "GRAPH_DISCONNECTED",
+                "severity": "info",
+                "message": f"图谱包含 {len(components)} 个连通分量，可能存在孤立剧情线或未关联设定。",
+            })
+        if isolated_nodes:
+            warnings.append({
+                "code": "GRAPH_HAS_ISOLATED_NODES",
+                "severity": "info",
+                "message": f"发现 {len(isolated_nodes)} 个孤立节点，可检查记忆抽取是否缺少关系。",
+            })
+        return warnings
+
+    def _node_summary(self, node: GraphNode, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        item = {
+            "node_id": node.node_id,
+            "name": node.name,
+            "node_type": node.node_type,
+        }
+        if extra:
+            item.update(extra)
+        return item
 
     async def _save_graph(self, build_request: GraphBuildRequest, graph: KnowledgeGraph) -> List[Path]:
         """保存图谱"""

@@ -50,7 +50,7 @@ public class GraphArtifactDbService {
         Map<String, Object> graph = readJsonMap(graphFile);
         List<Map<String, Object>> nodes = listOfMaps(graph.get("nodes"));
         List<Map<String, Object>> edges = listOfMaps(graph.get("edges"));
-        Map<String, Object> statistics = statistics(nodes, edges);
+        Map<String, Object> statistics = statistics(nodes, edges, mapOf(graph.get("statistics")));
 
         GraphArtifact entity = graphArtifactRepository
             .findByProjectIdAndBookId(projectId, bookId)
@@ -109,6 +109,7 @@ public class GraphArtifactDbService {
         result.put("nodes", entity.getNodes());
         result.put("edges", entity.getEdges());
         result.put("statistics", entity.getStatistics());
+        result.put("analysis", mapOf(entity.getGraphJson().get("analysis")));
         result.put("latestTasks", entity.getLatestTasks());
         result.put("graphMetadata", entity.getGraphMetadata());
         return result;
@@ -135,6 +136,13 @@ public class GraphArtifactDbService {
     }
 
     private Map<String, Object> statistics(List<Map<String, Object>> nodes, List<Map<String, Object>> edges) {
+        return statistics(nodes, edges, Map.of());
+    }
+
+    private Map<String, Object> statistics(
+            List<Map<String, Object>> nodes,
+            List<Map<String, Object>> edges,
+            Map<String, Object> sourceStatistics) {
         Map<String, Long> nodeTypes = new LinkedHashMap<>();
         for (Map<String, Object> node : nodes) {
             nodeTypes.merge(String.valueOf(node.get("node_type")), 1L, Long::sum);
@@ -170,6 +178,13 @@ public class GraphArtifactDbService {
         stats.put("averageDegree", nodes.isEmpty() ? 0.0 : (edges.size() * 2.0) / nodes.size());
         stats.put("density", nodes.size() < 2 ? 0.0 : edges.size() / (double) (nodes.size() * (nodes.size() - 1)));
         stats.put("topNodesByDegree", topNodes);
+        if (!sourceStatistics.isEmpty()) {
+            stats.put("sourceStatistics", sourceStatistics);
+            stats.put("topNodesByCentrality", sourceStatistics.get("top_nodes_by_centrality"));
+            stats.put("topNodesByBetweenness", sourceStatistics.get("top_nodes_by_betweenness"));
+            stats.put("connectedComponents", sourceStatistics.get("connected_components"));
+            stats.put("largestComponentSize", sourceStatistics.get("largest_component_size"));
+        }
         return stats;
     }
 
@@ -246,6 +261,15 @@ public class GraphArtifactDbService {
                 .toList();
         }
         return new ArrayList<>();
+    }
+
+    private Map<String, Object> mapOf(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            map.forEach((key, item) -> result.put(String.valueOf(key), item));
+            return result;
+        }
+        return Map.of();
     }
 
     private String resolveBookId(Map<String, Object> request) {

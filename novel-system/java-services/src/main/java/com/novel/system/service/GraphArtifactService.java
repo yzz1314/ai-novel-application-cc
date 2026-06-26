@@ -50,6 +50,7 @@ public class GraphArtifactService {
         graph.put("path", relative(projectId, graphFile));
         graph.put("updatedAt", modifiedAt(graphFile));
         graph.put("statistics", statistics(graph));
+        graph.putIfAbsent("analysis", analysis(graph));
         graph.put("latestTasks", latestGraphTasks(projectId));
         return graph;
     }
@@ -68,6 +69,16 @@ public class GraphArtifactService {
         String targetNode = stringValue(request, "targetNode", stringValue(request, "target_node", null));
         int limit = intValue(request.getOrDefault("limit", 20), 20);
         int radius = intValue(request.getOrDefault("radius", request.getOrDefault("maxDepth", 2)), 2);
+
+        if ("analysis".equals(queryType)) {
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("queryType", queryType);
+            response.put("statistics", graph.get("statistics"));
+            response.put("analysis", graph.get("analysis"));
+            response.put("totalFound", 1);
+            response.put("returned", 1);
+            return response;
+        }
 
         List<Map<String, Object>> matchedNodes = nodes.stream()
             .filter(node -> nodeType == null || nodeType.equals(String.valueOf(node.get("node_type"))))
@@ -195,15 +206,24 @@ public class GraphArtifactService {
     private Map<String, Object> statistics(Map<String, Object> graph) {
         List<Map<String, Object>> nodes = listOfMaps(graph.get("nodes"));
         List<Map<String, Object>> edges = listOfMaps(graph.get("edges"));
+        Map<String, Object> sourceStatistics = mapOf(graph.get("statistics"));
         Map<String, Long> nodeTypes = nodes.stream()
             .collect(Collectors.groupingBy(node -> String.valueOf(node.get("node_type")), LinkedHashMap::new, Collectors.counting()));
         Map<String, Long> edgeTypes = edges.stream()
             .collect(Collectors.groupingBy(edge -> String.valueOf(edge.get("edge_type")), LinkedHashMap::new, Collectors.counting()));
 
         Map<String, Integer> degree = new HashMap<>();
+        Map<String, Set<String>> adjacency = new HashMap<>();
+        for (Map<String, Object> node : nodes) {
+            adjacency.put(String.valueOf(node.get("node_id")), new HashSet<>());
+        }
         for (Map<String, Object> edge : edges) {
-            degree.merge(String.valueOf(edge.get("source_id")), 1, Integer::sum);
-            degree.merge(String.valueOf(edge.get("target_id")), 1, Integer::sum);
+            String source = String.valueOf(edge.get("source_id"));
+            String target = String.valueOf(edge.get("target_id"));
+            degree.merge(source, 1, Integer::sum);
+            degree.merge(target, 1, Integer::sum);
+            adjacency.computeIfAbsent(source, ignored -> new HashSet<>()).add(target);
+            adjacency.computeIfAbsent(target, ignored -> new HashSet<>()).add(source);
         }
 
         List<Map<String, Object>> topNodes = nodes.stream()
@@ -218,6 +238,13 @@ public class GraphArtifactService {
             .sorted(Comparator.comparing((Map<String, Object> node) -> intValue(node.get("degree"), 0)).reversed())
             .limit(10)
             .toList();
+        List<List<String>> components = connectedComponents(adjacency);
+        List<Map<String, Object>> centralityNodes = topCentralityNodes(nodes, degree, Math.max(nodes.size() - 1, 1));
+        List<Map<String, Object>> isolatedNodes = nodes.stream()
+            .filter(node -> degree.getOrDefault(String.valueOf(node.get("node_id")), 0) == 0)
+            .map(node -> nodeSummary(node, Map.of("degree", 0)))
+            .limit(20)
+            .toList();
 
         Map<String, Object> stats = new LinkedHashMap<>();
         stats.put("totalNodes", nodes.size());
@@ -226,8 +253,70 @@ public class GraphArtifactService {
         stats.put("edgeTypeDistribution", edgeTypes);
         stats.put("averageDegree", nodes.isEmpty() ? 0.0 : (edges.size() * 2.0) / nodes.size());
         stats.put("density", nodes.size() < 2 ? 0.0 : edges.size() / (double) (nodes.size() * (nodes.size() - 1)));
+        stats.put("connectedComponents", components.size());
+        stats.put("largestComponentSize", components.stream().mapToInt(List::size).max().orElse(0));
         stats.put("topNodesByDegree", topNodes);
+        stats.put("topNodesByCentrality", sourceStatistics.getOrDefault("top_nodes_by_centrality", centralityNodes));
+        stats.put("topNodesByBetweenness", sourceStatistics.getOrDefault("top_nodes_by_betweenness", List.of()));
+        stats.put("isolatedNodes", isolatedNodes);
+        if (!sourceStatistics.isEmpty()) {
+            stats.put("sourceStatistics", sourceStatistics);
+            stats.putIfAbsent("connectedComponents", sourceStatistics.get("connected_components"));
+            stats.putIfAbsent("largestComponentSize", sourceStatistics.get("largest_component_size"));
+        }
         return stats;
+    }
+
+    private Map<String, Object> analysis(Map<String, Object> graph) {
+        List<Map<String, Object>> nodes = listOfMaps(graph.get("nodes"));
+        List<Map<String, Object>> edges = listOfMaps(graph.get("edges"));
+        Map<String, Object> sourceAnalysis = mapOf(graph.get("analysis"));
+        if (!sourceAnalysis.isEmpty()) {
+            return sourceAnalysis;
+        }
+
+        Map<String, Integer> degree = new HashMap<>();
+        Map<String, Set<String>> adjacency = new HashMap<>();
+        for (Map<String, Object> node : nodes) {
+            adjacency.put(String.valueOf(node.get("node_id")), new HashSet<>());
+        }
+        for (Map<String, Object> edge : edges) {
+            String source = String.valueOf(edge.get("source_id"));
+            String target = String.valueOf(edge.get("target_id"));
+            degree.merge(source, 1, Integer::sum);
+            degree.merge(target, 1, Integer::sum);
+            adjacency.computeIfAbsent(source, ignored -> new HashSet<>()).add(target);
+            adjacency.computeIfAbsent(target, ignored -> new HashSet<>()).add(source);
+        }
+
+        List<List<String>> components = connectedComponents(adjacency);
+        Map<String, Map<String, Object>> nodeById = nodes.stream()
+            .collect(Collectors.toMap(
+                node -> String.valueOf(node.get("node_id")),
+                node -> node,
+                (left, ignored) -> left,
+                LinkedHashMap::new
+            ));
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("componentSummary", components.stream()
+            .limit(10)
+            .map(component -> Map.of(
+                "size", component.size(),
+                "nodes", component.stream()
+                    .limit(12)
+                    .map(nodeById::get)
+                    .filter(java.util.Objects::nonNull)
+                    .map(node -> nodeSummary(node, Map.of()))
+                    .toList()
+            ))
+            .toList());
+        result.put("isolatedNodes", nodes.stream()
+            .filter(node -> degree.getOrDefault(String.valueOf(node.get("node_id")), 0) == 0)
+            .map(node -> nodeSummary(node, Map.of("degree", 0)))
+            .limit(20)
+            .toList());
+        result.put("warnings", graphWarnings(nodes, edges, components));
+        return result;
     }
 
     private List<Map<String, Object>> latestGraphTasks(String projectId) {
@@ -313,6 +402,80 @@ public class GraphArtifactService {
             adjacency.computeIfAbsent(target, ignored -> new HashSet<>()).add(source);
         }
         return adjacency;
+    }
+
+    private List<List<String>> connectedComponents(Map<String, Set<String>> adjacency) {
+        Set<String> visited = new HashSet<>();
+        List<List<String>> components = new ArrayList<>();
+        for (String nodeId : adjacency.keySet()) {
+            if (visited.contains(nodeId)) {
+                continue;
+            }
+            List<String> component = new ArrayList<>();
+            ArrayDeque<String> queue = new ArrayDeque<>();
+            queue.add(nodeId);
+            visited.add(nodeId);
+            while (!queue.isEmpty()) {
+                String current = queue.removeFirst();
+                component.add(current);
+                for (String next : adjacency.getOrDefault(current, Set.of())) {
+                    if (visited.add(next)) {
+                        queue.add(next);
+                    }
+                }
+            }
+            components.add(component);
+        }
+        components.sort(Comparator.comparing(List<String>::size).reversed());
+        return components;
+    }
+
+    private List<Map<String, Object>> topCentralityNodes(
+            List<Map<String, Object>> nodes,
+            Map<String, Integer> degree,
+            int denominator) {
+        return nodes.stream()
+            .map(node -> {
+                String nodeId = String.valueOf(node.get("node_id"));
+                double centrality = degree.getOrDefault(nodeId, 0) / (double) denominator;
+                return nodeSummary(node, Map.of("degreeCentrality", round(centrality), "degree", degree.getOrDefault(nodeId, 0)));
+            })
+            .sorted(Comparator.comparing((Map<String, Object> node) -> doubleValue(node.get("degreeCentrality"))).reversed())
+            .limit(10)
+            .toList();
+    }
+
+    private List<Map<String, Object>> graphWarnings(
+            List<Map<String, Object>> nodes,
+            List<Map<String, Object>> edges,
+            List<List<String>> components) {
+        List<Map<String, Object>> warnings = new ArrayList<>();
+        if (!nodes.isEmpty() && edges.isEmpty()) {
+            warnings.add(Map.of(
+                "code", "GRAPH_HAS_NO_EDGES",
+                "severity", "warning",
+                "message", "图谱已有节点但缺少关系边，建议补充人物关系、剧情涉及角色或设定关联。"
+            ));
+        }
+        if (components.size() > 1) {
+            warnings.add(Map.of(
+                "code", "GRAPH_DISCONNECTED",
+                "severity", "info",
+                "message", "图谱包含 " + components.size() + " 个连通分量，可能存在孤立剧情线或未关联设定。"
+            ));
+        }
+        return warnings;
+    }
+
+    private Map<String, Object> nodeSummary(Map<String, Object> node, Map<String, Object> extra) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("nodeId", node.get("node_id"));
+        result.put("node_id", node.get("node_id"));
+        result.put("name", node.get("name"));
+        result.put("nodeType", node.get("node_type"));
+        result.put("node_type", node.get("node_type"));
+        result.putAll(extra);
+        return result;
     }
 
     private Optional<String> findNodeId(List<Map<String, Object>> nodes, String idOrName) {
@@ -413,6 +576,16 @@ public class GraphArtifactService {
         return List.of();
     }
 
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> mapOf(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            map.forEach((key, item) -> result.put(String.valueOf(key), item));
+            return result;
+        }
+        return Map.of();
+    }
+
     private Optional<Path> latestOutlineFile(String projectId) {
         List<Path> files = new ArrayList<>();
         for (Path dir : List.of(
@@ -475,6 +648,24 @@ public class GraphArtifactService {
             }
         }
         return fallback;
+    }
+
+    private double doubleValue(Object value) {
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        if (value != null) {
+            try {
+                return Double.parseDouble(value.toString());
+            } catch (NumberFormatException ignored) {
+                return 0.0;
+            }
+        }
+        return 0.0;
+    }
+
+    private double round(double value) {
+        return Math.round(value * 1_000_000d) / 1_000_000d;
     }
 
     private void validateId(String value, String fieldName) {

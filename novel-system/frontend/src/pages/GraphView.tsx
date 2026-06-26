@@ -39,15 +39,26 @@ const nodeColors: Record<string, string> = {
   rule: 'red',
 }
 
+const pickArray = (...values: any[]) => {
+  for (const value of values) {
+    if (Array.isArray(value)) return value
+  }
+  return []
+}
+
 const GraphView: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>()
   const [loading, setLoading] = useState(false)
   const [building, setBuilding] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [pathLoading, setPathLoading] = useState(false)
   const [books, setBooks] = useState<any[]>([])
   const [bookId, setBookId] = useState('default')
   const [graph, setGraph] = useState<any>(null)
   const [lastTask, setLastTask] = useState<any>(null)
+  const [sourceNode, setSourceNode] = useState<string>()
+  const [targetNode, setTargetNode] = useState<string>()
+  const [pathResult, setPathResult] = useState<any>(null)
 
   useEffect(() => {
     if (!projectId) return
@@ -62,11 +73,40 @@ const GraphView: React.FC = () => {
   const stats = useMemo(() => {
     const nodes = graph?.nodes || []
     const edges = graph?.edges || []
+    const graphStats = graph?.statistics || {}
     return {
-      totalNodes: graph?.statistics?.totalNodes ?? nodes.length,
-      totalEdges: graph?.statistics?.totalEdges ?? edges.length,
+      totalNodes: graphStats.totalNodes ?? graphStats.total_nodes ?? nodes.length,
+      totalEdges: graphStats.totalEdges ?? graphStats.total_edges ?? edges.length,
       characterCount: nodes.filter((node: any) => node.node_type === 'character').length,
       organizationCount: nodes.filter((node: any) => node.node_type === 'organization').length,
+      connectedComponents: graphStats.connectedComponents ?? graphStats.connected_components ?? 0,
+      largestComponentSize: graphStats.largestComponentSize ?? graphStats.largest_component_size ?? 0,
+      averageDegree: graphStats.averageDegree ?? graphStats.average_degree ?? 0,
+      density: graphStats.density ?? 0,
+    }
+  }, [graph])
+
+  const advanced = useMemo(() => {
+    const graphStats = graph?.statistics || {}
+    const sourceStats = graphStats.sourceStatistics || {}
+    const analysis = graph?.analysis || {}
+    return {
+      topCentrality: pickArray(
+        graphStats.topNodesByCentrality,
+        graphStats.top_nodes_by_centrality,
+        sourceStats.top_nodes_by_centrality
+      ),
+      topBetweenness: pickArray(
+        graphStats.topNodesByBetweenness,
+        graphStats.top_nodes_by_betweenness,
+        sourceStats.top_nodes_by_betweenness
+      ),
+      bridgeNodes: pickArray(analysis.bridgeNodes, analysis.bridge_nodes),
+      isolatedNodes: pickArray(analysis.isolatedNodes, analysis.isolated_nodes, graphStats.isolatedNodes),
+      relationshipAnalysis: pickArray(analysis.relationshipAnalysis, analysis.relationship_analysis),
+      keyPaths: pickArray(analysis.keyPaths, analysis.key_paths),
+      componentSummary: pickArray(analysis.componentSummary, analysis.component_summary),
+      warnings: pickArray(analysis.warnings),
     }
   }, [graph])
 
@@ -90,6 +130,23 @@ const GraphView: React.FC = () => {
     layoutNodes.forEach((node: any) => map.set(node.node_id, node))
     return map
   }, [layoutNodes])
+
+  const nodeNameById = useMemo(() => {
+    const map = new Map<string, string>()
+    ;(graph?.nodes || []).forEach((node: any) => {
+      map.set(node.node_id, node.name || node.node_id)
+    })
+    return map
+  }, [graph])
+
+  const nodeOptions = useMemo(
+    () =>
+      (graph?.nodes || []).map((node: any) => ({
+        label: `${node.name || node.node_id} (${node.node_type})`,
+        value: node.node_id,
+      })),
+    [graph]
+  )
 
   const loadBooks = async () => {
     if (!projectId) return
@@ -190,6 +247,46 @@ const GraphView: React.FC = () => {
     }
   }
 
+  const queryShortestPath = async () => {
+    if (!projectId || !sourceNode || !targetNode) return
+    if (sourceNode === targetNode) {
+      message.warning('请选择两个不同节点')
+      return
+    }
+    try {
+      setPathLoading(true)
+      const result = await graphApi.query(projectId, bookId || 'default', {
+        queryType: 'path',
+        sourceNode,
+        targetNode,
+        maxDepth: 5,
+      })
+      setPathResult(result)
+      if (!result?.paths?.length) {
+        message.info('未找到 5 跳以内路径')
+      }
+    } catch (error) {
+      message.error('路径查询失败')
+    } finally {
+      setPathLoading(false)
+    }
+  }
+
+  const getNodeId = (record: any) => record?.node_id || record?.nodeId
+  const getNodeType = (record: any) => record?.node_type || record?.nodeType
+  const nodeLabel = (value: any) => {
+    if (!value) return '-'
+    if (typeof value === 'object') return value.name || value.node_id || value.nodeId || '-'
+    return nodeNameById.get(String(value)) || String(value)
+  }
+
+  const renderNodeTag = (record: any) => (
+    <Space>
+      <Tag color={nodeColors[getNodeType(record)] || 'default'}>{getNodeType(record) || 'node'}</Tag>
+      <strong>{record?.name || getNodeId(record)}</strong>
+    </Space>
+  )
+
   const nodeColumns = [
     {
       title: '节点',
@@ -236,6 +333,42 @@ const GraphView: React.FC = () => {
       dataIndex: 'target_id',
       key: 'target_id',
       ellipsis: true,
+    },
+  ]
+
+  const centralityColumns = [
+    {
+      title: '节点',
+      key: 'node',
+      render: (_: any, record: any) => renderNodeTag(record),
+    },
+    {
+      title: '度中心度',
+      key: 'degreeCentrality',
+      width: 120,
+      render: (_: any, record: any) =>
+        Number(record.degreeCentrality ?? record.degree_centrality ?? 0).toFixed(3),
+    },
+    {
+      title: '度数',
+      dataIndex: 'degree',
+      key: 'degree',
+      width: 80,
+    },
+  ]
+
+  const betweennessColumns = [
+    {
+      title: '节点',
+      key: 'node',
+      render: (_: any, record: any) => renderNodeTag(record),
+    },
+    {
+      title: '桥接中心度',
+      key: 'betweennessCentrality',
+      width: 130,
+      render: (_: any, record: any) =>
+        Number(record.betweennessCentrality ?? record.betweenness_centrality ?? 0).toFixed(3),
     },
   ]
 
@@ -317,6 +450,28 @@ const GraphView: React.FC = () => {
                 </Card>
               </Col>
             </Row>
+            <Row gutter={16}>
+              <Col xs={12} md={6}>
+                <Card>
+                  <Statistic title="连通分量" value={stats.connectedComponents} />
+                </Card>
+              </Col>
+              <Col xs={12} md={6}>
+                <Card>
+                  <Statistic title="最大分量节点" value={stats.largestComponentSize} />
+                </Card>
+              </Col>
+              <Col xs={12} md={6}>
+                <Card>
+                  <Statistic title="平均度" value={Number(stats.averageDegree).toFixed(2)} />
+                </Card>
+              </Col>
+              <Col xs={12} md={6}>
+                <Card>
+                  <Statistic title="密度" value={Number(stats.density).toFixed(4)} />
+                </Card>
+              </Col>
+            </Row>
 
             <Card size="small" title="图谱概览">
               <Space direction="vertical" style={{ width: '100%' }}>
@@ -349,6 +504,147 @@ const GraphView: React.FC = () => {
                     </g>
                   ))}
                 </svg>
+              </Space>
+            </Card>
+
+            <Card size="small" title="高级分析">
+              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                {advanced.warnings.map((warning: any) => (
+                  <Alert
+                    key={warning.code || warning.message}
+                    type={warning.severity === 'warning' ? 'warning' : 'info'}
+                    showIcon
+                    message={warning.message || warning.code}
+                  />
+                ))}
+                <Row gutter={16}>
+                  <Col xs={24} lg={12}>
+                    <Card size="small" title="中心节点">
+                      <Table
+                        rowKey={(record: any) => getNodeId(record)}
+                        size="small"
+                        columns={centralityColumns}
+                        dataSource={advanced.topCentrality}
+                        pagination={false}
+                        locale={{ emptyText: '暂无中心度数据' }}
+                      />
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={12}>
+                    <Card size="small" title="桥接节点">
+                      <Table
+                        rowKey={(record: any) => getNodeId(record)}
+                        size="small"
+                        columns={betweennessColumns}
+                        dataSource={advanced.bridgeNodes.length ? advanced.bridgeNodes : advanced.topBetweenness}
+                        pagination={false}
+                        locale={{ emptyText: '暂无桥接节点' }}
+                      />
+                    </Card>
+                  </Col>
+                </Row>
+                <Row gutter={16}>
+                  <Col xs={24} lg={12}>
+                    <Card size="small" title="连通分量">
+                      <Table
+                        rowKey={(record: any, index) => record.component_id || record.componentId || index}
+                        size="small"
+                        dataSource={advanced.componentSummary}
+                        pagination={false}
+                        columns={[
+                          {
+                            title: '规模',
+                            dataIndex: 'size',
+                            key: 'size',
+                            width: 90,
+                          },
+                          {
+                            title: '代表节点',
+                            key: 'nodes',
+                            render: (_: any, record: any) => (
+                              <Space wrap>
+                                {(record.nodes || []).slice(0, 6).map((node: any) => (
+                                  <Tag key={getNodeId(node)}>{nodeLabel(node)}</Tag>
+                                ))}
+                              </Space>
+                            ),
+                          },
+                        ]}
+                        locale={{ emptyText: '暂无连通分量数据' }}
+                      />
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={12}>
+                    <Card size="small" title="孤立节点">
+                      {advanced.isolatedNodes.length ? (
+                        <Space wrap>
+                          {advanced.isolatedNodes.slice(0, 20).map((node: any) => (
+                            <Tag key={getNodeId(node)} color={nodeColors[getNodeType(node)] || 'default'}>
+                              {nodeLabel(node)}
+                            </Tag>
+                          ))}
+                        </Space>
+                      ) : (
+                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无孤立节点" />
+                      )}
+                    </Card>
+                  </Col>
+                </Row>
+                <Card size="small" title="最短路径查询">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Space wrap>
+                      <Select
+                        showSearch
+                        allowClear
+                        style={{ minWidth: 260 }}
+                        placeholder="起始节点"
+                        value={sourceNode}
+                        onChange={setSourceNode}
+                        options={nodeOptions}
+                        optionFilterProp="label"
+                      />
+                      <Select
+                        showSearch
+                        allowClear
+                        style={{ minWidth: 260 }}
+                        placeholder="目标节点"
+                        value={targetNode}
+                        onChange={setTargetNode}
+                        options={nodeOptions}
+                        optionFilterProp="label"
+                      />
+                      <Button
+                        type="primary"
+                        onClick={queryShortestPath}
+                        loading={pathLoading}
+                        disabled={!sourceNode || !targetNode}
+                      >
+                        查询路径
+                      </Button>
+                    </Space>
+                    {pathResult?.paths?.length ? (
+                      <Space wrap>
+                        {pathResult.paths[0].map((nodeId: string, index: number) => (
+                          <React.Fragment key={`${nodeId}-${index}`}>
+                            <Tag color="blue">{nodeLabel(nodeId)}</Tag>
+                            {index < pathResult.paths[0].length - 1 && <Text type="secondary">→</Text>}
+                          </React.Fragment>
+                        ))}
+                      </Space>
+                    ) : (
+                      advanced.keyPaths.length > 0 && (
+                        <Space direction="vertical" size={4}>
+                          <Text type="secondary">推荐关注路径</Text>
+                          {advanced.keyPaths.slice(0, 3).map((item: any, index: number) => (
+                            <Text key={index}>
+                              {nodeLabel(item.source)} → {nodeLabel(item.target)}，{item.length} 跳
+                            </Text>
+                          ))}
+                        </Space>
+                      )
+                    )}
+                  </Space>
+                </Card>
               </Space>
             </Card>
 

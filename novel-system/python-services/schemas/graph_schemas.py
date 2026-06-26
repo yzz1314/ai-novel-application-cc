@@ -63,6 +63,8 @@ class KnowledgeGraph(BaseModel):
     organization_count: int = Field(default=0, description="组织节点数")
     item_count: int = Field(default=0, description="物品节点数")
     skill_count: int = Field(default=0, description="技能节点数")
+    statistics: Dict[str, Any] = Field(default_factory=dict, description="图谱统计与中心度摘要")
+    analysis: Dict[str, Any] = Field(default_factory=dict, description="高级图谱分析结果")
 
     # 元数据
     version: str = Field(default="1.0.0", description="版本号")

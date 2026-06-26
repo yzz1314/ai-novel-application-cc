@@ -32,7 +32,7 @@ import {
   SaveOutlined,
   CloseOutlined,
 } from '@ant-design/icons';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { bookApi, chapterApi, retrievalApi } from '../services/api';
 
 const { TextArea } = Input;
@@ -57,6 +57,7 @@ interface Chapter {
 
 const ChapterWriter: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [books, setBooks] = useState<any[]>([]);
   const [selectedBookId, setSelectedBookId] = useState('default');
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -79,10 +80,54 @@ const ChapterWriter: React.FC = () => {
   const [form] = Form.useForm();
   const [revisionForm] = Form.useForm();
   const [reviewForm] = Form.useForm();
+  const searchKey = searchParams.toString();
 
   useEffect(() => {
+    const requestedBookId = searchParams.get('bookId');
+    if (requestedBookId && requestedBookId !== selectedBookId) {
+      setSelectedBookId(requestedBookId);
+      return;
+    }
     loadChapters();
-  }, [projectId, selectedBookId]);
+  }, [projectId, selectedBookId, searchKey]);
+
+  const clearChapterDeepLink = () => {
+    setSearchParams((params) => {
+      const next = new URLSearchParams(params);
+      next.delete('volume');
+      next.delete('chapter');
+      next.delete('title');
+      return next;
+    }, { replace: true });
+  };
+
+  const handleChapterDeepLink = async (
+    loadedChapters: Chapter[],
+    bookId: string,
+    loadedContextPacks: any[]
+  ) => {
+    const requestedVolume = Number(searchParams.get('volume'));
+    const requestedChapter = Number(searchParams.get('chapter'));
+    if (!projectId || !requestedVolume || !requestedChapter) return;
+
+    const target = loadedChapters.find((chapter) =>
+      Number(chapter.volumeNumber) === requestedVolume &&
+      Number(chapter.chapterNumber) === requestedChapter
+    );
+    if (target) {
+      await handleView(target, bookId, loadedContextPacks);
+      clearChapterDeepLink();
+      return;
+    }
+
+    form.setFieldsValue({
+      volumeNumber: requestedVolume,
+      chapterNumber: requestedChapter,
+      chapterTitle: searchParams.get('title') || '',
+    });
+    setGenerateModalVisible(true);
+    clearChapterDeepLink();
+  };
 
   const loadChapters = async () => {
     if (!projectId) return;
@@ -90,13 +135,20 @@ const ChapterWriter: React.FC = () => {
       setLoading(true);
       const bookList = await bookApi.getList(projectId).catch(() => []);
       setBooks(bookList || []);
-      const effectiveBookId = selectedBookId === 'default'
+      const requestedBookId = searchParams.get('bookId');
+      const effectiveBookId = (requestedBookId && requestedBookId !== 'default')
+        ? requestedBookId
+        : selectedBookId === 'default'
         ? (bookList?.[0]?.bookId || 'default')
         : selectedBookId;
+      if (requestedBookId && requestedBookId !== selectedBookId) {
+        setSelectedBookId(requestedBookId);
+      }
       const data = await chapterApi.getList(projectId, effectiveBookId);
-      setChapters(data);
       const packs = await retrievalApi.getContextPacks(projectId).catch(() => []);
+      setChapters(data || []);
       setContextPacks(packs || []);
+      await handleChapterDeepLink(data || [], effectiveBookId, packs || []);
     } catch (error) {
       setChapters([]);
     } finally {
@@ -135,12 +187,12 @@ const ChapterWriter: React.FC = () => {
     }
   };
 
-  const handleView = async (chapter: Chapter) => {
+  const handleView = async (chapter: Chapter, bookIdOverride?: string, contextPacksOverride?: any[]) => {
     if (!projectId) return;
 
     try {
       setLoading(true);
-      const bookId = selectedBookId === 'default' ? (books[0]?.bookId || 'default') : selectedBookId;
+      const bookId = bookIdOverride || (selectedBookId === 'default' ? (books[0]?.bookId || 'default') : selectedBookId);
       const data = await chapterApi.getContent(
         projectId,
         bookId,
@@ -160,7 +212,8 @@ const ChapterWriter: React.FC = () => {
         .catch(() => []);
       setChapterVersions(versions || []);
       setChapterReviews(reviews || []);
-      const pack = contextPacks.find((item) =>
+      const packs = contextPacksOverride || contextPacks;
+      const pack = packs.find((item) =>
         item.bookId === bookId &&
         Number(item.volumeNumber) === Number(chapter.volumeNumber) &&
         Number(item.chapterNumber) === Number(chapter.chapterNumber)

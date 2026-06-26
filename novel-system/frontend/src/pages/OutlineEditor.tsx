@@ -19,7 +19,7 @@ import {
   Progress,
 } from 'antd';
 import { BookOutlined, UserOutlined, GlobalOutlined, FileTextOutlined, PlusOutlined, EditOutlined, CheckCircleOutlined, ToolOutlined, LockOutlined, UnlockOutlined, HistoryOutlined } from '@ant-design/icons';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { bookApi, outlineApi, taskApi } from '../services/api';
 
 const { TextArea } = Input;
@@ -60,6 +60,7 @@ interface Chapter {
 
 const OutlineEditor: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>();
+  const navigate = useNavigate();
   const [outline, setOutline] = useState<any>(null);
   const [books, setBooks] = useState<any[]>([]);
   const [selectedBookId, setSelectedBookId] = useState('default');
@@ -260,6 +261,19 @@ const OutlineEditor: React.FC = () => {
 
   const soulGovernance = outline?.projectSoulGovernance || outline?.governance || {};
 
+  const openChapterWorkspace = (volumeNumber?: number, chapter?: Partial<Chapter>) => {
+    if (!projectId || !outline) return;
+    const bookId = selectedBookId === 'default'
+      ? (outline.bookId || books[0]?.bookId || 'default')
+      : selectedBookId;
+    const params = new URLSearchParams();
+    params.set('bookId', bookId);
+    if (volumeNumber) params.set('volume', String(volumeNumber));
+    if (chapter?.chapterNumber) params.set('chapter', String(chapter.chapterNumber));
+    if (chapter?.chapterTitle) params.set('title', chapter.chapterTitle);
+    navigate(`/projects/${projectId}/chapters?${params.toString()}`);
+  };
+
   const characterColumns = [
     {
       key: 'soul',
@@ -369,24 +383,29 @@ const OutlineEditor: React.FC = () => {
       title: '操作',
       key: 'action',
       render: (_: any, record: Volume) => (
-        <Button type="link" onClick={() => {/* TODO: 查看章节 */}}>
-          查看章节
+        <Button type="link" onClick={() => openChapterWorkspace(record.volumeNumber)}>
+          进入章节
         </Button>
       ),
     },
   ];
 
-  const renderChapterList = (chapters: Chapter[]) => (
+  const renderChapterList = (volumeNumber: number, chapters: Chapter[]) => (
     <Collapse>
       {chapters.map((chapter) => (
         <Panel
           key={chapter.chapterNumber}
           header={`第${chapter.chapterNumber}章 ${chapter.chapterTitle}`}
         >
-          <Descriptions column={1} size="small">
-            <Descriptions.Item label="剧情目标">{chapter.plotGoal}</Descriptions.Item>
-            <Descriptions.Item label="目标字数">{chapter.targetWordCount}字</Descriptions.Item>
-          </Descriptions>
+          <Space direction="vertical" style={{ width: '100%' }}>
+            <Descriptions column={1} size="small">
+              <Descriptions.Item label="剧情目标">{chapter.plotGoal}</Descriptions.Item>
+              <Descriptions.Item label="目标字数">{chapter.targetWordCount}字</Descriptions.Item>
+            </Descriptions>
+            <Button type="primary" onClick={() => openChapterWorkspace(volumeNumber, chapter)}>
+              创作/查看本章
+            </Button>
+          </Space>
         </Panel>
       ))}
     </Collapse>
@@ -507,7 +526,7 @@ const OutlineEditor: React.FC = () => {
             rowKey="volumeNumber"
             pagination={false}
             expandable={{
-              expandedRowRender: (record: any) => renderChapterList(record.chapters),
+              expandedRowRender: (record: any) => renderChapterList(record.volumeNumber, record.chapters || []),
             }}
           />
         </div>

@@ -16,6 +16,7 @@ from agents import (
     MemoryQueryAgent,
     GraphBuilderAgent,
     CoverageCheckAgent,
+    AnalysisRepairAgent,
     RetrievalIndexAgent
 )
 from llm.client import LLMClient
@@ -43,6 +44,7 @@ AGENT_REGISTRY = {
     "memory_query": MemoryQueryAgent(llm_client=llm_client),
     "graph_build": GraphBuilderAgent(),
     "coverage_check": CoverageCheckAgent(),
+    "analysis_repair": AnalysisRepairAgent(llm_client=llm_client),
     "retrieval_index": RetrievalIndexAgent(),
     "workflow": WorkflowAgent(lambda: AGENT_REGISTRY, llm_client=llm_client)
 }

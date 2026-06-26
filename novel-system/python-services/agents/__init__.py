@@ -13,6 +13,7 @@ from .memory_extractor_agent import MemoryExtractorAgent
 from .memory_query_agent import MemoryQueryAgent
 from .graph_builder_agent import GraphBuilderAgent
 from .coverage_check_agent import CoverageCheckAgent
+from .analysis_repair_agent import AnalysisRepairAgent
 from .retrieval_index_agent import RetrievalIndexAgent
 
 __all__ = [
@@ -30,5 +31,6 @@ __all__ = [
     "MemoryQueryAgent",
     "GraphBuilderAgent",
     "CoverageCheckAgent",
+    "AnalysisRepairAgent",
     "RetrievalIndexAgent"
 ]

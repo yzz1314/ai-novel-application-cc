@@ -128,6 +128,22 @@ public class AnalysisArtifactService {
         return task;
     }
 
+    public Task repairSampleAnalysis(String projectId, String sampleId, Map<String, Object> request) {
+        getProjectSample(projectId, sampleId);
+        Map<String, Object> parameters = new LinkedHashMap<>(request == null ? Map.of() : request);
+        parameters.put("sample_id", sampleId);
+        Map<String, Object> refs = Map.of("sample_id", sampleId);
+        Task task = taskExecutorService.createTask(
+            projectId,
+            "analysis_repair",
+            "analysis_repair",
+            refs,
+            parameters
+        );
+        taskExecutorService.executeTaskAsync(task.getId());
+        return task;
+    }
+
     public Map<String, Object> getSampleManifest(String projectId, String sampleId) {
         getProjectSample(projectId, sampleId);
         Path file = manifestFile(projectId, sampleId);

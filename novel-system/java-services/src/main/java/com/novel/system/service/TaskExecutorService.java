@@ -166,7 +166,7 @@ public class TaskExecutorService {
             sampleService.updateSampleMetadata(sampleId.toString(), title, totalChars, totalChapters);
             sampleService.syncSampleStructureFromWorkspace(task.getProjectId(), sampleId.toString());
             sampleService.updateSampleStatus(sampleId.toString(), com.novel.system.entity.Sample.SampleStatus.CHUNKED);
-        } else if ("full_text_analysis".equals(task.getTaskType())) {
+        } else if ("full_text_analysis".equals(task.getTaskType()) || "analysis_repair".equals(task.getTaskType())) {
             Object sampleId = taskValue(task, "sample_id");
             if (sampleId != null) {
                 sampleService.syncSampleStructureFromWorkspace(task.getProjectId(), sampleId.toString());

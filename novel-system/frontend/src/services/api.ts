@@ -345,6 +345,8 @@ export const analysisApi = {
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/coverage`)),
   checkCoverage: (projectId: string, sampleId: string) =>
     request(api.post(`/projects/${projectId}/analysis/samples/${sampleId}/coverage/check`)),
+  repairAnalysis: (projectId: string, sampleId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/analysis/samples/${sampleId}/repair`, data || {})),
   getBookReport: (projectId: string, sampleId: string) =>
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/book-report`)),
   importSample: (projectId: string, sampleId: string) =>

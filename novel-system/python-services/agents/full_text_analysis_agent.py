@@ -59,6 +59,11 @@ class FullTextAnalysisAgent(BaseAgent):
             # 3. 读取所有chunks
             chunks = await self._read_chunks(project_id, sample_id)
             self.logger.info(f"Loaded {len(chunks)} chunks")
+            requested_chunk_ids = {
+                str(chunk_id)
+                for chunk_id in request.parameters.get("chunk_ids", [])
+                if chunk_id is not None
+            }
 
             # 4. 加载Skill内容（如果指定）
             skill_content = ""
@@ -84,6 +89,7 @@ class FullTextAnalysisAgent(BaseAgent):
             }
             checkpoint_ref = resume_state.get("checkpoint_ref")
             skipped_completed_chunks = 0
+            skipped_out_of_scope_chunks = 0
             if resume_state:
                 warnings_list.append({
                     "code": "ANALYSIS_RESUMED_FROM_CHECKPOINT",
@@ -93,6 +99,9 @@ class FullTextAnalysisAgent(BaseAgent):
 
             for i, chunk in enumerate(chunks, 1):
                 chunk_id = str(chunk["id"])
+                if requested_chunk_ids and chunk_id not in requested_chunk_ids:
+                    skipped_out_of_scope_chunks += 1
+                    continue
                 if chunk_id in completed_chunk_ids and chunk_id not in failed_chunk_ids:
                     self.logger.info(f"Skipping completed chunk {i}/{len(chunks)}: {chunk_id}")
                     skipped_completed_chunks += 1
@@ -234,7 +243,8 @@ class FullTextAnalysisAgent(BaseAgent):
                 "coverage_report": coverage_report,
                 "checkpoint_ref": checkpoint_ref,
                 "resumed_from_checkpoint": request.resume_from_checkpoint,
-                "skipped_completed_chunks": skipped_completed_chunks
+                "skipped_completed_chunks": skipped_completed_chunks,
+                "skipped_out_of_scope_chunks": skipped_out_of_scope_chunks
             }
 
             # 如果有失败的chunk，设置warning

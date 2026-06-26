@@ -251,6 +251,21 @@ const SampleManagement: React.FC = () => {
     }
   }
 
+  const repairAnalysis = async (sampleId: string) => {
+    if (!projectId) return
+
+    try {
+      setLoading(true)
+      await analysisApi.repairAnalysis(projectId, sampleId)
+      message.success('分析修复任务已启动')
+      await loadData(true)
+    } catch (error) {
+      message.error('启动分析修复失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const handleDelete = async (sampleId: string) => {
     if (!projectId) return
 
@@ -451,6 +466,14 @@ const SampleManagement: React.FC = () => {
             onClick={() => checkCoverage(record.sampleId || record.id)}
           >
             校验
+          </Button>
+          <Button
+            type="link"
+            icon={<ReloadOutlined />}
+            disabled={!record.chunkCount}
+            onClick={() => repairAnalysis(record.sampleId || record.id)}
+          >
+            修复
           </Button>
           <Button
             type="link"

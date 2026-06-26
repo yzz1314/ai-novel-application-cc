@@ -35,6 +35,7 @@ const RetrievalView: React.FC = () => {
   const [saving, setSaving] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [evaluating, setEvaluating] = useState(false)
   const [overview, setOverview] = useState<any>(null)
   const [config, setConfig] = useState<any>({})
   const [contextPack, setContextPack] = useState<any>(null)
@@ -47,6 +48,7 @@ const RetrievalView: React.FC = () => {
   const indexes = overview?.indexes || {}
   const packs = overview?.contextPacks || []
   const latestTasks = overview?.latestTasks || []
+  const qualityReport = overview?.qualityReport || {}
   const latestQuality = indexes?.hybrid?.quality_evaluation || indexes?.rebuildReport?.quality_evaluation || {}
   const latestBudget = indexes?.hybrid?.citation_budget || indexes?.rebuildReport?.citation_budget || {}
 
@@ -138,6 +140,21 @@ const RetrievalView: React.FC = () => {
     }
   }
 
+  const evaluateRetrievalQuality = async () => {
+    if (!projectId) return
+    try {
+      setEvaluating(true)
+      message.loading({ content: '正在评估检索质量', key: 'retrieval-quality' })
+      await retrievalApi.evaluateQuality(projectId, {})
+      message.success({ content: '检索质量评估已生成', key: 'retrieval-quality' })
+      await loadOverview()
+    } catch (error) {
+      message.error({ content: '检索质量评估失败', key: 'retrieval-quality' })
+    } finally {
+      setEvaluating(false)
+    }
+  }
+
   const pollTask = async (taskId: string) => {
     if (!projectId) return
     for (let i = 0; i < 30; i += 1) {
@@ -170,6 +187,9 @@ const RetrievalView: React.FC = () => {
     if (status === 'good') return 'success'
     if (status === 'needs_review') return 'warning'
     if (status === 'poor') return 'error'
+    if (status === 'pass') return 'success'
+    if (status === 'warn') return 'warning'
+    if (status === 'fail') return 'error'
     return 'default'
   }
 
@@ -267,6 +287,24 @@ const RetrievalView: React.FC = () => {
     { title: '完成时间', dataIndex: 'finishedAt', key: 'finishedAt' },
   ]
 
+  const qualityCheckColumns = [
+    {
+      title: '检查项',
+      dataIndex: 'title',
+      key: 'title',
+      width: 160,
+    },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      width: 100,
+      render: (status: string) => <Tag color={qualityColor(status)}>{status || 'unknown'}</Tag>,
+    },
+    { title: '结论', dataIndex: 'message', key: 'message' },
+    { title: '建议', dataIndex: 'recommendation', key: 'recommendation' },
+  ]
+
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Space style={{ width: '100%', justifyContent: 'space-between' }}>
@@ -280,6 +318,9 @@ const RetrievalView: React.FC = () => {
           </Button>
           <Button icon={<DatabaseOutlined />} onClick={syncRetrievalDb} loading={syncing}>
             同步检索数据库
+          </Button>
+          <Button icon={<SearchOutlined />} onClick={evaluateRetrievalQuality} loading={evaluating}>
+            评估检索质量
           </Button>
           <Button type="primary" icon={<SearchOutlined />} onClick={rebuild} loading={rebuilding}>
             重建索引
@@ -307,8 +348,8 @@ const RetrievalView: React.FC = () => {
           <Card>
             <Statistic
               title="检索质量"
-              value={latestQuality?.score ?? 0}
-              suffix={latestQuality?.status || ''}
+              value={qualityReport?.exists ? qualityReport.score : latestQuality?.score ?? 0}
+              suffix={qualityReport?.exists ? qualityReport.status : latestQuality?.status || ''}
             />
           </Card>
         </Col>
@@ -322,6 +363,56 @@ const RetrievalView: React.FC = () => {
           description={[...(latestQuality?.warnings || []), ...(latestBudget?.warnings || [])].join('；')}
         />
       ) : null}
+
+      <Card title="检索质量评估">
+        {qualityReport?.exists ? (
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            <Row gutter={16}>
+              <Col span={6}>
+                <Statistic title="报告评分" value={qualityReport.score ?? 0} />
+              </Col>
+              <Col span={6}>
+                <Statistic title="检查项" value={(qualityReport.checks || []).length} />
+              </Col>
+              <Col span={6}>
+                <Statistic title="上下文包" value={qualityReport.coverage?.contextPackCount ?? 0} />
+              </Col>
+              <Col span={6}>
+                <Space direction="vertical" size={4}>
+                  <Text type="secondary">状态</Text>
+                  <Tag color={qualityColor(qualityReport.status)}>{qualityReport.status || 'unknown'}</Tag>
+                </Space>
+              </Col>
+            </Row>
+            {(qualityReport.warnings || []).length ? (
+              <Alert
+                type={qualityReport.status === 'poor' ? 'error' : 'warning'}
+                showIcon
+                message="质量评估告警"
+                description={(qualityReport.warnings || []).join('；')}
+              />
+            ) : null}
+            {(qualityReport.recommendations || []).length ? (
+              <Alert
+                type="info"
+                showIcon
+                message="改进建议"
+                description={(qualityReport.recommendations || []).join('；')}
+              />
+            ) : null}
+            <Table
+              columns={qualityCheckColumns}
+              dataSource={qualityReport.checks || []}
+              rowKey="key"
+              pagination={false}
+              size="small"
+            />
+            <Text type="secondary">产物：{qualityReport.path}</Text>
+          </Space>
+        ) : (
+          <Empty description="尚未生成质量评估报告" />
+        )}
+      </Card>
 
       <Card title="检索配置">
         <Form form={form} layout="inline">

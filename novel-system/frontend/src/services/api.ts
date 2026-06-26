@@ -301,6 +301,10 @@ export const retrievalApi = {
     request(api.patch(`/projects/${projectId}/retrieval/config`, data || {})),
   rebuild: (projectId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/retrieval/rebuild`, data || {})),
+  getQualityReport: (projectId: string) =>
+    request(api.get(`/projects/${projectId}/retrieval/quality`)),
+  evaluateQuality: (projectId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/retrieval/quality/evaluate`, data || {})),
   getContextPacks: (projectId: string) =>
     request<any[]>(api.get(`/projects/${projectId}/retrieval/context-packs`)),
   getContextPack: (projectId: string, contextPackId: string) =>

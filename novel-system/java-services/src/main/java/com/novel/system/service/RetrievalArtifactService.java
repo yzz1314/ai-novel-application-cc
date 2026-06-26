@@ -16,9 +16,11 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 @Service
@@ -42,6 +44,7 @@ public class RetrievalArtifactService {
         overview.put("config", getConfig(projectId));
         overview.put("indexes", getIndexSummaries(projectId));
         overview.put("indexSummary", readOptionalJson(indexDir(projectId, "bm25").resolve("index_summary.json")));
+        overview.put("qualityReport", getQualityReport(projectId));
         overview.put("contextPacks", listContextPacks(projectId));
         overview.put("latestTasks", latestRetrievalTasks(projectId));
         return overview;
@@ -77,6 +80,199 @@ public class RetrievalArtifactService {
         report.put("exists", Files.exists(file));
         report.put("updatedAt", Files.exists(file) ? modifiedAt(file) : "");
         return report;
+    }
+
+    public Map<String, Object> getQualityReport(String projectId) {
+        projectService.getProject(projectId);
+        Path file = qualityReportFile(projectId);
+        Map<String, Object> report = readOptionalJson(file);
+        report.put("path", relative(projectId, file));
+        report.put("exists", Files.exists(file));
+        report.put("updatedAt", Files.exists(file) ? modifiedAt(file) : "");
+        if (!Files.exists(file)) {
+            report.putIfAbsent("projectId", projectId);
+            report.putIfAbsent("status", "missing");
+            report.putIfAbsent("score", 0);
+        }
+        return report;
+    }
+
+    public Map<String, Object> evaluateQuality(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        Map<String, Object> config = getConfig(projectId);
+        Map<String, Object> bm25 = getIndexSummary(projectId, "bm25");
+        Map<String, Object> vector = getIndexSummary(projectId, "vector");
+        Map<String, Object> hybrid = getIndexSummary(projectId, "hybrid");
+        Map<String, Object> rebuildReport = getRebuildReport(projectId);
+        List<Map<String, Object>> contextPacks = listContextPacks(projectId);
+
+        int minQualityScore = intValue(request == null ? null : request.get("min_quality_score"), 60);
+        double maxBudgetUtilization = doubleValue(request == null ? null : request.get("max_budget_utilization"), 0.95);
+        int maxSkippedDuplicates = intValue(request == null ? null : request.get("max_skipped_duplicates"), 3);
+
+        int bm25Count = documentCount(bm25);
+        int vectorCount = documentCount(vector);
+        int hybridCount = documentCount(hybrid);
+        Map<String, Object> latestPack = contextPacks.isEmpty() ? new LinkedHashMap<>() : contextPacks.get(0);
+        Map<String, Object> quality = firstMap(
+            hybrid.get("quality_evaluation"),
+            rebuildReport.get("quality_evaluation"),
+            latestPack.get("qualityEvaluation")
+        );
+        Map<String, Object> citationBudget = firstMap(
+            hybrid.get("citation_budget"),
+            rebuildReport.get("citation_budget"),
+            latestPack.get("citationBudget")
+        );
+        Map<String, Object> budgetUsage = asMap(citationBudget.get("usage"));
+
+        List<Map<String, Object>> checks = new ArrayList<>();
+        addCheck(
+            checks,
+            "bm25_documents",
+            bm25Count > 0 ? "pass" : "fail",
+            "BM25 documents",
+            bm25Count > 0 ? "BM25 index has " + bm25Count + " documents." : "BM25 index has no documents.",
+            bm25Count > 0 ? null : "Import samples, generate analysis/memory artifacts, then rebuild retrieval indexes."
+        );
+        String vectorStatus = vectorCount > 0 && vectorCount == bm25Count ? "pass" : (vectorCount > 0 ? "warn" : "fail");
+        addCheck(
+            checks,
+            "vector_documents",
+            vectorStatus,
+            "Vector documents",
+            "Vector index has " + vectorCount + " documents; BM25 has " + bm25Count + ".",
+            "Rebuild retrieval indexes if vector and BM25 counts drift."
+        );
+        addCheck(
+            checks,
+            "hybrid_summary",
+            Boolean.TRUE.equals(hybrid.get("exists")) ? "pass" : "warn",
+            "Hybrid summary",
+            Boolean.TRUE.equals(hybrid.get("exists")) ? "Hybrid retrieval summary exists." : "Hybrid retrieval summary is missing.",
+            "Generate a chapter context pack or run retrieval rebuild."
+        );
+        addCheck(
+            checks,
+            "rebuild_report",
+            Boolean.TRUE.equals(rebuildReport.get("exists")) ? "pass" : "warn",
+            "Rebuild report",
+            Boolean.TRUE.equals(rebuildReport.get("exists")) ? "Latest rebuild report exists." : "No retrieval rebuild report was found.",
+            "Run retrieval rebuild before delivery review."
+        );
+        int qualityScore = intValue(quality.get("score"), -1);
+        addCheck(
+            checks,
+            "quality_score",
+            qualityScore >= minQualityScore ? "pass" : (qualityScore >= 0 ? "warn" : "fail"),
+            "Quality score",
+            qualityScore >= 0 ? "Latest quality score is " + qualityScore + "." : "No quality evaluation was found.",
+            "Improve query coverage/source diversity or rebuild indexes with more project artifacts."
+        );
+        int selectedCitations = intValue(
+            firstPresent(budgetUsage.get("selected_result_count"), budgetUsage.get("selectedCitationCount")),
+            0
+        );
+        addCheck(
+            checks,
+            "citation_selection",
+            selectedCitations > 0 ? "pass" : "fail",
+            "Citation selection",
+            selectedCitations > 0 ? selectedCitations + " citations selected for prompt use." : "No citation was selected.",
+            "Check retrieval query terms and citation budget caps."
+        );
+        double utilization = doubleValue(
+            firstPresent(budgetUsage.get("context_utilization"), budgetUsage.get("retrieval_budget_utilization")),
+            -1
+        );
+        addCheck(
+            checks,
+            "citation_budget",
+            utilization >= 0 && utilization <= maxBudgetUtilization ? "pass" : (utilization >= 0 ? "warn" : "fail"),
+            "Citation budget",
+            utilization >= 0 ? "Budget utilization is " + Math.round(utilization * 100) + "%." : "No citation budget usage was found.",
+            "Reduce max result length or increase retrieval/context budget."
+        );
+        int skippedDuplicates = intValue(
+            firstPresent(budgetUsage.get("skipped_duplicates"), budgetUsage.get("skippedDuplicates")),
+            0
+        );
+        addCheck(
+            checks,
+            "duplicate_budget",
+            skippedDuplicates <= maxSkippedDuplicates ? "pass" : "warn",
+            "Duplicate pruning",
+            skippedDuplicates + " duplicate retrieval results were skipped.",
+            "Review repeated sample chunks or duplicated Markdown artifacts."
+        );
+        addCheck(
+            checks,
+            "context_packs",
+            contextPacks.isEmpty() ? "warn" : "pass",
+            "Context packs",
+            contextPacks.isEmpty() ? "No context pack was found." : contextPacks.size() + " context packs are available.",
+            "Generate at least one chapter context pack for downstream writing validation."
+        );
+
+        int score = calculateScore(checks);
+        String status = score >= 75 ? "good" : (score >= 50 ? "needs_review" : "poor");
+        Set<String> warnings = new LinkedHashSet<>();
+        Set<String> recommendations = new LinkedHashSet<>();
+        collectStrings(quality.get("warnings"), warnings);
+        collectStrings(citationBudget.get("warnings"), warnings);
+        collectStrings(quality.get("recommendations"), recommendations);
+        collectStrings(citationBudget.get("recommendations"), recommendations);
+        for (Map<String, Object> check : checks) {
+            if (!"pass".equals(check.get("status"))) {
+                warnings.add(String.valueOf(check.get("message")));
+                Object recommendation = check.get("recommendation");
+                if (recommendation != null && !String.valueOf(recommendation).isBlank()) {
+                    recommendations.add(String.valueOf(recommendation));
+                }
+            }
+        }
+
+        Map<String, Object> coverage = new LinkedHashMap<>();
+        coverage.put("bm25DocumentCount", bm25Count);
+        coverage.put("vectorDocumentCount", vectorCount);
+        coverage.put("hybridDocumentCount", hybridCount);
+        coverage.put("contextPackCount", contextPacks.size());
+        coverage.put("configExists", config.get("exists"));
+        coverage.put("rebuildReportExists", rebuildReport.get("exists"));
+
+        Map<String, Object> sourceBalance = new LinkedHashMap<>();
+        sourceBalance.put("bm25SourceCounts", asMap(bm25.get("source_counts")));
+        sourceBalance.put("citationSourceCounts", asMap(budgetUsage.get("source_type_distribution")));
+        sourceBalance.put("latestContextPackSources", latestPack.getOrDefault("sources", Map.of()));
+
+        Map<String, Object> artifacts = new LinkedHashMap<>();
+        artifacts.put("config", artifactRef(projectId, configFile(projectId)));
+        artifacts.put("bm25", artifactRef(projectId, indexDir(projectId, "bm25").resolve("index_summary.json")));
+        artifacts.put("vector", artifactRef(projectId, indexDir(projectId, "vector").resolve("index_summary.json")));
+        artifacts.put("hybrid", artifactRef(projectId, indexDir(projectId, "hybrid").resolve("index_summary.json")));
+        artifacts.put("rebuildReport", artifactRef(projectId, projectRoot(projectId).resolve("indexes").resolve("retrieval_index_report.json")));
+        artifacts.put("qualityReport", artifactRef(projectId, qualityReportFile(projectId)));
+
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("projectId", projectId);
+        report.put("evaluatedAt", LocalDateTime.now().toString());
+        report.put("status", status);
+        report.put("score", score);
+        report.put("coverage", coverage);
+        report.put("quality", quality);
+        report.put("citationBudget", citationBudget);
+        report.put("sourceBalance", sourceBalance);
+        report.put("checks", checks);
+        report.put("warnings", new ArrayList<>(warnings));
+        report.put("recommendations", new ArrayList<>(recommendations));
+        report.put("artifacts", artifacts);
+        report.put("thresholds", Map.of(
+            "minQualityScore", minQualityScore,
+            "maxBudgetUtilization", maxBudgetUtilization,
+            "maxSkippedDuplicates", maxSkippedDuplicates
+        ));
+        writeJson(qualityReportFile(projectId), report);
+        return getQualityReport(projectId);
     }
 
     public Map<String, Object> getConfig(String projectId) {
@@ -189,12 +385,154 @@ public class RetrievalArtifactService {
         return response;
     }
 
+    private void addCheck(
+            List<Map<String, Object>> checks,
+            String key,
+            String status,
+            String title,
+            String message,
+            String recommendation) {
+        Map<String, Object> check = new LinkedHashMap<>();
+        check.put("key", key);
+        check.put("status", status);
+        check.put("title", title);
+        check.put("message", message);
+        if (recommendation != null && !"pass".equals(status)) {
+            check.put("recommendation", recommendation);
+        }
+        checks.add(check);
+    }
+
+    private int calculateScore(List<Map<String, Object>> checks) {
+        if (checks.isEmpty()) {
+            return 0;
+        }
+        int total = 0;
+        for (Map<String, Object> check : checks) {
+            String status = String.valueOf(check.get("status"));
+            if ("pass".equals(status)) {
+                total += 100;
+            } else if ("warn".equals(status)) {
+                total += 60;
+            }
+        }
+        return Math.max(0, Math.min(100, Math.round((float) total / checks.size())));
+    }
+
+    @SafeVarargs
+    private final Map<String, Object> firstMap(Object... values) {
+        for (Object value : values) {
+            Map<String, Object> map = asMap(value);
+            if (!map.isEmpty()) {
+                return map;
+            }
+        }
+        return new LinkedHashMap<>();
+    }
+
+    private Object firstPresent(Object... values) {
+        for (Object value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> asMap(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            map.forEach((key, entry) -> result.put(String.valueOf(key), entry));
+            return result;
+        }
+        return new LinkedHashMap<>();
+    }
+
+    private void collectStrings(Object value, Set<String> target) {
+        if (value instanceof Iterable<?> iterable) {
+            for (Object item : iterable) {
+                if (item != null && !String.valueOf(item).isBlank()) {
+                    target.add(String.valueOf(item));
+                }
+            }
+            return;
+        }
+        if (value != null && !String.valueOf(value).isBlank()) {
+            target.add(String.valueOf(value));
+        }
+    }
+
+    private Map<String, Object> artifactRef(String projectId, Path path) {
+        Map<String, Object> artifact = new LinkedHashMap<>();
+        artifact.put("path", relative(projectId, path));
+        artifact.put("exists", Files.exists(path));
+        artifact.put("updatedAt", Files.exists(path) ? modifiedAt(path) : "");
+        return artifact;
+    }
+
+    private int documentCount(Map<String, Object> summary) {
+        if (summary == null) {
+            return 0;
+        }
+        for (String key : List.of("document_count", "documentCount", "vector_count", "returned_count", "total_documents")) {
+            int value = intValue(summary.get(key), -1);
+            if (value >= 0) {
+                return value;
+            }
+        }
+        Map<String, Object> stats = asMap(summary.get("stats"));
+        for (String key : List.of("document_count", "documentCount", "vector_count", "returned_count", "total_documents")) {
+            int value = intValue(stats.get(key), -1);
+            if (value >= 0) {
+                return value;
+            }
+        }
+        Object documents = summary.get("documents");
+        if (documents instanceof List<?> list) {
+            return list.size();
+        }
+        return 0;
+    }
+
+    private int intValue(Object value, int defaultValue) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value != null) {
+            try {
+                return Integer.parseInt(value.toString());
+            } catch (NumberFormatException ignored) {
+                return defaultValue;
+            }
+        }
+        return defaultValue;
+    }
+
+    private double doubleValue(Object value, double defaultValue) {
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        if (value != null) {
+            try {
+                return Double.parseDouble(value.toString());
+            } catch (NumberFormatException ignored) {
+                return defaultValue;
+            }
+        }
+        return defaultValue;
+    }
+
     private Path indexDir(String projectId, String indexType) {
         return projectRoot(projectId).resolve("indexes").resolve(indexType);
     }
 
     private Path configFile(String projectId) {
         return projectRoot(projectId).resolve("indexes").resolve("retrieval_config.json");
+    }
+
+    private Path qualityReportFile(String projectId) {
+        return projectRoot(projectId).resolve("indexes").resolve("retrieval_quality_report.json");
     }
 
     private Map<String, Object> readOptionalJson(Path path) {

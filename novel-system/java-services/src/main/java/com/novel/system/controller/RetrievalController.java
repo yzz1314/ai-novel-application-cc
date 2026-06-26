@@ -59,6 +59,18 @@ public class RetrievalController {
         return ResponseEntity.ok(retrievalArtifactService.getIndexSummary(projectId, indexType));
     }
 
+    @GetMapping("/quality")
+    public ResponseEntity<Map<String, Object>> getQualityReport(@PathVariable String projectId) {
+        return ResponseEntity.ok(retrievalArtifactService.getQualityReport(projectId));
+    }
+
+    @PostMapping("/quality/evaluate")
+    public ResponseEntity<Map<String, Object>> evaluateQuality(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(retrievalArtifactService.evaluateQuality(projectId, request == null ? Map.of() : request));
+    }
+
     @GetMapping("/config")
     public ResponseEntity<Map<String, Object>> getConfig(@PathVariable String projectId) {
         return ResponseEntity.ok(retrievalArtifactService.getConfig(projectId));

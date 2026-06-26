@@ -363,6 +363,52 @@ public class ArtifactService {
         }
     }
 
+    public Map<String, Object> deleteArchivedArtifact(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String pathValue = stringValue(request == null ? null : request.get("path"), null);
+        String actor = stringValue(request == null ? null : request.get("actor"), "human");
+        String reason = stringValue(request == null ? null : request.get("reason"), "");
+        if (pathValue == null || pathValue.isBlank()) {
+            throw new IllegalArgumentException("path cannot be empty");
+        }
+
+        Path archived = resolveProjectPath(projectId, pathValue);
+        if (!Files.isRegularFile(archived)) {
+            throw new ResourceNotFoundException("Archived artifact does not exist: " + pathValue);
+        }
+
+        String archivedRelative = relative(projectId, archived);
+        String restoreRelative = restorePathFromArchive(archivedRelative);
+        if (isGovernanceArtifact(restoreRelative)) {
+            throw new IllegalArgumentException("Governance artifacts cannot be permanently deleted through archive cleanup: " + restoreRelative);
+        }
+
+        try {
+            long size = Files.size(archived);
+            String updatedAt = modifiedAt(archived);
+            Files.delete(archived);
+            cleanupEmptyParents(archived.getParent(), projectRoot(projectId).resolve("artifacts").resolve("archive"));
+
+            Map<String, Object> audit = auditBase(projectId, "delete_archived", actor, reason);
+            audit.put("archivedPath", archivedRelative);
+            audit.put("originalPath", restoreRelative);
+            audit.put("size", size);
+            audit.put("updatedAt", updatedAt);
+            audit.put("sensitive", isSensitivePath(restoreRelative));
+            appendAudit(projectId, audit);
+
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("status", "deleted");
+            response.put("archivedPath", archivedRelative);
+            response.put("originalPath", restoreRelative);
+            response.put("size", size);
+            response.put("audit", audit);
+            return response;
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to delete archived artifact: " + archivedRelative, e);
+        }
+    }
+
     public Map<String, Object> diffArtifacts(String projectId, Map<String, Object> request) {
         projectService.getProject(projectId);
         String leftPath = stringValue(request == null ? null : request.get("leftPath"), stringValue(request == null ? null : request.get("left"), null));

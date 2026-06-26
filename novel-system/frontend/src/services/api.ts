@@ -360,6 +360,8 @@ export const artifactApi = {
     request(api.post(`/projects/${projectId}/artifacts/archive`, data || {})),
   restore: (projectId: string, data: any) =>
     request(api.post(`/projects/${projectId}/artifacts/restore`, data || {})),
+  deleteArchived: (projectId: string, data: any) =>
+    request(api.post(`/projects/${projectId}/artifacts/delete`, data || {})),
   diff: (projectId: string, data: any) =>
     request(api.post(`/projects/${projectId}/artifacts/diff`, data || {})),
   audit: (projectId: string, params?: any) =>

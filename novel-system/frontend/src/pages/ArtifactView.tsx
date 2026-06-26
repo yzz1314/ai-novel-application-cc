@@ -279,6 +279,33 @@ const ArtifactView: React.FC = () => {
     })
   }
 
+  const deleteArchivedArtifact = (record: any) => {
+    if (!projectId) return
+    Modal.confirm({
+      title: '永久删除归档产物？',
+      content: '这会物理删除 artifacts/archive 中的归档文件，删除后不能从产物管理页恢复；操作会写入审计日志。',
+      okText: '永久删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          setActionLoading(true)
+          await artifactApi.deleteArchived(projectId, {
+            path: record.path,
+            actor: 'human',
+            reason: 'ArtifactView archived artifact permanent delete',
+          })
+          message.success('归档产物已永久删除')
+          await loadData()
+        } catch (error) {
+          message.error('永久删除归档产物失败')
+        } finally {
+          setActionLoading(false)
+        }
+      },
+    })
+  }
+
   const runDiff = async (allowSensitive = false) => {
     if (!projectId || selectedItems.length !== 2) {
       message.warning('请选择两个文本产物进行对比')
@@ -375,9 +402,14 @@ const ArtifactView: React.FC = () => {
             下载
           </Button>
           {isArchivedArtifact(record) ? (
-            <Button type="link" icon={<RollbackOutlined />} onClick={() => restoreArtifact(record)}>
-              恢复
-            </Button>
+            <>
+              <Button type="link" icon={<RollbackOutlined />} onClick={() => restoreArtifact(record)}>
+                恢复
+              </Button>
+              <Button type="link" danger icon={<DeleteOutlined />} onClick={() => deleteArchivedArtifact(record)}>
+                永久删除
+              </Button>
+            </>
           ) : (
             <Button type="link" danger icon={<DeleteOutlined />} onClick={() => archiveArtifact(record)}>
               归档

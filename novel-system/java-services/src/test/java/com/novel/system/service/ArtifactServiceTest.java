@@ -97,6 +97,48 @@ class ArtifactServiceTest {
     }
 
     @Test
+    void deleteArchivedArtifactPermanentlyRemovesArchivedFileAndAudits() throws Exception {
+        writeProjectFile("analysis/obsolete.md", "obsolete report");
+        Map<String, Object> archived = artifactService.archiveArtifact(PROJECT_ID, Map.of(
+            "path", "analysis/obsolete.md",
+            "actor", "tester",
+            "reason", "archive before delete"
+        ));
+        String archivedPath = String.valueOf(archived.get("archivedPath"));
+
+        Map<String, Object> deleted = artifactService.deleteArchivedArtifact(PROJECT_ID, Map.of(
+            "path", archivedPath,
+            "actor", "reviewer",
+            "reason", "cleanup archived artifact"
+        ));
+
+        assertThat(deleted)
+            .containsEntry("status", "deleted")
+            .containsEntry("archivedPath", archivedPath)
+            .containsEntry("originalPath", "analysis/obsolete.md");
+        assertThat(Files.exists(projectRoot().resolve(archivedPath))).isFalse();
+        assertThat(Files.exists(projectRoot().resolve("analysis/obsolete.md"))).isFalse();
+        assertThat(auditLog())
+            .contains("\"action\":\"delete_archived\"")
+            .contains("\"archivedPath\":\"" + archivedPath + "\"")
+            .contains("\"originalPath\":\"analysis/obsolete.md\"")
+            .contains("\"actor\":\"reviewer\"");
+    }
+
+    @Test
+    void deleteArchivedArtifactRejectsActiveWorkspaceFile() throws Exception {
+        writeProjectFile("analysis/live.md", "live report");
+
+        assertThatThrownBy(() -> artifactService.deleteArchivedArtifact(PROJECT_ID, Map.of(
+            "path", "analysis/live.md"
+        )))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("Artifact is not in archive");
+
+        assertThat(Files.readString(projectRoot().resolve("analysis/live.md"))).isEqualTo("live report");
+    }
+
+    @Test
     void previewDownloadAndDiffWriteAuditEvents() throws Exception {
         writeProjectFile("analysis/left.md", "one\ntwo\n");
         writeProjectFile("analysis/right.md", "one\nthree\n");

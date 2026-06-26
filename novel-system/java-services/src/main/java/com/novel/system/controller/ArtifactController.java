@@ -79,6 +79,13 @@ public class ArtifactController {
         return ResponseEntity.ok(artifactService.restoreArtifact(projectId, request == null ? Map.of() : request));
     }
 
+    @PostMapping("/delete")
+    public ResponseEntity<Map<String, Object>> deleteArchivedArtifact(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(artifactService.deleteArchivedArtifact(projectId, request == null ? Map.of() : request));
+    }
+
     @PostMapping("/diff")
     public ResponseEntity<Map<String, Object>> diffArtifacts(
             @PathVariable String projectId,

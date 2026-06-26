@@ -194,7 +194,11 @@ public class TaskExecutorService {
                     "draft"
                 );
             }
-        } else if ("memory_extraction".equals(task.getTaskType()) || "continuity_check".equals(task.getTaskType())) {
+        } else if (
+            "memory_extraction".equals(task.getTaskType())
+                || "continuity_check".equals(task.getTaskType())
+                || "memory_audit".equals(task.getTaskType())
+        ) {
             try {
                 memoryArtifactService.syncMemoryFromWorkspace(task.getProjectId(), task.getParameters());
             } catch (Exception e) {

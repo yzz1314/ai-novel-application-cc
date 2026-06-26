@@ -42,10 +42,12 @@ public class MemoryService {
         overview.put("types", memoryTypes().stream().map(type -> memoryTypeSummary(projectId, type)).toList());
         overview.put("snapshots", listSnapshots(projectId));
         overview.put("continuityReports", listContinuityReports(projectId));
+        overview.put("auditReports", listAuditReports(projectId));
         overview.put("latestTasks", taskExecutorService.listTasksByProject(projectId).stream()
             .filter(task -> "memory_extraction".equals(task.getTaskType())
                 || "memory_query".equals(task.getTaskType())
-                || "continuity_check".equals(task.getTaskType()))
+                || "continuity_check".equals(task.getTaskType())
+                || "memory_audit".equals(task.getTaskType()))
             .sorted(Comparator.comparing(Task::getCreatedAt, Comparator.nullsLast(Comparator.reverseOrder())))
             .limit(10)
             .map(this::taskSummary)
@@ -171,6 +173,76 @@ public class MemoryService {
         response.put("path", relative(projectId, file));
         response.put("updatedAt", modifiedAt(file));
         return response;
+    }
+
+    public List<Map<String, Object>> listAuditReports(String projectId) {
+        projectService.getProject(projectId);
+        Path auditDir = memoryDir(projectId).resolve("audits");
+        if (!Files.exists(auditDir)) {
+            return List.of();
+        }
+
+        List<Map<String, Object>> reports = new ArrayList<>();
+        try (var stream = Files.list(auditDir)) {
+            stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".json"))
+                .forEach(path -> {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("id", stripSuffix(path.getFileName().toString(), ".json"));
+                    item.put("path", relative(projectId, path));
+                    item.put("updatedAt", modifiedAt(path));
+                    try {
+                        Map<String, Object> report = readJsonMap(path);
+                        item.put("bookId", report.get("book_id"));
+                        item.put("hasIssues", report.get("has_issues"));
+                        item.put("issueCount", report.get("issue_count"));
+                        item.put("criticalCount", report.get("critical_count"));
+                        item.put("majorCount", report.get("major_count"));
+                        item.put("minorCount", report.get("minor_count"));
+                        item.put("auditedAt", report.get("audited_at"));
+                    } catch (Exception ignored) {
+                        // Keep listing usable even if a report is partially written.
+                    }
+                    reports.add(item);
+                });
+        } catch (IOException e) {
+            throw new RuntimeException("读取记忆审计报告失败", e);
+        }
+
+        reports.sort(Comparator.comparing(report -> String.valueOf(report.get("updatedAt")), Comparator.reverseOrder()));
+        return reports;
+    }
+
+    public Map<String, Object> getAuditReport(String projectId, String reportId) {
+        projectService.getProject(projectId);
+        validateId(reportId, "reportId");
+        Path file = memoryDir(projectId).resolve("audits").resolve(reportId + ".json");
+        if (!Files.exists(file)) {
+            throw new ResourceNotFoundException("记忆审计报告不存在: " + reportId);
+        }
+        Map<String, Object> response = readJsonMap(file);
+        response.put("id", reportId);
+        response.put("path", relative(projectId, file));
+        response.put("updatedAt", modifiedAt(file));
+        return response;
+    }
+
+    public Task auditMemory(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        Map<String, Object> parameters = new LinkedHashMap<>(request == null ? Map.of() : request);
+        parameters.put("project_id", projectId);
+        parameters.putIfAbsent("book_id", "default");
+        parameters.put("audit", true);
+
+        Task task = taskExecutorService.createTask(
+            projectId,
+            "memory_audit",
+            "memory_query",
+            Map.of("book_id", parameters.get("book_id")),
+            parameters
+        );
+        taskExecutorService.executeTaskAsync(task.getId());
+        return task;
     }
 
     public Task checkContinuity(String projectId, Map<String, Object> request) {

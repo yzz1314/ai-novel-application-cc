@@ -27,7 +27,7 @@ class MemoryQueryAgent(BaseAgent):
 
     def __init__(self, llm_client: LLMClient = None):
         super().__init__("MemoryQueryAgent")
-        self.supported_tasks = ["memory_query", "continuity_check"]
+        self.supported_tasks = ["memory_query", "continuity_check", "memory_audit"]
         self.llm_client = llm_client or LLMClient()
         self.logger = get_logger("MemoryQueryAgent")
 
@@ -39,6 +39,8 @@ class MemoryQueryAgent(BaseAgent):
             await self.validate_request(request)
 
             # 判断任务类型
+            if request.task_type == "memory_audit" or request.parameters.get("audit") is True:
+                return await self._handle_memory_audit(request)
             if "query_type" in request.parameters:
                 # 记忆查询
                 return await self._handle_query(request)
@@ -80,6 +82,37 @@ class MemoryQueryAgent(BaseAgent):
             request=request,
             status="success",
             structured_output=structured_output
+        )
+
+    async def _handle_memory_audit(self, request: AgentRequest) -> AgentResponse:
+        project_id = request.project_id
+        book_id = str(request.parameters.get("book_id") or "default")
+        memories = await self._load_all_memories(project_id, book_id)
+        issues = self._audit_memory_conflicts(memories)
+        counts = self._count_by_severity(issues)
+        report_path = await self._save_memory_audit_report(
+            project_id=project_id,
+            book_id=book_id,
+            issues=issues,
+            counts=counts,
+            memories=memories,
+        )
+        structured_output = {
+            "project_id": project_id,
+            "book_id": book_id,
+            "has_issues": len(issues) > 0,
+            "issue_count": len(issues),
+            "critical_count": counts["critical"],
+            "major_count": counts["major"],
+            "minor_count": counts["minor"],
+            "issues": issues,
+            "report_path": str(report_path),
+        }
+        return self._build_response(
+            request=request,
+            status="success",
+            output_refs=[str(report_path)],
+            structured_output=structured_output,
         )
 
     async def _handle_continuity_check(self, request: AgentRequest) -> AgentResponse:
@@ -406,6 +439,209 @@ class MemoryQueryAgent(BaseAgent):
 
         return issues
 
+    def _audit_memory_conflicts(self, memories: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        issues: List[Dict[str, Any]] = []
+        issues.extend(self._audit_duplicate_entities("characters", memories.get("characters", []), "character_id", "name"))
+        issues.extend(self._audit_duplicate_entities("world_settings", memories.get("world_settings", []), "setting_id", "name"))
+        issues.extend(self._audit_duplicate_entities("plots", memories.get("plots", []), "plot_id", "title"))
+        issues.extend(self._audit_duplicate_entities("suspenses", memories.get("suspenses", []), "suspense_id", "title"))
+        issues.extend(self._audit_duplicate_entities("timeline", memories.get("timeline", []), "event_id", "title"))
+        issues.extend(self._audit_character_memory(memories.get("characters", [])))
+        issues.extend(self._audit_suspense_memory(memories.get("suspenses", [])))
+        issues.extend(self._audit_timeline_memory(memories.get("timeline", [])))
+        issues.extend(self._audit_cross_memory_references(memories))
+        return issues
+
+    def _audit_duplicate_entities(
+            self,
+            memory_type: str,
+            items: List[Dict[str, Any]],
+            id_key: str,
+            name_key: str) -> List[Dict[str, Any]]:
+        issues: List[Dict[str, Any]] = []
+        id_seen: Dict[str, Dict[str, Any]] = {}
+        name_seen: Dict[str, Dict[str, Any]] = {}
+        for item in items:
+            item_id = str(item.get(id_key) or "").strip()
+            name = str(item.get(name_key) or "").strip()
+            if item_id:
+                if item_id in id_seen:
+                    issues.append(self._issue(
+                        memory_type,
+                        "major",
+                        "记忆ID重复",
+                        f"{memory_type} 中存在重复 {id_key}: {item_id}",
+                        [self._to_int(item.get("chapter")), self._to_int(id_seen[item_id].get("chapter"))],
+                        "合并重复条目，保留最新且信息最完整的权威记录，并把旧记录写入审计说明。",
+                    ))
+                id_seen[item_id] = item
+            if name:
+                if name in name_seen:
+                    issues.append(self._issue(
+                        memory_type,
+                        "minor",
+                        "记忆名称重复",
+                        f"{memory_type} 中存在同名条目：{name}",
+                        [self._to_int(item.get("chapter")), self._to_int(name_seen[name].get("chapter"))],
+                        "确认是否为同一对象；若是则合并，若不是则为其中一个增加限定名或别名说明。",
+                    ))
+                name_seen[name] = item
+        return issues
+
+    def _audit_character_memory(self, characters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        issues: List[Dict[str, Any]] = []
+        known_refs = self._memory_refs(characters, "character_id", "name")
+        for character in characters:
+            name = str(character.get("name") or character.get("character_id") or "未知人物")
+            first_mentioned = self._to_int(character.get("first_mentioned"))
+            last_updated = self._to_int(character.get("last_updated"))
+            appearances = sorted({
+                chapter for chapter in (self._to_int(value) for value in character.get("appearances", []))
+                if chapter is not None
+            })
+            if appearances and first_mentioned is not None and min(appearances) < first_mentioned:
+                issues.append(self._issue(
+                    "character",
+                    "major",
+                    "人物首次提及晚于出场记录",
+                    f"{name} first_mentioned={first_mentioned}，但 appearances 最早为第 {min(appearances)} 章。",
+                    [first_mentioned, min(appearances)],
+                    "将 first_mentioned 调整为最早出场章节，或删除误写的出场记录。",
+                ))
+            if last_updated is not None and appearances and last_updated < max(appearances):
+                issues.append(self._issue(
+                    "character",
+                    "minor",
+                    "人物最后更新时间落后",
+                    f"{name} last_updated={last_updated}，但 appearances 已到第 {max(appearances)} 章。",
+                    [last_updated, max(appearances)],
+                    "把 last_updated 更新到最新出场章节，保证章节上下文读取最新状态。",
+                ))
+            for target in (character.get("relationships") or {}).keys():
+                if target and target not in known_refs:
+                    issues.append(self._issue(
+                        "relationship",
+                        "minor",
+                        "人物关系引用缺失",
+                        f"{name} 的关系引用了不存在的人物：{target}",
+                        [last_updated],
+                        "补充目标人物记忆，或把关系目标改为已存在人物/组织。",
+                    ))
+        return issues
+
+    def _audit_suspense_memory(self, suspenses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        issues: List[Dict[str, Any]] = []
+        active_statuses = {"active", "open", "ongoing", "未解", "进行中"}
+        resolved_statuses = {"resolved", "closed", "done", "已解决", "完成"}
+        for suspense in suspenses:
+            title = str(suspense.get("title") or suspense.get("suspense_id") or "未命名伏笔")
+            status = str(suspense.get("status") or "").lower()
+            set_chapter = self._to_int(suspense.get("set_chapter"))
+            resolved_chapter = self._to_int(suspense.get("resolved_chapter"))
+            if resolved_chapter is not None and set_chapter is not None and resolved_chapter < set_chapter:
+                issues.append(self._issue(
+                    "foreshadowing",
+                    "critical",
+                    "伏笔解决早于设置",
+                    f"{title} resolved_chapter={resolved_chapter} 早于 set_chapter={set_chapter}。",
+                    [resolved_chapter, set_chapter],
+                    "调整伏笔设置/解决章节，或拆分为两个独立伏笔。",
+                ))
+            if status in resolved_statuses and resolved_chapter is None:
+                issues.append(self._issue(
+                    "foreshadowing",
+                    "minor",
+                    "已解决伏笔缺少解决章节",
+                    f"{title} 标记为 {status}，但没有 resolved_chapter。",
+                    [set_chapter],
+                    "补充 resolved_chapter 和解决说明，方便后续章节避免重复解谜。",
+                ))
+            if status in active_statuses and resolved_chapter is not None:
+                issues.append(self._issue(
+                    "foreshadowing",
+                    "major",
+                    "伏笔状态与解决章节冲突",
+                    f"{title} 仍标记为 {status}，但已有 resolved_chapter={resolved_chapter}。",
+                    [set_chapter, resolved_chapter],
+                    "把状态改为 resolved，或移除误写的 resolved_chapter。",
+                ))
+        return issues
+
+    def _audit_timeline_memory(self, timeline: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        issues: List[Dict[str, Any]] = []
+        previous_chapter: Optional[int] = None
+        previous_title = ""
+        for event in timeline:
+            chapter = self._to_int(event.get("chapter"))
+            title = str(event.get("title") or event.get("event_id") or "未命名事件")
+            if chapter is None:
+                issues.append(self._issue(
+                    "timeline",
+                    "minor",
+                    "时间线事件缺少章节",
+                    f"{title} 缺少 chapter 字段。",
+                    [],
+                    "补充事件发生章节，避免连续性检查无法排序。",
+                ))
+                continue
+            if previous_chapter is not None and chapter < previous_chapter:
+                issues.append(self._issue(
+                    "timeline",
+                    "major",
+                    "时间线排序倒挂",
+                    f"{title} 位于第 {chapter} 章，但前一条 {previous_title} 是第 {previous_chapter} 章。",
+                    [chapter, previous_chapter],
+                    "按章节重新排序 timeline.json，或修正事件章节。",
+                ))
+            previous_chapter = chapter
+            previous_title = title
+        return issues
+
+    def _audit_cross_memory_references(self, memories: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        issues: List[Dict[str, Any]] = []
+        character_refs = self._memory_refs(memories.get("characters", []), "character_id", "name")
+        setting_refs = self._memory_refs(memories.get("world_settings", []), "setting_id", "name")
+        for plot in memories.get("plots", []):
+            title = str(plot.get("title") or plot.get("plot_id") or "未命名剧情")
+            for field, known_refs in [
+                ("involved_characters", character_refs),
+                ("involved_settings", setting_refs),
+            ]:
+                for name in plot.get(field, []) or []:
+                    if name and name not in known_refs:
+                        issues.append(self._issue(
+                            "plot",
+                            "minor",
+                            "剧情引用缺失",
+                            f"{title} 的 {field} 引用了不存在的记忆对象：{name}",
+                            [self._to_int(plot.get("start_chapter")), self._to_int(plot.get("end_chapter"))],
+                            "补齐对应人物/设定记忆，或修正剧情引用名称。",
+                        ))
+        for event in memories.get("timeline", []):
+            title = str(event.get("title") or event.get("event_id") or "未命名事件")
+            for name in event.get("involved_characters", []) or []:
+                if name and name not in character_refs:
+                    issues.append(self._issue(
+                        "timeline",
+                        "minor",
+                        "时间线人物引用缺失",
+                        f"{title} 引用了不存在的人物：{name}",
+                        [self._to_int(event.get("chapter"))],
+                        "补充人物记忆，或把事件人物名改为权威名称。",
+                    ))
+        return issues
+
+    def _memory_refs(self, items: List[Dict[str, Any]], id_key: str, name_key: str) -> set:
+        refs = set()
+        for item in items:
+            for value in [item.get(id_key), item.get(name_key)]:
+                if value:
+                    refs.add(str(value))
+            for alias in item.get("aliases", []) or []:
+                if alias:
+                    refs.add(str(alias))
+        return refs
+
     def _future_records(self, records: Any, chapter_number: int) -> List[Dict[str, Any]]:
         if not isinstance(records, list):
             return []
@@ -515,6 +751,50 @@ class MemoryQueryAgent(BaseAgent):
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         return report_path
+
+    async def _save_memory_audit_report(
+        self,
+        project_id: str,
+        book_id: str,
+        issues: List[Dict[str, Any]],
+        counts: Dict[str, int],
+        memories: Dict[str, List[Dict[str, Any]]],
+    ) -> Path:
+        report_dir = (
+            Path(settings.PROJECT_BASE_PATH) / "projects" /
+            project_id / "memory" / "audits"
+        )
+        report_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        report_path = report_dir / f"memory_audit_{timestamp}.json"
+        report = {
+            "project_id": project_id,
+            "book_id": book_id,
+            "audited_at": datetime.now().isoformat(),
+            "has_issues": len(issues) > 0,
+            "issue_count": len(issues),
+            "critical_count": counts["critical"],
+            "major_count": counts["major"],
+            "minor_count": counts["minor"],
+            "memory_counts": {key: len(value) for key, value in memories.items()},
+            "issues": issues,
+            "resolution_plan": self._memory_resolution_plan(issues),
+        }
+        with open(report_path, 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        return report_path
+
+    def _memory_resolution_plan(self, issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        priority = {"critical": 0, "major": 1, "minor": 2}
+        plan = []
+        for index, issue in enumerate(sorted(issues, key=lambda item: priority.get(item.get("severity"), 9)), start=1):
+            plan.append({
+                "step": index,
+                "severity": issue.get("severity"),
+                "title": issue.get("title"),
+                "action": issue.get("suggestion"),
+            })
+        return plan
 
     async def _load_memories(self, query_request: MemoryQueryRequest) -> Dict:
         """加载记忆数据"""

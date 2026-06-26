@@ -87,6 +87,26 @@ public class MemoryController {
         return ResponseEntity.ok(memoryService.getContinuityReport(projectId, reportId));
     }
 
+    @GetMapping("/audits")
+    public ResponseEntity<List<Map<String, Object>>> listAuditReports(@PathVariable String projectId) {
+        return ResponseEntity.ok(memoryService.listAuditReports(projectId));
+    }
+
+    @GetMapping("/audits/{reportId}")
+    public ResponseEntity<Map<String, Object>> getAuditReport(
+            @PathVariable String projectId,
+            @PathVariable String reportId) {
+        return ResponseEntity.ok(memoryService.getAuditReport(projectId, reportId));
+    }
+
+    @PostMapping("/audit")
+    public ResponseEntity<TaskResponse> auditMemory(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        Task task = memoryService.auditMemory(projectId, request);
+        return ResponseEntity.ok(TaskResponse.from(task));
+    }
+
     @PostMapping("/continuity/check")
     public ResponseEntity<TaskResponse> checkContinuity(
             @PathVariable String projectId,

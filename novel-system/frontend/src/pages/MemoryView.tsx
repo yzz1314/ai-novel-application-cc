@@ -50,8 +50,10 @@ const MemoryView: React.FC = () => {
   const [activeType, setActiveType] = useState('characters')
   const [snapshots, setSnapshots] = useState<any[]>([])
   const [continuityReports, setContinuityReports] = useState<any[]>([])
+  const [auditReports, setAuditReports] = useState<any[]>([])
   const [snapshotDrawer, setSnapshotDrawer] = useState<any>(null)
   const [continuityDrawer, setContinuityDrawer] = useState<any>(null)
+  const [auditDrawer, setAuditDrawer] = useState<any>(null)
   const [searchText, setSearchText] = useState('')
   const [continuityForm] = Form.useForm()
 
@@ -67,6 +69,7 @@ const MemoryView: React.FC = () => {
       setOverview(overviewData)
       setSnapshots(overviewData?.snapshots || [])
       setContinuityReports(overviewData?.continuityReports || [])
+      setAuditReports(overviewData?.auditReports || [])
 
       const details = await Promise.all(
         memoryTypes.map((type) =>
@@ -127,6 +130,17 @@ const MemoryView: React.FC = () => {
     }
   }
 
+  const runMemoryAudit = async () => {
+    if (!projectId) return
+    try {
+      const task: any = await memoryApi.audit(projectId, { book_id: 'default' })
+      message.success(`记忆审计任务已创建：${task.id}`)
+      await loadMemories()
+    } catch (error) {
+      message.error('创建记忆审计失败')
+    }
+  }
+
   const openContinuityReport = async (report: any) => {
     if (!projectId) return
     try {
@@ -134,6 +148,16 @@ const MemoryView: React.FC = () => {
       setContinuityDrawer(data)
     } catch (error) {
       message.error('加载连续性报告失败')
+    }
+  }
+
+  const openAuditReport = async (report: any) => {
+    if (!projectId) return
+    try {
+      const data = await memoryApi.getAuditReport(projectId, report.id)
+      setAuditDrawer(data)
+    } catch (error) {
+      message.error('加载记忆审计报告失败')
     }
   }
 
@@ -204,6 +228,35 @@ const MemoryView: React.FC = () => {
     },
   ]
 
+  const auditReportColumns = [
+    { title: '报告', dataIndex: 'id', key: 'id' },
+    { title: '书籍', dataIndex: 'bookId', key: 'bookId', width: 120 },
+    {
+      title: '结果',
+      dataIndex: 'hasIssues',
+      key: 'hasIssues',
+      width: 100,
+      render: (hasIssues: boolean) => (
+        <Tag color={hasIssues ? 'error' : 'success'}>{hasIssues ? '有冲突' : '通过'}</Tag>
+      ),
+    },
+    { title: '问题', dataIndex: 'issueCount', key: 'issueCount', width: 80 },
+    { title: '严重', dataIndex: 'criticalCount', key: 'criticalCount', width: 80 },
+    { title: '重要', dataIndex: 'majorCount', key: 'majorCount', width: 80 },
+    { title: '轻微', dataIndex: 'minorCount', key: 'minorCount', width: 80 },
+    { title: '审计时间', dataIndex: 'auditedAt', key: 'auditedAt' },
+    {
+      title: '操作',
+      key: 'action',
+      width: 90,
+      render: (_: any, record: any) => (
+        <Button type="link" onClick={() => openAuditReport(record)}>
+          查看
+        </Button>
+      ),
+    },
+  ]
+
   const issueColumns = [
     { title: '类型', dataIndex: 'issue_type', key: 'issue_type', width: 110 },
     {
@@ -220,6 +273,23 @@ const MemoryView: React.FC = () => {
     { title: '标题', dataIndex: 'title', key: 'title' },
     { title: '说明', dataIndex: 'description', key: 'description' },
     { title: '建议', dataIndex: 'suggestion', key: 'suggestion' },
+  ]
+
+  const resolutionColumns = [
+    { title: '步骤', dataIndex: 'step', key: 'step', width: 80 },
+    {
+      title: '级别',
+      dataIndex: 'severity',
+      key: 'severity',
+      width: 90,
+      render: (severity: string) => (
+        <Tag color={severity === 'critical' ? 'error' : severity === 'major' ? 'warning' : 'default'}>
+          {severity}
+        </Tag>
+      ),
+    },
+    { title: '问题', dataIndex: 'title', key: 'title' },
+    { title: '处理建议', dataIndex: 'action', key: 'action' },
   ]
 
   const latestContinuityTasks = (overview?.latestTasks || []).filter(
@@ -246,7 +316,7 @@ const MemoryView: React.FC = () => {
               <Statistic title="快照" value={snapshots.length} />
             </Col>
             <Col span={6}>
-              <Statistic title="记忆任务" value={overview?.latestTasks?.length || 0} />
+              <Statistic title="审计报告" value={auditReports.length} />
             </Col>
           </Row>
           <Table
@@ -343,6 +413,31 @@ const MemoryView: React.FC = () => {
           rowKey="id"
           loading={loading}
         />
+      ),
+    },
+    {
+      key: 'audit',
+      label: '审计',
+      children: (
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="记忆审计会扫描人物、设定、剧情、伏笔和时间线 JSON，输出冲突、引用缺失和建议解决顺序。"
+          />
+          <Space>
+            <Button type="primary" onClick={runMemoryAudit}>
+              启动记忆审计
+            </Button>
+          </Space>
+          <Table
+            columns={auditReportColumns}
+            dataSource={auditReports}
+            rowKey="id"
+            loading={loading}
+            pagination={{ pageSize: 8 }}
+          />
+        </Space>
       ),
     },
     {
@@ -496,6 +591,43 @@ const MemoryView: React.FC = () => {
           />
           <pre style={{ whiteSpace: 'pre-wrap' }}>
             {JSON.stringify(continuityDrawer, null, 2)}
+          </pre>
+        </Space>
+      </Drawer>
+
+      <Drawer
+        title={auditDrawer?.id || '记忆审计报告'}
+        width={1080}
+        open={!!auditDrawer}
+        onClose={() => setAuditDrawer(null)}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Descriptions bordered column={3}>
+            <Descriptions.Item label="书籍">{auditDrawer?.book_id || '-'}</Descriptions.Item>
+            <Descriptions.Item label="问题数">{auditDrawer?.issue_count ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="严重">{auditDrawer?.critical_count ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="重要">{auditDrawer?.major_count ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="轻微">{auditDrawer?.minor_count ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="报告路径">{auditDrawer?.path || '-'}</Descriptions.Item>
+          </Descriptions>
+          <Card title="解决顺序" size="small">
+            <Table
+              columns={resolutionColumns}
+              dataSource={auditDrawer?.resolution_plan || []}
+              rowKey={(_, index) => String(index)}
+              pagination={false}
+            />
+          </Card>
+          <Card title="冲突详情" size="small">
+            <Table
+              columns={issueColumns}
+              dataSource={auditDrawer?.issues || []}
+              rowKey={(_, index) => String(index)}
+              pagination={{ pageSize: 8 }}
+            />
+          </Card>
+          <pre style={{ whiteSpace: 'pre-wrap' }}>
+            {JSON.stringify(auditDrawer, null, 2)}
           </pre>
         </Space>
       </Drawer>

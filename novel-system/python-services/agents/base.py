@@ -54,6 +54,12 @@ class BaseAgent(ABC):
                 for key, value in llm_client.current_model_metadata().items()
                 if value not in (None, "")
             })
+        if llm_client and hasattr(llm_client, "current_usage_summary"):
+            metrics.update({
+                key: value
+                for key, value in llm_client.current_usage_summary().items()
+                if value not in (None, "", [], {})
+            })
 
         return AgentResponse(
             task_id=request.task_id,

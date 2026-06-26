@@ -297,7 +297,11 @@ class WorkflowEngine:
 
         agent = registry[agent_name]
         if self.llm_client and hasattr(self.llm_client, "profile_context"):
-            async with self.llm_client.profile_context(request.model_profile_id, task_type):
+            async with self.llm_client.profile_context(
+                    request.model_profile_id,
+                    task_type,
+                    project_id=request.project_id,
+                    task_id=node_request.task_id):
                 response = await agent.run(node_request)
                 return response, node_metadata
         response = await agent.run(node_request)

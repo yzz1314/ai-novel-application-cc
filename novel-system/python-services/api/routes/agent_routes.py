@@ -79,7 +79,11 @@ async def run_agent(agent_name: str, request: AgentRequest):
         agent = AGENT_REGISTRY[agent_name]
 
         async def run_registered_agent():
-            async with llm_client.profile_context(request.model_profile_id, request.task_type):
+            async with llm_client.profile_context(
+                    request.model_profile_id,
+                    request.task_type,
+                    project_id=request.project_id,
+                    task_id=request.task_id):
                 return await agent.run(request)
 
         running_task = asyncio.create_task(run_registered_agent())

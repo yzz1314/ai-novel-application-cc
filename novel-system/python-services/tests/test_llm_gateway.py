@@ -73,14 +73,21 @@ async def test_llm_gateway_fallback_cache_and_cost_metrics(tmp_path, monkeypatch
     monkeypatch.setattr(llm_client_module, "acompletion", fake_acompletion)
     original_base_path = settings.PROJECT_BASE_PATH
     original_mock = settings.MOCK_LLM
+    project_id = "project_gateway"
+    task_id = "task_gateway"
     settings.PROJECT_BASE_PATH = str(tmp_path)
     settings.MOCK_LLM = False
     try:
         client = LLMClient()
-        async with client.profile_context("gateway_profile", "chapter_writing"):
+        async with client.profile_context(
+                "gateway_profile",
+                "chapter_writing",
+                project_id=project_id,
+                task_id=task_id):
             first = await client.generate("请生成一段章节正文")
             second = await client.generate("请生成一段章节正文")
             metadata = client.current_model_metadata()
+            usage_summary = client.current_usage_summary()
     finally:
         settings.PROJECT_BASE_PATH = original_base_path
         settings.MOCK_LLM = original_mock
@@ -100,6 +107,34 @@ async def test_llm_gateway_fallback_cache_and_cost_metrics(tmp_path, monkeypatch
     assert metadata["model"] == "fallback-model"
     assert metadata["cache_hit"] is True
     assert metadata["fallback_used"] is True
+
+    ledger_path = tmp_path / "projects" / project_id / "logs" / "llm_usage" / f"{task_id}.jsonl"
+    assert ledger_path.exists()
+    ledger_lines = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(ledger_lines) == 2
+    assert ledger_lines[0]["cache_hit"] is False
+    assert ledger_lines[0]["fallback_used"] is True
+    assert ledger_lines[0]["fallback_attempts"] == 1
+    assert ledger_lines[0]["model"] == "fallback-model"
+    assert ledger_lines[0]["project_id"] == project_id
+    assert ledger_lines[0]["task_id"] == task_id
+    assert ledger_lines[1]["cache_hit"] is True
+    assert ledger_lines[1]["fallback_used"] is True
+
+    assert usage_summary["llm_call_count"] == 2
+    assert usage_summary["llm_cache_hits"] == 1
+    assert usage_summary["llm_fallback_count"] == 2
+    assert usage_summary["llm_fallback_attempts"] == 2
+    assert usage_summary["llm_prompt_tokens"] == 240
+    assert usage_summary["llm_completion_tokens"] == 80
+    assert usage_summary["llm_total_tokens"] == 320
+    assert usage_summary["llm_estimated_cost_usd"] == 0.0008
+    assert usage_summary["llm_models"] == ["fallback-model"]
+    assert usage_summary["llm_model_roles"] == ["fallbackModel[0]"]
+    assert usage_summary["llm_usage_log_path"] == "logs/llm_usage/task_gateway.jsonl"
 
 
 @pytest.mark.asyncio

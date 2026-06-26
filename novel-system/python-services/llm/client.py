@@ -18,6 +18,7 @@ from utils.logger import get_logger
 
 _profile_context: ContextVar[Dict[str, Any]] = ContextVar("model_profile_context", default={})
 _model_metadata_context: ContextVar[Dict[str, Any]] = ContextVar("model_metadata_context", default={})
+_usage_context: ContextVar[Dict[str, Any]] = ContextVar("model_usage_context", default={})
 
 TASK_MODEL_MAP = {
     "chunk_analysis": "mainModel",
@@ -59,18 +60,34 @@ class LLMClient:
         }
 
     @asynccontextmanager
-    async def profile_context(self, profile_id: Optional[str], task_type: Optional[str] = None):
+    async def profile_context(
+            self,
+            profile_id: Optional[str],
+            task_type: Optional[str] = None,
+            project_id: Optional[str] = None,
+            task_id: Optional[str] = None):
         """Set request-scoped model profile metadata for shared LLMClient usage."""
         token = _profile_context.set({
             "profile_id": profile_id,
             "task_type": task_type,
+            "project_id": project_id,
+            "task_id": task_id,
         })
         metadata_token = _model_metadata_context.set({})
+        usage_token = _usage_context.set({
+            "profile_id": profile_id,
+            "task_type": task_type,
+            "project_id": project_id,
+            "task_id": task_id,
+            "calls": [],
+            "summary": self._empty_usage_summary(profile_id, task_type),
+        })
         try:
             yield
         finally:
             _profile_context.reset(token)
             _model_metadata_context.reset(metadata_token)
+            _usage_context.reset(usage_token)
 
     async def generate(self, prompt: str,
                       response_format: Optional[str] = None,
@@ -178,6 +195,10 @@ class LLMClient:
 
     def current_model_metadata(self) -> Dict[str, Any]:
         return dict(_model_metadata_context.get() or {})
+
+    def current_usage_summary(self) -> Dict[str, Any]:
+        usage_context = _usage_context.get() or {}
+        return copy.deepcopy(usage_context.get("summary") or {})
 
     def _set_model_metadata(self, config: Dict[str, Any], extra: Optional[Dict[str, Any]] = None):
         metadata = {
@@ -428,6 +449,7 @@ class LLMClient:
             "estimated_cost_usd": cost.get("estimated_cost_usd"),
             "cost_estimated": cost.get("cost_estimated"),
         })
+        self._record_usage_call(config, usage, errors)
         self._set_model_metadata(config, {
             "cache_hit": cache_hit,
             "fallback_used": fallback_used,
@@ -438,6 +460,113 @@ class LLMClient:
             "gateway_latency_ms": usage["gateway_latency_ms"],
         })
         return finalized
+
+    def _empty_usage_summary(
+            self,
+            profile_id: Optional[str] = None,
+            task_type: Optional[str] = None) -> Dict[str, Any]:
+        return {
+            "llm_call_count": 0,
+            "llm_cache_hits": 0,
+            "llm_fallback_count": 0,
+            "llm_fallback_attempts": 0,
+            "llm_prompt_tokens": 0,
+            "llm_completion_tokens": 0,
+            "llm_total_tokens": 0,
+            "llm_estimated_cost_usd": 0.0,
+            "llm_cost_estimated": False,
+            "llm_models": [],
+            "llm_model_roles": [],
+            "llm_profile_id": profile_id,
+            "llm_task_type": task_type,
+            "llm_usage_log_path": None,
+        }
+
+    def _record_usage_call(
+            self,
+            config: Dict[str, Any],
+            usage: Dict[str, Any],
+            errors: List[Dict[str, Any]]):
+        usage_context = _usage_context.get() or {}
+        if not usage_context:
+            return
+
+        profile_context = _profile_context.get() or {}
+        project_id = profile_context.get("project_id") or config.get("project_id")
+        task_id = profile_context.get("task_id") or config.get("task_id")
+        call = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "project_id": project_id,
+            "task_id": task_id,
+            "task_type": profile_context.get("task_type") or config.get("task_type"),
+            "model_profile_id": usage.get("model_profile_id"),
+            "model_role": usage.get("model_role"),
+            "model": usage.get("model"),
+            "provider": usage.get("provider"),
+            "mock": usage.get("mock"),
+            "cache_hit": usage.get("cache_hit"),
+            "fallback_used": usage.get("fallback_used"),
+            "fallback_attempts": usage.get("fallback_attempts"),
+            "fallback_errors": errors,
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+            "estimated_cost_usd": usage.get("estimated_cost_usd", 0.0),
+            "cost_estimated": usage.get("cost_estimated", False),
+            "gateway_latency_ms": usage.get("gateway_latency_ms", 0),
+            "cache_key": usage.get("cache_key"),
+        }
+        usage_context.setdefault("calls", []).append(call)
+        summary = usage_context.setdefault(
+            "summary",
+            self._empty_usage_summary(
+                profile_context.get("profile_id"),
+                profile_context.get("task_type")
+            )
+        )
+        summary["llm_call_count"] = int(summary.get("llm_call_count", 0)) + 1
+        summary["llm_cache_hits"] = int(summary.get("llm_cache_hits", 0)) + (1 if usage.get("cache_hit") else 0)
+        summary["llm_fallback_count"] = int(summary.get("llm_fallback_count", 0)) + (1 if usage.get("fallback_used") else 0)
+        summary["llm_fallback_attempts"] = int(summary.get("llm_fallback_attempts", 0)) + int(usage.get("fallback_attempts", 0) or 0)
+        summary["llm_prompt_tokens"] = int(summary.get("llm_prompt_tokens", 0)) + int(usage.get("prompt_tokens", 0) or 0)
+        summary["llm_completion_tokens"] = int(summary.get("llm_completion_tokens", 0)) + int(usage.get("completion_tokens", 0) or 0)
+        summary["llm_total_tokens"] = int(summary.get("llm_total_tokens", 0)) + int(usage.get("total_tokens", 0) or 0)
+        summary["llm_estimated_cost_usd"] = round(
+            float(summary.get("llm_estimated_cost_usd", 0.0) or 0.0)
+            + float(usage.get("estimated_cost_usd", 0.0) or 0.0),
+            6
+        )
+        summary["llm_cost_estimated"] = bool(summary.get("llm_cost_estimated")) or bool(usage.get("cost_estimated"))
+        self._append_unique(summary, "llm_models", usage.get("model"))
+        self._append_unique(summary, "llm_model_roles", usage.get("model_role"))
+        usage_log_path = self._write_usage_call(project_id, task_id, call)
+        if usage_log_path:
+            summary["llm_usage_log_path"] = usage_log_path
+
+    def _append_unique(self, summary: Dict[str, Any], key: str, value: Any):
+        if value in (None, ""):
+            return
+        values = summary.setdefault(key, [])
+        if value not in values:
+            values.append(value)
+
+    def _write_usage_call(
+            self,
+            project_id: Optional[str],
+            task_id: Optional[str],
+            call: Dict[str, Any]) -> Optional[str]:
+        if not project_id or not task_id:
+            return None
+        relative = Path("logs") / "llm_usage" / f"{task_id}.jsonl"
+        path = Path(settings.PROJECT_BASE_PATH) / "projects" / str(project_id) / relative
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(call, ensure_ascii=False, sort_keys=True) + "\n")
+            return relative.as_posix()
+        except Exception as exc:
+            self.logger.warning(f"Failed to write LLM usage ledger for task {task_id}: {exc}")
+            return None
 
     def _estimate_cost(self, prompt_tokens: int, completion_tokens: int, config: Dict[str, Any]) -> Dict[str, Any]:
         input_rate = self._as_float(config.get("input_cost_per_1k"), None)

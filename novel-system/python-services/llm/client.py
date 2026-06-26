@@ -5,12 +5,17 @@ LLM客户端
 import asyncio
 import copy
 import hashlib
+import math
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 import time
 from typing import Dict, Any, Optional, List
 from litellm import acompletion
+try:
+    from litellm import aembedding
+except Exception:  # pragma: no cover - optional LiteLLM capability
+    aembedding = None
 import json
 import re
 from config import settings
@@ -193,6 +198,184 @@ class LLMClient:
         """批量生成"""
         tasks = [self.generate(prompt, **kwargs) for prompt in prompts]
         return await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def embed_texts(self, texts: List[str], **kwargs) -> Dict[str, Any]:
+        """Generate embeddings through the embedding profile with local fallback."""
+        texts = [str(text or "") for text in texts]
+        task_type = kwargs.pop("task_type", "embedding")
+        allow_local_fallback = bool(kwargs.pop("allow_local_fallback", True))
+        config = self._resolve_model_config({**kwargs, "task_type": task_type})
+        started_at = time.monotonic()
+        errors: List[Dict[str, Any]] = []
+
+        if not texts:
+            result = {
+                "embeddings": [],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+                "model_gateway": self._gateway_status(config, "embedding", "empty"),
+            }
+            return self._finalize_gateway_result(
+                result,
+                config,
+                cache_hit=False,
+                cache_key=self._operation_cache_key("embedding", "", config),
+                fallback_used=False,
+                fallback_attempts=0,
+                errors=errors,
+                started_at=started_at,
+            )
+
+        if settings.MOCK_LLM or config.get("mock") or aembedding is None:
+            reason = "mock" if settings.MOCK_LLM or config.get("mock") else "embedding_api_unavailable"
+            if reason != "mock" and not allow_local_fallback:
+                raise RuntimeError("Embedding API is unavailable and local fallback is disabled")
+            return self._local_embedding_result(
+                texts,
+                config,
+                reason,
+                errors,
+                started_at,
+                fallback_used=reason != "mock",
+            )
+
+        try:
+            call_kwargs = {
+                "model": config["model"],
+                "input": texts,
+                "api_key": config.get("api_key"),
+                "api_base": config.get("api_base"),
+                **(config.get("extra_params") or {}),
+            }
+            if config.get("timeout") is not None:
+                call_kwargs["timeout"] = config.get("timeout")
+            await self._apply_rate_limit(config)
+            response = await aembedding(**call_kwargs)
+            embeddings = self._response_embeddings(response)
+            result = {
+                "embeddings": embeddings,
+                "usage": self._response_usage(response),
+                "model_gateway": {
+                    **self._gateway_status(config, "embedding", "success"),
+                    "vector_count": len(embeddings),
+                    "dimensions": len(embeddings[0]) if embeddings else 0,
+                    "local_fallback": False,
+                },
+            }
+            return self._finalize_gateway_result(
+                result,
+                config,
+                cache_hit=False,
+                cache_key=self._operation_cache_key("embedding", json.dumps(texts, ensure_ascii=False), config),
+                fallback_used=False,
+                fallback_attempts=0,
+                errors=errors,
+                started_at=started_at,
+            )
+        except Exception as exc:
+            errors.append({
+                "model": config.get("model"),
+                "model_role": config.get("model_role"),
+                "provider": config.get("provider"),
+                "error": str(exc),
+            })
+            if not allow_local_fallback:
+                self._set_model_metadata(config, {
+                    "gateway_operation": "embedding",
+                    "gateway_errors": errors,
+                })
+                raise
+            return self._local_embedding_result(
+                texts,
+                config,
+                "embedding_api_error",
+                errors,
+                started_at,
+                fallback_used=True,
+            )
+
+    async def rerank(
+            self,
+            query: str,
+            documents: List[Any],
+            top_k: Optional[int] = None,
+            **kwargs) -> Dict[str, Any]:
+        """Rerank retrieval candidates through the rerank profile with local fallback."""
+        normalized_docs = self._normalize_rerank_documents(documents)
+        task_type = kwargs.pop("task_type", "rerank")
+        allow_local_fallback = bool(kwargs.pop("allow_local_fallback", True))
+        config = self._resolve_model_config({**kwargs, "task_type": task_type})
+        started_at = time.monotonic()
+        errors: List[Dict[str, Any]] = []
+        limit = max(1, min(int(top_k or len(normalized_docs) or 1), len(normalized_docs) or 1))
+
+        if not normalized_docs:
+            result = {
+                "results": [],
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+                "model_gateway": self._gateway_status(config, "rerank", "empty"),
+            }
+            return self._finalize_gateway_result(
+                result,
+                config,
+                cache_hit=False,
+                cache_key=self._operation_cache_key("rerank", query, config),
+                fallback_used=False,
+                fallback_attempts=0,
+                errors=errors,
+                started_at=started_at,
+            )
+
+        if settings.MOCK_LLM or config.get("mock"):
+            return self._local_rerank_result(
+                query,
+                normalized_docs,
+                limit,
+                config,
+                "mock",
+                errors,
+                started_at,
+                fallback_used=False,
+            )
+
+        try:
+            generated = await self.generate(
+                self._rerank_prompt(query, normalized_docs, limit),
+                response_format="json",
+                model_profile_id=config.get("model_profile_id"),
+                task_type="rerank",
+                cache_enabled=config.get("cache_enabled", True),
+            )
+            ranked = self._parse_rerank_response(generated.get("content", ""), normalized_docs, limit)
+            generated["results"] = ranked
+            generated["model_gateway"] = {
+                **self._gateway_status(config, "rerank", "success"),
+                "returned_count": len(ranked),
+                "local_fallback": False,
+            }
+            return generated
+        except Exception as exc:
+            errors.append({
+                "model": config.get("model"),
+                "model_role": config.get("model_role"),
+                "provider": config.get("provider"),
+                "error": str(exc),
+            })
+            if not allow_local_fallback:
+                self._set_model_metadata(config, {
+                    "gateway_operation": "rerank",
+                    "gateway_errors": errors,
+                })
+                raise
+            return self._local_rerank_result(
+                query,
+                normalized_docs,
+                limit,
+                config,
+                "rerank_api_error",
+                errors,
+                started_at,
+                fallback_used=True,
+            )
 
     def current_model_metadata(self) -> Dict[str, Any]:
         return dict(_model_metadata_context.get() or {})
@@ -385,6 +568,17 @@ class LLMClient:
             "completion_tokens": int(completion_tokens or 0),
         }
 
+    def _response_embeddings(self, response: Any) -> List[List[float]]:
+        data = getattr(response, "data", None)
+        if data is None and isinstance(response, dict):
+            data = response.get("data")
+        embeddings: List[List[float]] = []
+        for item in data or []:
+            embedding = item.get("embedding") if isinstance(item, dict) else getattr(item, "embedding", None)
+            if embedding is not None:
+                embeddings.append([float(value) for value in embedding])
+        return embeddings
+
     async def _apply_rate_limit(self, config: Dict[str, Any]):
         min_interval = self._min_interval_seconds(config)
         if min_interval <= 0:
@@ -421,6 +615,15 @@ class LLMClient:
             "model_role": config.get("model_role"),
         }
         return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _operation_cache_key(self, operation: str, payload: str, config: Dict[str, Any]) -> str:
+        return hashlib.sha256(json.dumps({
+            "operation": operation,
+            "payload": payload,
+            "model": config.get("model"),
+            "model_profile_id": config.get("model_profile_id"),
+            "model_role": config.get("model_role"),
+        }, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
     def _cache_enabled(self, config: Dict[str, Any]) -> bool:
         return bool(config.get("cache_enabled", True))
@@ -624,6 +827,205 @@ class LLMClient:
         if provider == "openai":
             return settings.OPENAI_API_BASE or None
         return None
+
+    def _gateway_status(self, config: Dict[str, Any], operation: str, status: str) -> Dict[str, Any]:
+        return {
+            "operation": operation,
+            "status": status,
+            "model_profile_id": config.get("model_profile_id"),
+            "model_role": config.get("model_role"),
+            "model": config.get("model"),
+            "provider": config.get("provider"),
+            "mock": bool(config.get("mock") or settings.MOCK_LLM),
+        }
+
+    def _local_embedding_result(
+            self,
+            texts: List[str],
+            config: Dict[str, Any],
+            reason: str,
+            errors: List[Dict[str, Any]],
+            started_at: float,
+            fallback_used: bool) -> Dict[str, Any]:
+        embeddings = [self._hash_embedding(text) for text in texts]
+        result = {
+            "embeddings": embeddings,
+            "usage": {
+                "prompt_tokens": sum(max(1, len(text) // 4) for text in texts),
+                "completion_tokens": 0,
+            },
+            "model_gateway": {
+                **self._gateway_status(config, "embedding", "local_fallback" if fallback_used else "mock"),
+                "reason": reason,
+                "vector_count": len(embeddings),
+                "dimensions": len(embeddings[0]) if embeddings else 0,
+                "local_fallback": True,
+            },
+        }
+        return self._finalize_gateway_result(
+            result,
+            config,
+            cache_hit=False,
+            cache_key=self._operation_cache_key("embedding", json.dumps(texts, ensure_ascii=False), config),
+            fallback_used=fallback_used,
+            fallback_attempts=1 if fallback_used else 0,
+            errors=errors,
+            started_at=started_at,
+        )
+
+    def _hash_embedding(self, text: str, dimensions: int = 96) -> List[float]:
+        vector = [0.0] * dimensions
+        tokens = self._tokenize_for_gateway(text)
+        if not tokens:
+            return vector
+        for token in tokens:
+            digest = hashlib.md5(token.encode("utf-8")).hexdigest()
+            index = int(digest[:8], 16) % dimensions
+            sign = 1 if int(digest[8:10], 16) % 2 == 0 else -1
+            vector[index] += sign
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm <= 0:
+            return vector
+        return [round(value / norm, 6) for value in vector]
+
+    def _normalize_rerank_documents(self, documents: List[Any]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for index, item in enumerate(documents or []):
+            if isinstance(item, dict):
+                doc = dict(item)
+            else:
+                doc = {"text": str(item)}
+            text = str(doc.get("text") or doc.get("snippet") or doc.get("content") or "")
+            title = str(doc.get("title") or doc.get("doc_id") or f"document_{index}")
+            normalized.append({
+                **doc,
+                "index": index,
+                "doc_id": str(doc.get("doc_id") or doc.get("id") or f"document_{index}"),
+                "title": title,
+                "text": text,
+            })
+        return normalized
+
+    def _local_rerank_result(
+            self,
+            query: str,
+            documents: List[Dict[str, Any]],
+            limit: int,
+            config: Dict[str, Any],
+            reason: str,
+            errors: List[Dict[str, Any]],
+            started_at: float,
+            fallback_used: bool) -> Dict[str, Any]:
+        ranked = self._local_rerank_scores(query, documents, limit)
+        result = {
+            "results": ranked,
+            "usage": {
+                "prompt_tokens": max(1, (len(query) + sum(len(doc.get("text", "")) for doc in documents)) // 4),
+                "completion_tokens": max(1, len(documents)),
+            },
+            "model_gateway": {
+                **self._gateway_status(config, "rerank", "local_fallback" if fallback_used else "mock"),
+                "reason": reason,
+                "returned_count": len(ranked),
+                "local_fallback": True,
+            },
+        }
+        return self._finalize_gateway_result(
+            result,
+            config,
+            cache_hit=False,
+            cache_key=self._operation_cache_key("rerank", query, config),
+            fallback_used=fallback_used,
+            fallback_attempts=1 if fallback_used else 0,
+            errors=errors,
+            started_at=started_at,
+        )
+
+    def _rerank_prompt(self, query: str, documents: List[Dict[str, Any]], limit: int) -> str:
+        payload = [
+            {
+                "index": doc["index"],
+                "doc_id": doc["doc_id"],
+                "title": doc["title"],
+                "text": doc.get("text", "")[:800],
+            }
+            for doc in documents
+        ]
+        return (
+            "Rerank the candidate documents for the retrieval query. "
+            "Return JSON with a results array of {index, score, reason}, highest score first.\n"
+            f"Query: {query}\nTopK: {limit}\nDocuments:\n"
+            f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+        )
+
+    def _parse_rerank_response(
+            self,
+            content: str,
+            documents: List[Dict[str, Any]],
+            limit: int) -> List[Dict[str, Any]]:
+        by_index = {doc["index"]: doc for doc in documents}
+        try:
+            payload = json.loads(content)
+        except Exception:
+            payload = {}
+        raw_results = payload.get("results") if isinstance(payload, dict) else None
+        parsed = []
+        if isinstance(raw_results, list):
+            for item in raw_results:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    index = int(item.get("index"))
+                except (TypeError, ValueError):
+                    continue
+                doc = by_index.get(index)
+                if not doc:
+                    continue
+                parsed.append({
+                    "index": index,
+                    "doc_id": doc["doc_id"],
+                    "title": doc["title"],
+                    "score": self._as_float(item.get("score"), 0.0) or 0.0,
+                    "reason": str(item.get("reason") or item.get("rationale") or ""),
+                })
+        if not parsed:
+            return self._local_rerank_scores("", documents, limit)
+        parsed.sort(key=lambda item: item["score"], reverse=True)
+        return parsed[:limit]
+
+    def _local_rerank_scores(
+            self,
+            query: str,
+            documents: List[Dict[str, Any]],
+            limit: int) -> List[Dict[str, Any]]:
+        query_tokens = set(self._tokenize_for_gateway(query))
+        ranked = []
+        for doc in documents:
+            text = " ".join([doc.get("title", ""), doc.get("text", "")])
+            doc_tokens = set(self._tokenize_for_gateway(text))
+            overlap = len(query_tokens & doc_tokens)
+            score = overlap / max(1, len(query_tokens))
+            ranked.append({
+                "index": doc["index"],
+                "doc_id": doc["doc_id"],
+                "title": doc["title"],
+                "score": round(score, 6),
+                "reason": "local token-overlap rerank",
+            })
+        ranked.sort(key=lambda item: (item["score"], -item["index"]), reverse=True)
+        return ranked[:limit]
+
+    def _tokenize_for_gateway(self, text: str) -> List[str]:
+        lowered = str(text or "").lower()
+        tokens = re.findall(r"[\w\u4e00-\u9fff]+", lowered)
+        expanded: List[str] = []
+        for token in tokens:
+            if len(token) <= 1 and not re.match(r"[\u4e00-\u9fff]", token):
+                continue
+            expanded.append(token)
+            if re.search(r"[\u4e00-\u9fff]", token) and len(token) > 2:
+                expanded.extend(token[i:i + 2] for i in range(len(token) - 1))
+        return expanded
 
     def _mock_generate(self, prompt: str, response_format: Optional[str] = None,
                        config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

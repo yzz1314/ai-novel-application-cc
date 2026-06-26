@@ -48,7 +48,7 @@ AGENT_REGISTRY = {
     "graph_build": GraphBuilderAgent(),
     "coverage_check": CoverageCheckAgent(),
     "analysis_repair": AnalysisRepairAgent(llm_client=llm_client),
-    "retrieval_index": RetrievalIndexAgent(),
+    "retrieval_index": RetrievalIndexAgent(llm_client=llm_client),
     "workflow": WorkflowAgent(lambda: AGENT_REGISTRY, llm_client=llm_client),
 }
 

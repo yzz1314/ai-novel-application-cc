@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from agents.base import BaseAgent
 from config import settings
+from llm.client import LLMClient
 from retrieval.context_builder import ContextBuilder
 from retrieval.hybrid_engine import HybridRetrievalEngine
 from schemas.agent_request import AgentRequest
@@ -16,9 +17,10 @@ from utils.logger import get_logger
 class RetrievalIndexAgent(BaseAgent):
     """Build project retrieval indexes without requiring chapter generation."""
 
-    def __init__(self):
+    def __init__(self, llm_client: LLMClient = None):
         super().__init__("RetrievalIndexAgent")
         self.supported_tasks = ["retrieval_index"]
+        self.llm_client = llm_client or LLMClient()
         self.logger = get_logger("RetrievalIndexAgent")
 
     async def run(self, request: AgentRequest) -> AgentResponse:
@@ -39,6 +41,7 @@ class RetrievalIndexAgent(BaseAgent):
             retrieval = engine.retrieve(query, plan, top_k=top_k)
             builder._save_index_summary(documents, cache_status=cache_status)
             citation_budget = builder.preview_citation_budget(retrieval.get("results", []))
+            model_gateway = await self._probe_model_gateway(request, query, retrieval.get("results", []))
 
             report = {
                 "project_id": request.project_id,
@@ -52,6 +55,7 @@ class RetrievalIndexAgent(BaseAgent):
                 "stats": retrieval.get("stats", {}),
                 "quality_evaluation": retrieval.get("quality_evaluation", {}),
                 "citation_budget": citation_budget,
+                "model_gateway": model_gateway,
                 "top_results": [
                     {
                         "doc_id": item.get("doc_id"),
@@ -89,6 +93,7 @@ class RetrievalIndexAgent(BaseAgent):
                     "cache_status": report["cache_status"],
                     "quality_evaluation": report["quality_evaluation"],
                     "citation_budget": report["citation_budget"],
+                    "model_gateway": report["model_gateway"],
                     "report_path": self._relative(builder.project_root, report_path),
                     "bm25_summary_path": "indexes/bm25/index_summary.json",
                     "vector_summary_path": "indexes/vector/index_summary.json",
@@ -119,6 +124,84 @@ class RetrievalIndexAgent(BaseAgent):
             counts[doc.source_type] = counts.get(doc.source_type, 0) + 1
         return counts
 
+    async def _probe_model_gateway(
+            self,
+            request: AgentRequest,
+            query: str,
+            results: list) -> Dict[str, Any]:
+        enabled = self._truthy(request.parameters.get("probe_model_gateway"))
+        gateway = {
+            "enabled": enabled,
+            "embedding_probe": {"status": "skipped"},
+            "rerank_probe": {"status": "skipped"},
+        }
+        if not enabled:
+            return gateway
+
+        sample_texts = [query] + [
+            str(item.get("snippet") or item.get("title") or "")
+            for item in results[:2]
+            if item.get("snippet") or item.get("title")
+        ]
+        try:
+            embedding = await self.llm_client.embed_texts(
+                sample_texts[:3],
+                model_profile_id=request.model_profile_id,
+                allow_local_fallback=True,
+            )
+            gateway["embedding_probe"] = self._gateway_probe_summary(embedding, "embeddings")
+        except Exception as exc:
+            gateway["embedding_probe"] = {
+                "status": "failed",
+                "error": str(exc),
+            }
+
+        try:
+            rerank = await self.llm_client.rerank(
+                query,
+                [
+                    {
+                        "doc_id": item.get("doc_id"),
+                        "title": item.get("title"),
+                        "text": item.get("snippet") or item.get("title") or "",
+                    }
+                    for item in results[:5]
+                ],
+                top_k=min(3, len(results[:5]) or 1),
+                model_profile_id=request.model_profile_id,
+                allow_local_fallback=True,
+            )
+            gateway["rerank_probe"] = self._gateway_probe_summary(rerank, "results")
+        except Exception as exc:
+            gateway["rerank_probe"] = {
+                "status": "failed",
+                "error": str(exc),
+            }
+        return gateway
+
+    def _gateway_probe_summary(self, response: Dict[str, Any], result_key: str) -> Dict[str, Any]:
+        gateway = response.get("model_gateway") or {}
+        usage = response.get("usage") or {}
+        items = response.get(result_key) or []
+        return {
+            "status": gateway.get("status", "unknown"),
+            "operation": gateway.get("operation"),
+            "model": usage.get("model") or gateway.get("model"),
+            "model_role": usage.get("model_role") or gateway.get("model_role"),
+            "provider": usage.get("provider") or gateway.get("provider"),
+            "mock": bool(usage.get("mock") or gateway.get("mock")),
+            "local_fallback": bool(gateway.get("local_fallback")),
+            "fallback_used": bool(usage.get("fallback_used")),
+            "result_count": len(items),
+            "dimensions": gateway.get("dimensions"),
+            "estimated_cost_usd": usage.get("estimated_cost_usd"),
+        }
+
+    def _truthy(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
     def _write_report(self, project_root: Path, report: Dict[str, Any]) -> Path:
         output_path = project_root / "indexes" / "retrieval_index_report.json"
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,6 +223,7 @@ class RetrievalIndexAgent(BaseAgent):
                 "stats": report["stats"],
                 "quality_evaluation": report.get("quality_evaluation", {}),
                 "citation_budget": report.get("citation_budget", {}),
+                "model_gateway": report.get("model_gateway", {}),
                 "top_results": report["top_results"],
             }, ensure_ascii=False, indent=2),
             encoding="utf-8",

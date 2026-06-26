@@ -136,6 +136,22 @@ async def test_context_builder_writes_quality_evaluation_and_citation_budget(tmp
 async def test_retrieval_index_report_includes_quality_and_budget(tmp_path):
     project_id = "proj_retrieval_index_report"
     project_root = write_project_documents(tmp_path, project_id)
+    config_root = tmp_path / "config"
+    config_root.mkdir(parents=True)
+    (config_root / "model_profiles.json").write_text(
+        json.dumps({
+            "defaultProfileId": "retrieval_probe",
+            "profiles": [
+                {
+                    "profileId": "retrieval_probe",
+                    "mainModel": {"provider": "mock", "model": "mock-main", "mock": True},
+                    "embeddingModel": {"provider": "mock", "model": "mock-embedding", "mock": True},
+                    "rerankModel": {"provider": "mock", "model": "mock-rerank", "mock": True},
+                }
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     original_base_path = settings.PROJECT_BASE_PATH
     settings.PROJECT_BASE_PATH = str(tmp_path)
@@ -144,8 +160,9 @@ async def test_retrieval_index_report_includes_quality_and_budget(tmp_path):
             task_id="task_retrieval_quality",
             project_id=project_id,
             task_type="retrieval_index",
+            model_profile_id="retrieval_probe",
             user_input="Lin Mo Xuanmen trial jade token",
-            parameters={"top_k": 4},
+            parameters={"top_k": 4, "probe_model_gateway": True},
         ))
     finally:
         settings.PROJECT_BASE_PATH = original_base_path
@@ -154,14 +171,20 @@ async def test_retrieval_index_report_includes_quality_and_budget(tmp_path):
     assert response.structured_output["quality_evaluation"]["score"] >= 50
     assert "citation_budget" in response.structured_output
     assert response.structured_output["cache_status"]["cache_status"] == "new"
+    assert response.structured_output["model_gateway"]["enabled"] is True
+    assert response.structured_output["model_gateway"]["embedding_probe"]["model_role"] == "embeddingModel"
+    assert response.structured_output["model_gateway"]["rerank_probe"]["model_role"] == "rerankModel"
 
     report = json.loads((project_root / "indexes" / "retrieval_index_report.json").read_text(encoding="utf-8"))
     hybrid_summary = json.loads((project_root / "indexes" / "hybrid" / "index_summary.json").read_text(encoding="utf-8"))
     assert report["quality_evaluation"]["metrics"]["returned_count"] > 0
     assert report["citation_budget"]["usage"]["selected_result_count"] > 0
     assert report["cache_status"]["index_fingerprint"]
+    assert report["model_gateway"]["embedding_probe"]["result_count"] > 0
+    assert report["model_gateway"]["rerank_probe"]["result_count"] > 0
     assert hybrid_summary["quality_evaluation"]["score"] == report["quality_evaluation"]["score"]
     assert hybrid_summary["cache_status"]["index_fingerprint"] == report["cache_status"]["index_fingerprint"]
+    assert hybrid_summary["model_gateway"]["enabled"] is True
 
 
 @pytest.mark.asyncio

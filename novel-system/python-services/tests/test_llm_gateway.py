@@ -202,3 +202,56 @@ async def test_llm_gateway_resolves_runtime_secret_reference(tmp_path, monkeypat
     assert call_kwargs["model"] == "secret-model"
     assert call_kwargs["api_key"] == "runtime-secret-key"
     assert "runtime-secret-key" not in (config_dir / "model_profiles.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_llm_gateway_embedding_and_rerank_local_fallback(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "model_profiles.json").write_text(
+        json.dumps({
+            "defaultProfileId": "retrieval_profile",
+            "profiles": [
+                {
+                    "profileId": "retrieval_profile",
+                    "mainModel": {"provider": "mock", "model": "mock-main", "mock": True},
+                    "embeddingModel": {"provider": "mock", "model": "mock-embedding", "mock": True},
+                    "rerankModel": {"provider": "mock", "model": "mock-rerank", "mock": True},
+                }
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    original_base_path = settings.PROJECT_BASE_PATH
+    original_mock = settings.MOCK_LLM
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    settings.MOCK_LLM = False
+    try:
+        client = LLMClient()
+        async with client.profile_context("retrieval_profile", "retrieval_index"):
+            embedding = await client.embed_texts(["jade token", "hidden archive"])
+            rerank = await client.rerank(
+                "jade token archive",
+                [
+                    {"doc_id": "a", "title": "Archive", "text": "hidden archive clue"},
+                    {"doc_id": "b", "title": "Token", "text": "jade token heats"},
+                ],
+                top_k=2,
+            )
+            usage_summary = client.current_usage_summary()
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+        settings.MOCK_LLM = original_mock
+
+    assert len(embedding["embeddings"]) == 2
+    assert len(embedding["embeddings"][0]) == 96
+    assert embedding["model_gateway"]["operation"] == "embedding"
+    assert embedding["model_gateway"]["local_fallback"] is True
+    assert embedding["usage"]["model_role"] == "embeddingModel"
+
+    assert [item["doc_id"] for item in rerank["results"]] == ["b", "a"]
+    assert rerank["model_gateway"]["operation"] == "rerank"
+    assert rerank["usage"]["model_role"] == "rerankModel"
+    assert usage_summary["llm_call_count"] == 2
+    assert set(usage_summary["llm_model_roles"]) == {"embeddingModel", "rerankModel"}

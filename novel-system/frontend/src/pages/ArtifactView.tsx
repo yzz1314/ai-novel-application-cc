@@ -111,10 +111,10 @@ const ArtifactView: React.FC = () => {
     }
   }
 
-  const downloadArtifact = async (record: any) => {
+  const startDownload = async (record: any, allowSensitive = false) => {
     if (!projectId) return
     try {
-      const blob = await artifactApi.download(projectId, record.path)
+      const blob = await artifactApi.download(projectId, record.path, allowSensitive ? { allowSensitive: true } : undefined)
       const url = window.URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
@@ -127,14 +127,30 @@ const ArtifactView: React.FC = () => {
     }
   }
 
-  const downloadSelected = async () => {
+  const downloadArtifact = async (record: any) => {
+    if (!record.sensitive) {
+      await startDownload(record)
+      return
+    }
+    Modal.confirm({
+      title: '下载敏感样本产物？',
+      content: '该文件属于样本原文或切片，默认受保护。继续下载会显式授权完整内容访问，并保留后端敏感访问策略校验。',
+      okText: '授权下载',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: () => startDownload(record, true),
+    })
+  }
+
+  const startBulkDownload = async (allowSensitive = false) => {
     if (!projectId || selectedItems.length === 0) return
     try {
       setActionLoading(true)
       const blob = await artifactApi.bulkDownload(projectId, {
         paths: selectedItems.map((item) => item.path),
+        allowSensitive,
         actor: 'human',
-        reason: 'ArtifactView批量导出',
+        reason: allowSensitive ? 'ArtifactView批量导出含敏感样本授权' : 'ArtifactView批量导出',
       })
       const url = window.URL.createObjectURL(blob)
       const link = document.createElement('a')
@@ -142,12 +158,28 @@ const ArtifactView: React.FC = () => {
       link.download = `artifacts_${Date.now()}.zip`
       link.click()
       window.URL.revokeObjectURL(url)
-      message.success('批量导出已开始，敏感样本原文会自动跳过')
+      message.success(allowSensitive ? '批量导出已开始，已包含授权的敏感样本产物' : '批量导出已开始，敏感样本原文会自动跳过')
     } catch (error) {
       message.error('批量导出失败')
     } finally {
       setActionLoading(false)
     }
+  }
+
+  const downloadSelected = async () => {
+    if (selectedItems.some((item) => item.sensitive)) {
+      Modal.confirm({
+        title: '批量导出包含敏感产物',
+        content: `当前选择中有 ${selectedItems.filter((item) => item.sensitive).length} 个敏感样本产物。取消授权时这些文件会被后端跳过；继续授权则会包含完整内容。`,
+        okText: '授权并导出',
+        cancelText: '跳过敏感项导出',
+        okButtonProps: { danger: true },
+        onOk: () => startBulkDownload(true),
+        onCancel: () => startBulkDownload(false),
+      })
+      return
+    }
+    await startBulkDownload(false)
   }
 
   const archiveArtifact = (record: any) => {

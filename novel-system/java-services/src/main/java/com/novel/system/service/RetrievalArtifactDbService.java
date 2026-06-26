@@ -142,6 +142,8 @@ public class RetrievalArtifactDbService {
         metadata.put("hybridDocumentCount", documentCount(hybridSummary));
         metadata.put("contextPackCount", contextPacks.size());
         metadata.put("indexTypes", INDEX_TYPES);
+        metadata.put("latestQualityEvaluation", hybridSummary.get("quality_evaluation"));
+        metadata.put("latestCitationBudget", hybridSummary.get("citation_budget"));
         metadata.put("latestTasksCount", latestRetrievalTasks(projectId).size());
         return metadata;
     }
@@ -187,6 +189,8 @@ public class RetrievalArtifactDbService {
                     item.put("chapterNumber", data.get("chapter_number"));
                     item.put("sources", data.get("sources"));
                     item.put("retrievalPlan", data.get("retrieval_plan"));
+                    item.put("qualityEvaluation", data.get("quality_evaluation"));
+                    item.put("citationBudget", data.get("citation_budget"));
                     packs.add(item);
                 });
         } catch (IOException e) {

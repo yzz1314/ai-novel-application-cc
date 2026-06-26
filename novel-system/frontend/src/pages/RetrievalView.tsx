@@ -9,6 +9,7 @@ import {
   Empty,
   Form,
   InputNumber,
+  Progress,
   Row,
   Space,
   Statistic,
@@ -46,6 +47,8 @@ const RetrievalView: React.FC = () => {
   const indexes = overview?.indexes || {}
   const packs = overview?.contextPacks || []
   const latestTasks = overview?.latestTasks || []
+  const latestQuality = indexes?.hybrid?.quality_evaluation || indexes?.rebuildReport?.quality_evaluation || {}
+  const latestBudget = indexes?.hybrid?.citation_budget || indexes?.rebuildReport?.citation_budget || {}
 
   const indexStats = useMemo(() => {
     return ['bm25', 'vector', 'hybrid'].map((type) => {
@@ -73,6 +76,12 @@ const RetrievalView: React.FC = () => {
         use_rerank: data?.config?.use_rerank ?? true,
         graph_hops: data?.config?.graph_hops ?? 2,
         top_k: data?.config?.top_k ?? 12,
+        max_context_chars: data?.config?.max_context_chars ?? 6000,
+        max_retrieval_results: data?.config?.max_retrieval_results ?? 8,
+        max_retrieval_chars: data?.config?.max_retrieval_chars ?? 2400,
+        max_result_chars: data?.config?.max_result_chars ?? 220,
+        max_sample_quote_chars: data?.config?.max_sample_quote_chars ?? 80,
+        max_results_per_source_type: data?.config?.max_results_per_source_type ?? 4,
       })
     } catch (error) {
       setOverview(null)
@@ -157,6 +166,19 @@ const RetrievalView: React.FC = () => {
     }
   }
 
+  const qualityColor = (status?: string) => {
+    if (status === 'good') return 'success'
+    if (status === 'needs_review') return 'warning'
+    if (status === 'poor') return 'error'
+    return 'default'
+  }
+
+  const percent = (value: any) => {
+    const numeric = Number(value || 0)
+    if (!Number.isFinite(numeric)) return 0
+    return Math.max(0, Math.min(100, Math.round(numeric * 100)))
+  }
+
   const indexColumns = [
     {
       title: '索引',
@@ -193,6 +215,32 @@ const RetrievalView: React.FC = () => {
           <Tag>rerank {sources.reranked_results || 0}</Tag>
         </Space>
       ) : '-',
+    },
+    {
+      title: '质量',
+      dataIndex: 'qualityEvaluation',
+      key: 'qualityEvaluation',
+      width: 120,
+      render: (quality: any, record: any) => {
+        const status = quality?.status || record.sources?.quality_status
+        const score = quality?.score ?? record.sources?.quality_score
+        return score !== undefined ? (
+          <Tag color={qualityColor(status)}>{status || 'unknown'} {score}</Tag>
+        ) : '-'
+      },
+    },
+    {
+      title: '预算',
+      dataIndex: 'citationBudget',
+      key: 'citationBudget',
+      width: 130,
+      render: (budget: any) => {
+        const usage = budget?.usage || {}
+        const utilization = usage.context_utilization ?? usage.retrieval_budget_utilization
+        return utilization !== undefined ? (
+          <Tag color={percent(utilization) > 90 ? 'warning' : 'green'}>{percent(utilization)}%</Tag>
+        ) : '-'
+      },
     },
     { title: '更新时间', dataIndex: 'updatedAt', key: 'updatedAt' },
     {
@@ -257,10 +305,23 @@ const RetrievalView: React.FC = () => {
         </Col>
         <Col span={6}>
           <Card>
-            <Statistic title="最近重建任务" value={latestTasks.length} />
+            <Statistic
+              title="检索质量"
+              value={latestQuality?.score ?? 0}
+              suffix={latestQuality?.status || ''}
+            />
           </Card>
         </Col>
       </Row>
+
+      {(latestQuality?.warnings?.length || latestBudget?.warnings?.length) ? (
+        <Alert
+          type={latestQuality?.status === 'poor' ? 'error' : 'warning'}
+          showIcon
+          message="检索质量与引用预算提示"
+          description={[...(latestQuality?.warnings || []), ...(latestBudget?.warnings || [])].join('；')}
+        />
+      ) : null}
 
       <Card title="检索配置">
         <Form form={form} layout="inline">
@@ -281,6 +342,24 @@ const RetrievalView: React.FC = () => {
           </Form.Item>
           <Form.Item name="top_k" label="Top K">
             <InputNumber min={1} max={50} style={{ width: 90 }} />
+          </Form.Item>
+          <Form.Item name="max_context_chars" label="上下文预算">
+            <InputNumber min={1200} max={20000} step={500} style={{ width: 110 }} />
+          </Form.Item>
+          <Form.Item name="max_retrieval_results" label="引用条数">
+            <InputNumber min={1} max={50} style={{ width: 90 }} />
+          </Form.Item>
+          <Form.Item name="max_retrieval_chars" label="引用预算">
+            <InputNumber min={200} max={20000} step={200} style={{ width: 110 }} />
+          </Form.Item>
+          <Form.Item name="max_result_chars" label="单条长度">
+            <InputNumber min={40} max={800} step={20} style={{ width: 100 }} />
+          </Form.Item>
+          <Form.Item name="max_sample_quote_chars" label="样本摘录">
+            <InputNumber min={15} max={240} step={5} style={{ width: 100 }} />
+          </Form.Item>
+          <Form.Item name="max_results_per_source_type" label="单类上限">
+            <InputNumber min={1} max={20} style={{ width: 90 }} />
           </Form.Item>
           <Form.Item>
             <Button onClick={saveConfig} loading={saving}>保存配置</Button>
@@ -349,12 +428,66 @@ const RetrievalView: React.FC = () => {
                 {JSON.stringify(contextPack.retrieval_plan || {}, null, 2)}
               </Paragraph>
             </Card>
+            <Card title="质量评估" size="small">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Space wrap>
+                  <Tag color={qualityColor(contextPack.quality_evaluation?.status)}>
+                    {contextPack.quality_evaluation?.status || 'unknown'}
+                  </Tag>
+                  <Text strong>score {contextPack.quality_evaluation?.score ?? '-'}</Text>
+                </Space>
+                <Progress
+                  percent={Number(contextPack.quality_evaluation?.score || 0)}
+                  size="small"
+                  status={contextPack.quality_evaluation?.status === 'poor' ? 'exception' : 'normal'}
+                />
+                {(contextPack.quality_evaluation?.warnings || []).length ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message={(contextPack.quality_evaluation?.warnings || []).join('；')}
+                  />
+                ) : null}
+                <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+                  {JSON.stringify(contextPack.quality_evaluation?.metrics || {}, null, 2)}
+                </Paragraph>
+              </Space>
+            </Card>
+            <Card title="引用预算" size="small">
+              <Space direction="vertical" style={{ width: '100%' }}>
+                <Descriptions bordered column={2} size="small">
+                  <Descriptions.Item label="选中引用">
+                    {contextPack.citation_budget?.usage?.selected_result_count ?? 0}/
+                    {contextPack.citation_budget?.usage?.raw_result_count ?? 0}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="上下文占用">
+                    {percent(contextPack.citation_budget?.usage?.context_utilization)}%
+                  </Descriptions.Item>
+                  <Descriptions.Item label="引用字符">
+                    {contextPack.citation_budget?.usage?.retrieval_chars ?? 0}/
+                    {contextPack.citation_budget?.usage?.max_retrieval_chars ?? 0}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="引用编号">
+                    {(contextPack.citation_budget?.usage?.included_citation_ids || contextPack.citation_budget?.usage?.selected_citation_ids || []).join(', ') || '-'}
+                  </Descriptions.Item>
+                </Descriptions>
+                <Progress percent={percent(contextPack.citation_budget?.usage?.context_utilization)} size="small" />
+                {(contextPack.citation_budget?.warnings || []).length ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message={(contextPack.citation_budget?.warnings || []).join('；')}
+                  />
+                ) : null}
+              </Space>
+            </Card>
             <Card title="Top Rerank 结果" size="small">
               {(contextPack.retrieval_results || []).slice(0, 8).map((item: any) => (
                 <Card key={item.doc_id} size="small" style={{ marginBottom: 8 }}>
                   <Space direction="vertical" style={{ width: '100%' }}>
                     <Space wrap>
                       <Tag color="blue">{item.source_type}</Tag>
+                      {item.citation_id ? <Tag color="green">{item.citation_id}</Tag> : null}
                       {(item.retrieval_sources || []).map((source: string) => <Tag key={source}>{source}</Tag>)}
                       <Text strong>{item.title}</Text>
                       <Text type="secondary">score {item.rerank_score ?? item.score}</Text>

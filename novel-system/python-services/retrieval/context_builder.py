@@ -148,7 +148,12 @@ class ContextBuilder:
         hybrid_engine.persist_indexes()
         hybrid_retrieval = hybrid_engine.retrieve(query, retrieval_plan, top_k=top_k)
         keyword_results = hybrid_retrieval.get("runs", {}).get("keyword", [])[:top_k]
-        retrieval_results = hybrid_retrieval.get("results", [])
+        budget_config = self._budget_config()
+        retrieval_results, citation_budget = self._budget_retrieval_results(
+            hybrid_retrieval.get("results", []),
+            budget_config,
+        )
+        quality_evaluation = hybrid_retrieval.get("quality_evaluation", {})
         context_pack = {
             "project_id": self.project_id,
             "book_id": book_id,
@@ -162,6 +167,9 @@ class ContextBuilder:
                 "vector_results": hybrid_retrieval.get("stats", {}).get("vector_count", 0),
                 "graph_results": hybrid_retrieval.get("stats", {}).get("graph_count", 0),
                 "reranked_results": hybrid_retrieval.get("stats", {}).get("returned_count", 0),
+                "budgeted_retrieval_results": len(retrieval_results),
+                "quality_score": quality_evaluation.get("score"),
+                "quality_status": quality_evaluation.get("status"),
                 "memory_files": len(memory_context.get("files", [])),
                 "graph_nodes": len(graph_context.get("matched_nodes", [])),
             },
@@ -172,6 +180,9 @@ class ContextBuilder:
             "hybrid_retrieval": hybrid_retrieval,
             "keyword_results": keyword_results,
             "retrieval_results": retrieval_results,
+            "raw_retrieval_result_count": len(hybrid_retrieval.get("results", [])),
+            "quality_evaluation": quality_evaluation,
+            "citation_budget": citation_budget,
         }
 
         context_pack["prompt_section"] = self.format_prompt_section(context_pack)
@@ -196,32 +207,86 @@ class ContextBuilder:
         )
 
     def format_prompt_section(self, context_pack: Dict[str, Any]) -> str:
+        budget = context_pack.get("citation_budget") or {"config": self._budget_config(), "usage": {}}
+        config = budget.get("config") or self._budget_config()
+        max_context_chars = self._bounded_int(config.get("max_context_chars"), 6000, 1200, 20000)
+        usage = budget.setdefault("usage", {})
+        warnings = list(budget.get("warnings") or [])
+        truncated_sections: List[str] = []
+
         parts = ["## 检索上下文包（写作时必须参考）"]
+
+        def add_section(title: str, body: str, section_key: str, max_chars: Optional[int] = None):
+            if not body or not body.strip():
+                return
+            current = "\n\n".join(parts)
+            separator_chars = 2 if parts else 0
+            header = f"{title}\n"
+            remaining = max_context_chars - len(current) - separator_chars - len(header)
+            if remaining <= 0:
+                truncated_sections.append(section_key)
+                return
+            allowed = remaining if max_chars is None else min(max_chars, remaining)
+            text = self._truncate_text(body.strip(), allowed)
+            if len(body.strip()) > len(text):
+                truncated_sections.append(section_key)
+            parts.append(header + text)
+            usage[f"{section_key}_chars"] = len(text)
 
         memory = context_pack.get("memory", {})
         if memory.get("canon"):
-            parts.append("### Canon与记忆\n" + memory["canon"][:1200])
+            add_section(
+                "### Canon与记忆",
+                memory["canon"],
+                "canon_memory",
+                self._bounded_int(config.get("max_memory_chars"), 1200, 200, 5000),
+            )
         if memory.get("characters"):
-            parts.append("### 人物/关系/认知记忆\n" + memory["characters"][:1000])
+            add_section(
+                "### 人物/关系/认知记忆",
+                memory["characters"],
+                "character_memory",
+                self._bounded_int(config.get("max_character_memory_chars"), 1000, 200, 5000),
+            )
 
         graph_nodes = context_pack.get("graph", {}).get("matched_nodes", [])
         if graph_nodes:
+            max_graph_nodes = self._bounded_int(config.get("max_graph_nodes"), 8, 0, 50)
             node_lines = [
-                f"- {node.get('name')} ({node.get('node_type')}): {node.get('description', '')}"
-                for node in graph_nodes[:8]
+                f"- {node.get('name')} ({node.get('node_type')}): {self._truncate_text(str(node.get('description', '')), 160)}"
+                for node in graph_nodes[:max_graph_nodes]
             ]
-            parts.append("### 图谱相关实体\n" + "\n".join(node_lines))
+            add_section("### 图谱相关实体", "\n".join(node_lines), "graph")
 
         retrieval_results = context_pack.get("retrieval_results", [])
         if retrieval_results:
             result_lines = [
-                f"- [{item['source_type']}] {item['title']} | {item['snippet']}"
-                for item in retrieval_results[:8]
+                (
+                    f"- [{item.get('citation_id', 'R?')}] [{item.get('source_type')}] "
+                    f"{item.get('title')} | {item.get('source_path') or item.get('path')} | "
+                    f"{item.get('snippet', '')}"
+                )
+                for item in retrieval_results
             ]
-            parts.append("### 样本/报告/技巧检索结果\n" + "\n".join(result_lines))
+            add_section("### 样本/报告/技巧检索结果", "\n".join(result_lines), "retrieval_results")
 
-        parts.append("### 使用原则\n- 不得违背 Project Soul 和 Canon。\n- 检索结果只作为技法和事实参考，不得照搬样本文字。\n- 优先保证本章大纲边界，不提前泄露后续章纲。")
-        return "\n\n".join(parts)
+        add_section(
+            "### 使用原则",
+            "- 不得违背 Project Soul 和 Canon。\n- 检索结果只作为技法和事实参考，不得照搬样本文字。\n- 优先保证本章大纲边界，不提前泄露后续章纲。",
+            "usage_rules",
+        )
+        prompt = "\n\n".join(parts)
+        usage["prompt_section_chars"] = len(prompt)
+        usage["max_context_chars"] = max_context_chars
+        usage["context_utilization"] = round(len(prompt) / max(1, max_context_chars), 4)
+        usage["included_citation_ids"] = [
+            item.get("citation_id") for item in retrieval_results if item.get("citation_id")
+        ]
+        if truncated_sections:
+            warnings.append("上下文预算触发裁剪: " + ", ".join(sorted(set(truncated_sections))))
+        budget["warnings"] = sorted(set(warnings))
+        context_pack["citation_budget"] = budget
+        return prompt
 
     def _chapter_query(self, chapter_outline: Any, previous_context: str) -> str:
         fields = [
@@ -384,6 +449,8 @@ class ContextBuilder:
             "latest_context_pack": context_pack.get("path"),
             "plan": retrieval.get("plan", {}),
             "stats": retrieval.get("stats", {}),
+            "quality_evaluation": retrieval.get("quality_evaluation") or context_pack.get("quality_evaluation", {}),
+            "citation_budget": context_pack.get("citation_budget", {}),
             "top_results": [
                 {
                     "doc_id": item.get("doc_id"),
@@ -400,6 +467,136 @@ class ContextBuilder:
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
+
+    def _budget_config(self) -> Dict[str, Any]:
+        config_path = self.project_root / "indexes" / "retrieval_config.json"
+        data = self._read_json(config_path) if config_path.exists() else {}
+        max_context_chars = self._bounded_int(data.get("max_context_chars"), 6000, 1200, 20000)
+        max_retrieval_chars = self._bounded_int(
+            data.get("max_retrieval_chars"),
+            max(800, int(max_context_chars * 0.45)),
+            200,
+            max_context_chars,
+        )
+        return {
+            "max_context_chars": max_context_chars,
+            "max_memory_chars": self._bounded_int(data.get("max_memory_chars"), 1200, 200, 5000),
+            "max_character_memory_chars": self._bounded_int(data.get("max_character_memory_chars"), 1000, 200, 5000),
+            "max_graph_nodes": self._bounded_int(data.get("max_graph_nodes"), 8, 0, 50),
+            "max_retrieval_results": self._bounded_int(
+                data.get("max_retrieval_results"),
+                self._bounded_int(data.get("top_k"), 8, 1, 50),
+                1,
+                50,
+            ),
+            "max_retrieval_chars": max_retrieval_chars,
+            "max_result_chars": self._bounded_int(data.get("max_result_chars"), 220, 40, 800),
+            "max_sample_quote_chars": self._bounded_int(data.get("max_sample_quote_chars"), 80, 15, 240),
+            "max_results_per_source_type": self._bounded_int(data.get("max_results_per_source_type"), 4, 1, 20),
+        }
+
+    def preview_citation_budget(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build a budget report for retrieval rebuilds without a chapter prompt."""
+        _selected, report = self._budget_retrieval_results(results, self._budget_config())
+        return report
+
+    def _budget_retrieval_results(
+            self,
+            results: List[Dict[str, Any]],
+            config: Dict[str, Any]) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        selected: List[Dict[str, Any]] = []
+        seen_doc_ids = set()
+        seen_paths = set()
+        source_counts: Counter = Counter()
+        skipped_duplicates = 0
+        skipped_source_cap = 0
+        skipped_char_budget = 0
+        skipped_count_budget = 0
+        retrieval_chars = 0
+        max_results = self._bounded_int(config.get("max_retrieval_results"), 8, 1, 50)
+        max_retrieval_chars = self._bounded_int(config.get("max_retrieval_chars"), 2400, 200, 20000)
+        max_per_source = self._bounded_int(config.get("max_results_per_source_type"), 4, 1, 20)
+
+        for item in results:
+            doc_id = item.get("doc_id") or ""
+            path = item.get("path") or doc_id
+            source_type = item.get("source_type") or "unknown"
+            if doc_id in seen_doc_ids or path in seen_paths:
+                skipped_duplicates += 1
+                continue
+            if source_counts[source_type] >= max_per_source:
+                skipped_source_cap += 1
+                continue
+            if len(selected) >= max_results:
+                skipped_count_budget += 1
+                continue
+
+            snippet_limit = (
+                self._bounded_int(config.get("max_sample_quote_chars"), 80, 15, 240)
+                if source_type == "sample_chunk"
+                else self._bounded_int(config.get("max_result_chars"), 220, 40, 800)
+            )
+            snippet = self._truncate_text(str(item.get("snippet", "")), snippet_limit)
+            row_chars = len(str(item.get("title", ""))) + len(snippet) + len(str(path)) + 24
+            if selected and retrieval_chars + row_chars > max_retrieval_chars:
+                skipped_char_budget += 1
+                continue
+
+            budgeted_item = dict(item)
+            budgeted_item["citation_id"] = f"R{len(selected) + 1}"
+            budgeted_item["source_path"] = path
+            budgeted_item["snippet"] = snippet
+            budgeted_item["snippet_char_limit"] = snippet_limit
+            budgeted_item["prompt_ready"] = True
+            selected.append(budgeted_item)
+            seen_doc_ids.add(doc_id)
+            seen_paths.add(path)
+            source_counts[source_type] += 1
+            retrieval_chars += row_chars
+
+        warnings = []
+        if skipped_duplicates:
+            warnings.append(f"已去重 {skipped_duplicates} 条重复来源")
+        if skipped_source_cap:
+            warnings.append(f"已按来源类型上限裁剪 {skipped_source_cap} 条结果")
+        if skipped_count_budget:
+            warnings.append(f"已按结果数预算裁剪 {skipped_count_budget} 条结果")
+        if skipped_char_budget:
+            warnings.append(f"已按字符预算裁剪 {skipped_char_budget} 条结果")
+
+        report = {
+            "config": config,
+            "usage": {
+                "raw_result_count": len(results),
+                "selected_result_count": len(selected),
+                "retrieval_chars": retrieval_chars,
+                "max_retrieval_chars": max_retrieval_chars,
+                "retrieval_budget_utilization": round(retrieval_chars / max(1, max_retrieval_chars), 4),
+                "skipped_duplicates": skipped_duplicates,
+                "skipped_by_source_cap": skipped_source_cap,
+                "skipped_by_result_count": skipped_count_budget,
+                "skipped_by_char_budget": skipped_char_budget,
+                "source_type_distribution": dict(source_counts),
+                "selected_citation_ids": [item["citation_id"] for item in selected],
+            },
+            "warnings": warnings,
+        }
+        return selected, report
+
+    def _truncate_text(self, value: str, max_chars: int) -> str:
+        value = value or ""
+        if len(value) <= max_chars:
+            return value
+        if max_chars <= 3:
+            return value[:max_chars]
+        return value[:max_chars - 3].rstrip() + "..."
+
+    def _bounded_int(self, value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(maximum, parsed))
 
     def _read_json(self, path: Path) -> Dict[str, Any]:
         try:

@@ -8,6 +8,7 @@ scores so the system has inspectable retrieval plans and artifacts today.
 import hashlib
 import json
 import math
+import statistics
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -136,6 +137,7 @@ class HybridRetrievalEngine:
 
         fused = self._rrf_fuse(runs, top_k=top_k * 2)
         reranked = self._rerank(query, fused, top_k=top_k) if plan.use_rerank else fused[:top_k]
+        quality_evaluation = self._quality_evaluation(query, runs, fused, reranked, top_k)
 
         return {
             "plan": asdict(plan),
@@ -143,12 +145,15 @@ class HybridRetrievalEngine:
             "fused_results": fused,
             "reranked_results": reranked,
             "results": reranked,
+            "quality_evaluation": quality_evaluation,
             "stats": {
                 "keyword_count": len(runs.get("keyword", [])),
                 "vector_count": len(runs.get("vector", [])),
                 "graph_count": len(runs.get("graph", [])),
                 "fused_count": len(fused),
                 "returned_count": len(reranked),
+                "quality_score": quality_evaluation.get("score"),
+                "quality_status": quality_evaluation.get("status"),
             },
         }
 
@@ -228,3 +233,109 @@ class HybridRetrievalEngine:
             reranked.append(reranked_item)
         reranked.sort(key=lambda item: item["rerank_score"], reverse=True)
         return reranked[:top_k]
+
+    def _quality_evaluation(
+            self,
+            query: str,
+            runs: Dict[str, List[Dict[str, Any]]],
+            fused: List[Dict[str, Any]],
+            results: List[Dict[str, Any]],
+            top_k: int) -> Dict[str, Any]:
+        query_tokens = set(self.keyword._tokenize(query))
+        matched_tokens = set()
+        source_types = Counter()
+        retrieval_sources = Counter()
+        paths = Counter()
+        doc_ids = Counter()
+        rerank_scores = []
+
+        for item in results:
+            source_types[item.get("source_type") or "unknown"] += 1
+            for source in item.get("retrieval_sources") or [item.get("retrieval_source") or "unknown"]:
+                retrieval_sources[source] += 1
+            if item.get("path"):
+                paths[item["path"]] += 1
+            if item.get("doc_id"):
+                doc_ids[item["doc_id"]] += 1
+            if isinstance(item.get("rerank_score"), (int, float)):
+                rerank_scores.append(float(item["rerank_score"]))
+
+            text = " ".join([
+                str(item.get("title", "")),
+                str(item.get("snippet", "")),
+                json.dumps(item.get("metadata", {}), ensure_ascii=False),
+            ])
+            matched_tokens.update(query_tokens & set(self.keyword._tokenize(text)))
+
+        returned_count = len(results)
+        returned_ratio = returned_count / max(1, top_k)
+        token_coverage = len(matched_tokens) / max(1, len(query_tokens))
+        source_diversity = len(source_types) / max(1, min(3, returned_count or 1))
+        duplicate_path_count = sum(count - 1 for count in paths.values() if count > 1)
+        duplicate_doc_count = sum(count - 1 for count in doc_ids.values() if count > 1)
+        duplicate_penalty = min(0.25, (duplicate_path_count + duplicate_doc_count) * 0.05)
+        run_coverage = sum(1 for key in ("keyword", "vector", "graph") if runs.get(key)) / 3
+
+        score = (
+            min(1.0, returned_ratio) * 30
+            + min(1.0, token_coverage) * 30
+            + min(1.0, source_diversity) * 20
+            + run_coverage * 20
+            - duplicate_penalty * 100
+        )
+        score = max(0, min(100, round(score)))
+
+        warnings = []
+        recommendations = []
+        if returned_count < top_k:
+            warnings.append(f"仅返回 {returned_count}/{top_k} 条结果")
+            recommendations.append("扩大索引文档范围或降低过滤条件")
+        if token_coverage < 0.35 and query_tokens:
+            warnings.append("查询词覆盖率偏低")
+            recommendations.append("补充大纲关键词、人物名或场景目标后重建检索")
+        if len(source_types) < 2 and returned_count > 1:
+            warnings.append("结果来源类型较单一")
+            recommendations.append("开启关键词、向量、图谱混合检索并增加样本/记忆文档")
+        if duplicate_path_count or duplicate_doc_count:
+            warnings.append("存在重复来源结果")
+            recommendations.append("检查样本分块和 Markdown 产物是否重复写入")
+        if not any(runs.values()):
+            warnings.append("所有检索通道均未命中")
+            recommendations.append("先导入样本、生成记忆/图谱，再重建索引")
+
+        if score >= 75:
+            status = "good"
+        elif score >= 50:
+            status = "needs_review"
+        else:
+            status = "poor"
+
+        metrics = {
+            "requested_top_k": top_k,
+            "returned_count": returned_count,
+            "returned_ratio": round(returned_ratio, 4),
+            "query_token_count": len(query_tokens),
+            "matched_query_tokens": len(matched_tokens),
+            "query_token_coverage": round(token_coverage, 4),
+            "source_type_count": len(source_types),
+            "source_types": sorted(source_types.keys()),
+            "source_type_distribution": dict(source_types),
+            "retrieval_source_distribution": dict(retrieval_sources),
+            "duplicate_path_count": duplicate_path_count,
+            "duplicate_doc_id_count": duplicate_doc_count,
+            "run_counts": {key: len(value) for key, value in runs.items()},
+            "fused_count": len(fused),
+            "rerank_score_min": round(min(rerank_scores), 6) if rerank_scores else None,
+            "rerank_score_max": round(max(rerank_scores), 6) if rerank_scores else None,
+            "rerank_score_avg": round(statistics.mean(rerank_scores), 6) if rerank_scores else None,
+            "rerank_score_spread": round(max(rerank_scores) - min(rerank_scores), 6) if len(rerank_scores) > 1 else 0,
+        }
+
+        return {
+            "evaluated_at": datetime.now().isoformat(),
+            "score": score,
+            "status": status,
+            "warnings": warnings,
+            "recommendations": sorted(set(recommendations)),
+            "metrics": metrics,
+        }

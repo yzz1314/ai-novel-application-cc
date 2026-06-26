@@ -37,6 +37,7 @@ class RetrievalIndexAgent(BaseAgent):
             engine.persist_indexes()
             retrieval = engine.retrieve(query, plan, top_k=top_k)
             builder._save_index_summary(documents)
+            citation_budget = builder.preview_citation_budget(retrieval.get("results", []))
 
             report = {
                 "project_id": request.project_id,
@@ -47,6 +48,8 @@ class RetrievalIndexAgent(BaseAgent):
                 "source_counts": self._source_counts(documents),
                 "plan": retrieval.get("plan", {}),
                 "stats": retrieval.get("stats", {}),
+                "quality_evaluation": retrieval.get("quality_evaluation", {}),
+                "citation_budget": citation_budget,
                 "top_results": [
                     {
                         "doc_id": item.get("doc_id"),
@@ -81,6 +84,8 @@ class RetrievalIndexAgent(BaseAgent):
                     "document_count": report["document_count"],
                     "source_counts": report["source_counts"],
                     "stats": report["stats"],
+                    "quality_evaluation": report["quality_evaluation"],
+                    "citation_budget": report["citation_budget"],
                     "report_path": self._relative(builder.project_root, report_path),
                     "bm25_summary_path": "indexes/bm25/index_summary.json",
                     "vector_summary_path": "indexes/vector/index_summary.json",
@@ -129,6 +134,8 @@ class RetrievalIndexAgent(BaseAgent):
                 "latest_rebuild_report": report["artifacts"]["report"],
                 "plan": report["plan"],
                 "stats": report["stats"],
+                "quality_evaluation": report.get("quality_evaluation", {}),
+                "citation_budget": report.get("citation_budget", {}),
                 "top_results": report["top_results"],
             }, ensure_ascii=False, indent=2),
             encoding="utf-8",

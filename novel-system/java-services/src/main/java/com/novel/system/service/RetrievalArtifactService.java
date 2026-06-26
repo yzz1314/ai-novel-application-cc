@@ -105,7 +105,16 @@ public class RetrievalArtifactService {
                     "graph_hops",
                     "vector_filters",
                     "keyword_filters",
-                    "top_k")) {
+                    "top_k",
+                    "max_context_chars",
+                    "max_memory_chars",
+                    "max_character_memory_chars",
+                    "max_graph_nodes",
+                    "max_retrieval_results",
+                    "max_retrieval_chars",
+                    "max_result_chars",
+                    "max_sample_quote_chars",
+                    "max_results_per_source_type")) {
                 if (request.containsKey(key)) {
                     config.put(key, request.get(key));
                 }
@@ -154,6 +163,8 @@ public class RetrievalArtifactService {
                     item.put("chapterNumber", data.get("chapter_number"));
                     item.put("sources", data.get("sources"));
                     item.put("retrievalPlan", data.get("retrieval_plan"));
+                    item.put("qualityEvaluation", data.get("quality_evaluation"));
+                    item.put("citationBudget", data.get("citation_budget"));
                     packs.add(item);
                 });
         } catch (IOException e) {
@@ -217,6 +228,15 @@ public class RetrievalArtifactService {
         config.put("vector_filters", new LinkedHashMap<>());
         config.put("keyword_filters", new LinkedHashMap<>());
         config.put("top_k", 12);
+        config.put("max_context_chars", 6000);
+        config.put("max_memory_chars", 1200);
+        config.put("max_character_memory_chars", 1000);
+        config.put("max_graph_nodes", 8);
+        config.put("max_retrieval_results", 8);
+        config.put("max_retrieval_chars", 2400);
+        config.put("max_result_chars", 220);
+        config.put("max_sample_quote_chars", 80);
+        config.put("max_results_per_source_type", 4);
         return config;
     }
 

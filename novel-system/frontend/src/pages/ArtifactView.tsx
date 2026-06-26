@@ -209,7 +209,7 @@ const ArtifactView: React.FC = () => {
     })
   }
 
-  const openDiff = async () => {
+  const runDiff = async (allowSensitive = false) => {
     if (!projectId || selectedItems.length !== 2) {
       message.warning('请选择两个文本产物进行对比')
       return
@@ -219,6 +219,7 @@ const ArtifactView: React.FC = () => {
       const result = await artifactApi.diff(projectId, {
         leftPath: selectedItems[0].path,
         rightPath: selectedItems[1].path,
+        allowSensitive,
       })
       setDiffDrawer(result)
     } catch (error) {
@@ -226,6 +227,25 @@ const ArtifactView: React.FC = () => {
     } finally {
       setActionLoading(false)
     }
+  }
+
+  const openDiff = async () => {
+    if (selectedItems.length !== 2) {
+      message.warning('请选择两个文本产物进行对比')
+      return
+    }
+    if (selectedItems.some((item) => item.sensitive)) {
+      Modal.confirm({
+        title: '对比敏感样本产物？',
+        content: '本次对比包含样本原文或切片。继续对比会显式授权读取完整文本内容。',
+        okText: '授权对比',
+        cancelText: '取消',
+        okButtonProps: { danger: true },
+        onOk: () => runDiff(true),
+      })
+      return
+    }
+    await runDiff(false)
   }
 
   const openAudit = async () => {

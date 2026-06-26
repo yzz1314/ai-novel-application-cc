@@ -50,6 +50,33 @@ import { bookApi, projectApi, sampleApi, skillsApi, taskApi } from '../services/
 const { Paragraph, Text, Title } = Typography;
 const { TextArea } = Input;
 
+const workflowTemplates = [
+  {
+    id: 'sample_analysis',
+    title: '样本分析流水线',
+    description: '对单个样本依次执行全文分析、覆盖率检查和单书总结。',
+    needs: 'sample',
+  },
+  {
+    id: 'parallel_sample_analysis',
+    title: '并行双样本分析',
+    description: '并行分析两个样本，成功后自动执行跨书归纳。',
+    needs: 'twoSamples',
+  },
+  {
+    id: 'memory_graph_refresh',
+    title: '记忆与图谱刷新',
+    description: '先摄取章节记忆，再并行重建图谱和检索索引。',
+    needs: 'book',
+  },
+  {
+    id: 'chapter_pipeline',
+    title: '章节创作流水线',
+    description: '生成章节、按边界条件返修，等待人工确认后摄取记忆。',
+    needs: 'chapter',
+  },
+];
+
 const ProjectDetail: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
@@ -72,6 +99,8 @@ const ProjectDetail: React.FC = () => {
   const [approvalTask, setApprovalTask] = useState<any>(null);
   const [approvalDecision, setApprovalDecision] = useState<'approve' | 'reject'>('approve');
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
+  const [startingWorkflow, setStartingWorkflow] = useState<string | null>(null);
+  const [workflowForm] = Form.useForm();
   const [skillForm] = Form.useForm();
   const [approvalForm] = Form.useForm();
 
@@ -118,6 +147,18 @@ const ProjectDetail: React.FC = () => {
   const hasSkills = skills.length > 0;
   const hasOutline = books.length > 0;
   const latestBook = books[0];
+
+  useEffect(() => {
+    const current = workflowForm.getFieldsValue();
+    const sampleIds = samples.map((sample) => sample.id);
+    const bookIds = (books.length ? books : [{ bookId: 'default' }]).map((book) => book.bookId || 'default');
+    workflowForm.setFieldsValue({
+      sampleId: sampleIds.includes(current.sampleId) ? current.sampleId : samples[0]?.id,
+      sampleIdA: sampleIds.includes(current.sampleIdA) ? current.sampleIdA : samples[0]?.id,
+      sampleIdB: sampleIds.includes(current.sampleIdB) ? current.sampleIdB : samples[1]?.id,
+      bookId: bookIds.includes(current.bookId) ? current.bookId : latestBook?.bookId || 'default',
+    });
+  }, [books, latestBook?.bookId, samples, workflowForm]);
 
   const currentStep = useMemo(() => {
     if (hasOutline) return 4;
@@ -555,6 +596,45 @@ const ProjectDetail: React.FC = () => {
     }
   };
 
+  const startWorkflow = async (workflowId: string) => {
+    if (!projectId) return;
+    try {
+      const values = await workflowForm.validateFields();
+      setStartingWorkflow(workflowId);
+      const inputRefs: any = {};
+      const parameters: any = {
+        workflow_id: workflowId,
+        project_id: projectId,
+      };
+
+      if (workflowId === 'sample_analysis') {
+        inputRefs.sample_id = values.sampleId;
+      } else if (workflowId === 'parallel_sample_analysis') {
+        inputRefs.sample_id_a = values.sampleIdA;
+        inputRefs.sample_id_b = values.sampleIdB;
+      } else if (workflowId === 'memory_graph_refresh') {
+        inputRefs.book_id = values.bookId || latestBook?.bookId || 'default';
+      } else if (workflowId === 'chapter_pipeline') {
+        inputRefs.book_id = values.bookId || latestBook?.bookId || 'default';
+        inputRefs.volume_number = Number(values.volumeNumber || 1);
+        inputRefs.chapter_number = Number(values.chapterNumber || 1);
+      }
+
+      await taskApi.execute(projectId, {
+        agentName: 'workflow',
+        taskType: 'workflow',
+        inputRefs,
+        parameters,
+      });
+      message.success('工作流任务已创建');
+      await loadProjectData();
+    } catch (error) {
+      message.error('启动工作流失败');
+    } finally {
+      setStartingWorkflow(null);
+    }
+  };
+
   const tabItems = [
     {
       key: 'overview',
@@ -620,6 +700,104 @@ const ProjectDetail: React.FC = () => {
             />
           </Card>
           <Table columns={taskColumns} dataSource={recentTasks} rowKey="id" pagination={false} />
+        </Space>
+      ),
+    },
+    {
+      key: 'workflow',
+      label: <span><PartitionOutlined /> 工作流</span>,
+      children: (
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="内置工作流会通过统一任务中心运行，遇到人工确认节点会在本页和任务中心等待审批。"
+          />
+          <Form
+            form={workflowForm}
+            layout="vertical"
+            initialValues={{
+              sampleId: samples[0]?.id,
+              sampleIdA: samples[0]?.id,
+              sampleIdB: samples[1]?.id,
+              bookId: latestBook?.bookId || 'default',
+              volumeNumber: 1,
+              chapterNumber: 1,
+            }}
+          >
+            <Row gutter={16}>
+              <Col span={6}>
+                <Form.Item name="sampleId" label="单样本">
+                  <Select
+                    placeholder="选择样本"
+                    options={samples.map((sample) => ({ label: sample.title || sample.fileName || sample.id, value: sample.id }))}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item name="sampleIdA" label="样本A">
+                  <Select
+                    placeholder="选择样本A"
+                    options={samples.map((sample) => ({ label: sample.title || sample.fileName || sample.id, value: sample.id }))}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item name="sampleIdB" label="样本B">
+                  <Select
+                    placeholder="选择样本B"
+                    options={samples.map((sample) => ({ label: sample.title || sample.fileName || sample.id, value: sample.id }))}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item name="bookId" label="书籍">
+                  <Select
+                    placeholder="选择书籍"
+                    options={(books.length ? books : [{ bookId: 'default', bookTitle: 'default' }]).map((book) => ({
+                      label: book.bookTitle || book.bookId,
+                      value: book.bookId || 'default',
+                    }))}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item name="volumeNumber" label="卷号">
+                  <InputNumber min={1} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
+              <Col span={6}>
+                <Form.Item name="chapterNumber" label="章节号">
+                  <InputNumber min={1} style={{ width: '100%' }} />
+                </Form.Item>
+              </Col>
+            </Row>
+          </Form>
+          <Row gutter={[16, 16]}>
+            {workflowTemplates.map((template) => {
+              const disabled =
+                (template.needs === 'sample' && samples.length < 1) ||
+                (template.needs === 'twoSamples' && samples.length < 2) ||
+                ((template.needs === 'book' || template.needs === 'chapter') && !latestBook);
+              return (
+                <Col span={12} key={template.id}>
+                  <Card size="small" title={template.title}>
+                    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                      <Text type="secondary">{template.description}</Text>
+                      <Button
+                        type="primary"
+                        loading={startingWorkflow === template.id}
+                        disabled={disabled}
+                        onClick={() => startWorkflow(template.id)}
+                      >
+                        启动
+                      </Button>
+                    </Space>
+                  </Card>
+                </Col>
+              );
+            })}
+          </Row>
         </Space>
       ),
     },

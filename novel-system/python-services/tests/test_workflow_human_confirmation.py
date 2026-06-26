@@ -56,6 +56,85 @@ def gated_workflow():
     }
 
 
+def parallel_workflow():
+    return {
+        "workflow_id": "test_parallel",
+        "workflow_name": "Test Parallel",
+        "nodes": [
+            {
+                "id": "fanout",
+                "type": "parallel",
+                "branches": [
+                    {
+                        "id": "branch_a",
+                        "agent": "echo",
+                        "task_type": "echo",
+                        "parameters": {"sample_id": "${input.sample_id_a}"},
+                    },
+                    {
+                        "id": "branch_b",
+                        "agent": "echo",
+                        "task_type": "echo",
+                        "parameters": {"sample_id": "${input.sample_id_b}"},
+                    },
+                ],
+            },
+            {
+                "id": "after_parallel",
+                "type": "agent",
+                "agent": "echo",
+                "task_type": "echo",
+                "condition": {"source": "outputs.fanout.status", "equals": "success"},
+                "parameters": {
+                    "branch_count": "${outputs.fanout.branch_count}",
+                    "branch_a_sample": "${outputs.branch_a.structured_output.parameters.sample_id}",
+                    "branch_b_task": "${outputs.branch_b.task_id}",
+                },
+            },
+        ],
+    }
+
+
+def conditional_workflow():
+    return {
+        "workflow_id": "test_condition",
+        "workflow_name": "Test Condition",
+        "nodes": [
+            {
+                "id": "score_source",
+                "type": "agent",
+                "agent": "echo",
+                "task_type": "echo",
+                "parameters": {
+                    "score": "${input.score}",
+                    "tags": "${input.tags}",
+                },
+            },
+            {
+                "id": "quality_gate",
+                "type": "agent",
+                "agent": "echo",
+                "task_type": "echo",
+                "condition": {
+                    "all_of": [
+                        {"source": "outputs.score_source.structured_output.parameters.score", "op": "gte", "value": 80},
+                        {"source": "outputs.score_source.structured_output.parameters.tags", "op": "contains", "value": "approved"},
+                    ]
+                },
+                "parameters": {"gate": "opened"},
+            },
+            {
+                "id": "fallback_gate",
+                "type": "agent",
+                "agent": "echo",
+                "task_type": "echo",
+                "condition": {"not": {"source": "outputs.score_source.structured_output.parameters.score", "op": "gte", "value": 80}},
+                "parameters": {"gate": "fallback"},
+            },
+        ],
+    }
+
+
 @pytest.mark.asyncio
 async def test_workflow_pauses_until_human_confirmation(tmp_path):
     original_base_path = settings.PROJECT_BASE_PATH
@@ -175,3 +254,60 @@ async def test_workflow_resume_rejection_cancels_workflow(tmp_path):
     assert rejected.structured_output["waiting_for_human"] is None
     assert rejected.structured_output["node_results"]["review_gate"]["status"] == "cancelled"
     assert "after_gate" not in rejected.structured_output["node_results"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_parallel_branches_feed_downstream_node(tmp_path):
+    original_base_path = settings.PROJECT_BASE_PATH
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    try:
+        engine = WorkflowEngine(lambda: {"echo": EchoAgent()})
+        response = await engine.execute(
+            AgentRequest(
+                task_id="task_parallel",
+                project_id="proj_workflow_parallel",
+                task_type="workflow",
+                input_refs={"sample_id_a": "sample_a", "sample_id_b": "sample_b"},
+            ),
+            parallel_workflow(),
+        )
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+
+    results = response.structured_output["node_results"]
+    assert response.status == "success"
+    assert results["fanout"]["status"] == "success"
+    assert results["fanout"]["branch_count"] == 2
+    assert results["fanout"]["branch_statuses"] == {"branch_a": "success", "branch_b": "success"}
+    assert results["branch_a"]["structured_output"]["parameters"]["sample_id"] == "sample_a"
+    assert results["branch_b"]["structured_output"]["parameters"]["sample_id"] == "sample_b"
+    assert results["after_parallel"]["structured_output"]["parameters"]["branch_count"] == 2
+    assert results["after_parallel"]["structured_output"]["parameters"]["branch_a_sample"] == "sample_a"
+    assert results["after_parallel"]["structured_output"]["parameters"]["branch_b_task"] == "task_parallel_branch_b"
+
+
+@pytest.mark.asyncio
+async def test_workflow_complex_conditions_run_and_skip_nodes(tmp_path):
+    original_base_path = settings.PROJECT_BASE_PATH
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    try:
+        engine = WorkflowEngine(lambda: {"echo": EchoAgent()})
+        response = await engine.execute(
+            AgentRequest(
+                task_id="task_condition",
+                project_id="proj_workflow_condition",
+                task_type="workflow",
+                input_refs={"score": 86, "tags": ["draft", "approved"]},
+            ),
+            conditional_workflow(),
+        )
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+
+    results = response.structured_output["node_results"]
+    assert response.status == "success"
+    assert results["quality_gate"]["status"] == "success"
+    assert results["quality_gate"]["structured_output"]["parameters"]["gate"] == "opened"
+    assert results["fallback_gate"]["status"] == "skipped"
+    assert results["fallback_gate"]["reason"] == "condition_not_met"
+    assert response.metrics["workflow_nodes_completed"] == 3

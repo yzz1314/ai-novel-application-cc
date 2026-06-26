@@ -60,7 +60,7 @@ export const sampleApi = {
 }
 
 export const taskApi = {
-  execute: (projectId: string, data: { agentName: string; config?: any; inputRefs?: any }) =>
+  execute: (projectId: string, data: { agentName: string; taskType?: string; config?: any; parameters?: any; inputRefs?: any }) =>
     request(api.post(`/projects/${projectId}/tasks/execute`, data)),
   getStatus: (projectId: string, taskId: string) =>
     request(api.get(`/tasks/${taskId}`, { params: { projectId } })),

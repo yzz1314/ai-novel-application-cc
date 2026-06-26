@@ -1,0 +1,47 @@
+name: Python Smoke
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python-smoke:
+    name: Python tests and offline MVP smoke
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: novel-system
+
+    env:
+      MOCK_LLM: "true"
+      PROJECT_BASE_PATH: /tmp/novel-ci-workspace
+      SKILLS_PATH: /tmp/novel-ci-workspace/skills
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: novel-system/python-services/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r python-services/requirements.txt
+
+      - name: Run Python test suite
+        working-directory: novel-system/python-services
+        run: python -m pytest tests -q
+
+      - name: Run offline MVP pipeline smoke
+        run: python scripts/smoke_mvp_pipeline.py

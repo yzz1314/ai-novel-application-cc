@@ -46,6 +46,20 @@ jobs:
   java-tests:
     name: Java service tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg15
+        env:
+          POSTGRES_DB: novel_system
+          POSTGRES_USER: novel_user
+          POSTGRES_PASSWORD: password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U novel_user -d novel_system"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     defaults:
       run:
         working-directory: novel-system/java-services
@@ -62,6 +76,15 @@ jobs:
 
       - name: Run Maven tests
         run: mvn -B test
+
+      - name: Validate Flyway migrations
+        env:
+          RUN_DB_MIGRATION_TEST: "true"
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/novel_system
+          SPRING_DATASOURCE_USERNAME: novel_user
+          SPRING_DATASOURCE_PASSWORD: password
+          SPRING_FLYWAY_SCHEMAS: public
+        run: mvn -B -Dtest=MigrationSchemaValidationTest test
 
   frontend-build:
     name: Frontend typecheck and build

@@ -10,6 +10,7 @@ public class ProjectResponse {
     private String id;
     private String name;
     private String description;
+    private String genre;
     private String sampleGroupType;
     private String sourceLanguage;
     private String targetLanguage;
@@ -22,6 +23,7 @@ public class ProjectResponse {
         response.setId(project.getId());
         response.setName(project.getName());
         response.setDescription(project.getDescription());
+        response.setGenre(project.getGenre());
         response.setSampleGroupType(project.getSampleGroupType().name());
         response.setSourceLanguage(project.getSourceLanguage());
         response.setTargetLanguage(project.getTargetLanguage());

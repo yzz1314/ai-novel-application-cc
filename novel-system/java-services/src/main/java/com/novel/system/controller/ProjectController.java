@@ -28,6 +28,7 @@ public class ProjectController {
         Project project = projectService.createProject(
             request.getName(),
             request.getDescription(),
+            request.getGenre(),
             SampleGroupType.valueOf(request.getSampleGroupType())
         );
 

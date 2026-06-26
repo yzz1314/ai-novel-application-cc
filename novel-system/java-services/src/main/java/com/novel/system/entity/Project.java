@@ -19,6 +19,9 @@ public class Project {
     @Column(columnDefinition = "TEXT")
     private String description;
 
+    @Column(length = 120)
+    private String genre;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "sample_group_type", nullable = false, length = 20)
     private SampleGroupType sampleGroupType;

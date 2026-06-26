@@ -9,6 +9,7 @@ interface Project {
   id: string;
   projectName: string;
   description: string;
+  genre: string;
   sampleGroupType: string;
   status: string;
   createdAt: string;
@@ -24,18 +25,26 @@ const sampleGroupLabels: Record<string, string> = {
 const statusLabels: Record<string, string> = {
   CREATED: '已创建',
   INGESTING: '导入中',
+  CHUNKED: '已分块',
+  ANALYZING: '分析中',
   ANALYZED: '已分析',
   OUTLINING: '大纲中',
   WRITING: '创作中',
+  COMPLETED: '已完成',
+  FAILED: '失败',
   ARCHIVED: '已归档',
 };
 
 const statusColors: Record<string, string> = {
   CREATED: 'default',
   INGESTING: 'processing',
+  CHUNKED: 'cyan',
+  ANALYZING: 'processing',
   ANALYZED: 'blue',
   OUTLINING: 'purple',
   WRITING: 'green',
+  COMPLETED: 'success',
+  FAILED: 'error',
   ARCHIVED: 'default',
 };
 
@@ -54,6 +63,7 @@ const ProjectList: React.FC = () => {
     id: project.id,
     projectName: project.projectName || project.name || project.title || project.id,
     description: project.description || '',
+    genre: project.genre || '',
     sampleGroupType: project.sampleGroupType || project.sample_group_type || 'SAME_GENRE',
     status: (project.status || 'CREATED').toUpperCase(),
     createdAt: project.createdAt || project.created_at || '',
@@ -85,6 +95,12 @@ const ProjectList: React.FC = () => {
       title: '描述',
       dataIndex: 'description',
       key: 'description',
+    },
+    {
+      title: '题材',
+      dataIndex: 'genre',
+      key: 'genre',
+      render: (genre) => genre ? <Tag color="geekblue">{genre}</Tag> : '-',
     },
     {
       title: '样本分组',
@@ -143,6 +159,7 @@ const ProjectList: React.FC = () => {
       await projectApi.create({
         name: values.projectName,
         description: values.description,
+        genre: values.genre,
         sampleGroupType: values.sampleGroupType,
       });
       message.success('项目创建成功');
@@ -228,6 +245,13 @@ const ProjectList: React.FC = () => {
               rows={3}
               placeholder="简要描述你的创作计划"
             />
+          </Form.Item>
+          <Form.Item
+            name="genre"
+            label="题材"
+            rules={[{ max: 120, message: 'genre must not exceed 120 characters' }]}
+          >
+            <Input placeholder="玄幻修真 / 都市异能 / 悬疑探案" />
           </Form.Item>
           <Form.Item
             name="sampleGroupType"

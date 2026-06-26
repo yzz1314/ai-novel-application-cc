@@ -28,6 +28,11 @@ public class ProjectService {
 
     @Transactional
     public Project createProject(String name, String description, SampleGroupType sampleGroupType) {
+        return createProject(name, description, null, sampleGroupType);
+    }
+
+    @Transactional
+    public Project createProject(String name, String description, String genre, SampleGroupType sampleGroupType) {
         log.info("Creating project: {}", name);
 
         // 检查项目名称是否已存在
@@ -39,6 +44,7 @@ public class ProjectService {
         Project project = new Project();
         project.setName(name);
         project.setDescription(description);
+        project.setGenre(normalizeBlank(genre));
         project.setSampleGroupType(sampleGroupType);
         project.setStatus(ProjectStatus.CREATED);
 
@@ -55,6 +61,14 @@ public class ProjectService {
 
         log.info("Project created with ID: {}", project.getId());
         return project;
+    }
+
+    private String normalizeBlank(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private void createProjectDirectories(String projectId) throws IOException {

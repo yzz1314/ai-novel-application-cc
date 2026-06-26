@@ -15,6 +15,9 @@ public class CreateProjectRequest {
     @Size(max = 1000, message = "项目描述不能超过1000字符")
     private String description;
 
+    @Size(max = 120, message = "genre must not exceed 120 characters")
+    private String genre;
+
     @NotBlank(message = "样本类型不能为空")
     @Pattern(regexp = "SAME_AUTHOR|SAME_GENRE|MIXED", message = "样本类型无效")
     private String sampleGroupType;

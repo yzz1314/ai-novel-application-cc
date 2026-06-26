@@ -76,6 +76,28 @@ const ArtifactView: React.FC = () => {
     [items, selectedRowKeys]
   )
   const isArchivedArtifact = (record: any) => String(record?.path || '').startsWith('artifacts/archive/')
+  const auditPathText = (record: any) => {
+    const singlePath = record.path || record.sourcePath || record.archivedPath || record.restoredPath
+    if (record.leftPath || record.rightPath) {
+      return [record.leftPath, record.rightPath].filter(Boolean).join(' -> ')
+    }
+    if (Array.isArray(record.paths) && record.paths.length) {
+      return record.paths.join(', ')
+    }
+    return singlePath || '-'
+  }
+
+  const auditSummaryText = (record: any) => {
+    const parts: string[] = []
+    if (record.sensitive) parts.push('sensitive')
+    if (record.includedCount !== undefined) parts.push(`included ${record.includedCount}`)
+    if (record.skippedCount !== undefined) parts.push(`skipped ${record.skippedCount}`)
+    if (record.changedLines !== undefined) parts.push(`changed ${record.changedLines}`)
+    if (record.details && Object.keys(record.details).length) {
+      parts.push(JSON.stringify(record.details))
+    }
+    return parts.join(' | ') || '-'
+  }
 
   const loadData = async (nextQuery = query) => {
     if (!projectId) return
@@ -303,7 +325,11 @@ const ArtifactView: React.FC = () => {
     try {
       setActionLoading(true)
       const result = await artifactApi.audit(projectId, { limit: 100 })
-      setAuditDrawer(result?.items || [])
+      setAuditDrawer((result?.items || []).map((item: any) => ({
+        ...item,
+        sourcePath: auditPathText(item),
+        reason: [item.reason, auditSummaryText(item)].filter((value) => value && value !== '-').join(' | '),
+      })))
       setAuditOpen(true)
     } catch (error) {
       message.error('加载审计日志失败')

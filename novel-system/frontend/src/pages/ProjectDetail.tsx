@@ -96,6 +96,9 @@ const ProjectDetail: React.FC = () => {
   const [skillVersionLoading, setSkillVersionLoading] = useState(false);
   const [skillVersions, setSkillVersions] = useState<any[]>([]);
   const [versionSkill, setVersionSkill] = useState<any>(null);
+  const [skillConfigVersionOpen, setSkillConfigVersionOpen] = useState(false);
+  const [skillConfigVersionLoading, setSkillConfigVersionLoading] = useState(false);
+  const [skillConfigVersions, setSkillConfigVersions] = useState<any[]>([]);
   const [approvalTask, setApprovalTask] = useState<any>(null);
   const [approvalDecision, setApprovalDecision] = useState<'approve' | 'reject'>('approve');
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
@@ -566,6 +569,40 @@ const ProjectDetail: React.FC = () => {
     }
   };
 
+  const openSkillConfigVersions = async () => {
+    if (!projectId) return;
+    try {
+      setSkillConfigVersionOpen(true);
+      setSkillConfigVersionLoading(true);
+      const data = await skillsApi.getEnabledVersions(projectId);
+      setSkillConfigVersions(data || []);
+    } catch (error) {
+      message.error('加载Skill启用配置版本失败');
+    } finally {
+      setSkillConfigVersionLoading(false);
+    }
+  };
+
+  const restoreSkillConfigVersion = async (versionId: string) => {
+    if (!projectId) return;
+    try {
+      setSkillConfigVersionLoading(true);
+      await skillsApi.restoreEnabledVersion(projectId, versionId, {
+        restorer: 'human',
+        note: 'restore enabled skill config from ProjectDetail',
+        createVersionSnapshot: true,
+      });
+      message.success('Skill启用配置已恢复');
+      const data = await skillsApi.getEnabledVersions(projectId);
+      setSkillConfigVersions(data || []);
+      await loadProjectData();
+    } catch (error) {
+      message.error('恢复Skill启用配置失败');
+    } finally {
+      setSkillConfigVersionLoading(false);
+    }
+  };
+
   const openApprovalModal = (task: any, decision: 'approve' | 'reject') => {
     const waiting = task?.result?.waiting_for_human;
     if (!waiting?.node_id) {
@@ -821,6 +858,11 @@ const ProjectDetail: React.FC = () => {
       label: <span><CheckCircleOutlined /> Skills</span>,
       children: skills.length ? (
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Space wrap>
+            <Button icon={<HistoryOutlined />} onClick={openSkillConfigVersions}>
+              启用配置版本
+            </Button>
+          </Space>
           {skillConflicts && (
             conflictCount > 0 ? (
               <Alert
@@ -1076,6 +1118,47 @@ const ProjectDetail: React.FC = () => {
             },
           ]}
           locale={{ emptyText: '暂无历史版本' }}
+        />
+      </Modal>
+
+      <Modal
+        title="Skill启用配置历史版本"
+        open={skillConfigVersionOpen}
+        width={860}
+        footer={null}
+        onCancel={() => {
+          setSkillConfigVersionOpen(false);
+          setSkillConfigVersions([]);
+        }}
+      >
+        <Table
+          loading={skillConfigVersionLoading}
+          dataSource={skillConfigVersions}
+          rowKey="id"
+          pagination={{ pageSize: 6 }}
+          columns={[
+            { title: '版本ID', dataIndex: 'id', key: 'id', ellipsis: true },
+            { title: '路径', dataIndex: 'path', key: 'path', ellipsis: true },
+            { title: '归档时间', dataIndex: 'archivedAt', key: 'archivedAt', width: 190 },
+            { title: '大小', dataIndex: 'sizeBytes', key: 'sizeBytes', width: 90 },
+            {
+              title: '操作',
+              key: 'action',
+              width: 110,
+              render: (_: any, record: any) => (
+                <Popconfirm
+                  title="恢复这份启用配置？"
+                  description="恢复前会先归档当前 enabled.yaml，并重新加载项目 Skill 状态。"
+                  okText="恢复"
+                  cancelText="取消"
+                  onConfirm={() => restoreSkillConfigVersion(record.id)}
+                >
+                  <Button type="link">恢复</Button>
+                </Popconfirm>
+              ),
+            },
+          ]}
+          locale={{ emptyText: '暂无启用配置历史版本' }}
         />
       </Modal>
 

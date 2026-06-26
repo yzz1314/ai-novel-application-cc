@@ -13,4 +13,6 @@ public interface OutlineArtifactRepository extends JpaRepository<OutlineArtifact
     List<OutlineArtifact> findByProjectIdOrderByUpdatedAtDesc(String projectId);
 
     Optional<OutlineArtifact> findByProjectIdAndBookId(String projectId, String bookId);
+
+    long countByProjectId(String projectId);
 }

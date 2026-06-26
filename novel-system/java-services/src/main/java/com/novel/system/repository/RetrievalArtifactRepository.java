@@ -14,5 +14,7 @@ public interface RetrievalArtifactRepository extends JpaRepository<RetrievalArti
 
     List<RetrievalArtifact> findByProjectIdOrderByUpdatedAtDesc(String projectId);
 
+    long countByProjectId(String projectId);
+
     void deleteByProjectId(String projectId);
 }

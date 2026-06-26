@@ -30,5 +30,11 @@ public interface ChapterArtifactRepository extends JpaRepository<ChapterArtifact
         Integer chapterNumber
     );
 
+    long countByProjectId(String projectId);
+
+    long countByStage(String stage);
+
+    long countByProjectIdAndStage(String projectId, String stage);
+
     void deleteByProjectIdAndBookId(String projectId, String bookId);
 }

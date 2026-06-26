@@ -13,4 +13,6 @@ public interface SkillProfileRepository extends JpaRepository<SkillProfile, Stri
     List<SkillProfile> findByProjectIdOrderByUpdatedAtDesc(String projectId);
 
     Optional<SkillProfile> findByProjectIdAndName(String projectId, String name);
+
+    long countByProjectId(String projectId);
 }

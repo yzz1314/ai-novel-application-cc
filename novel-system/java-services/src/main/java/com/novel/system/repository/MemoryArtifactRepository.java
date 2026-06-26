@@ -14,5 +14,7 @@ public interface MemoryArtifactRepository extends JpaRepository<MemoryArtifact, 
 
     List<MemoryArtifact> findByProjectIdOrderByUpdatedAtDesc(String projectId);
 
+    long countByProjectId(String projectId);
+
     void deleteByProjectId(String projectId);
 }

@@ -14,5 +14,7 @@ public interface GraphArtifactRepository extends JpaRepository<GraphArtifact, St
 
     List<GraphArtifact> findByProjectIdOrderByUpdatedAtDesc(String projectId);
 
+    long countByProjectId(String projectId);
+
     void deleteByProjectId(String projectId);
 }

@@ -25,6 +25,10 @@ export const projectApi = {
   delete: (projectId: string) => request(api.delete(`/projects/${projectId}`)),
 }
 
+export const dashboardApi = {
+  getOverview: () => request(api.get('/dashboard')),
+}
+
 export const modelProfileApi = {
   getList: () => request<any[]>(api.get('/model-profiles')),
   getDefault: () => request(api.get('/model-profiles/default')),

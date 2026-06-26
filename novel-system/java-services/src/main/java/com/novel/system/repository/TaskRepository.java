@@ -27,4 +27,10 @@ public interface TaskRepository extends JpaRepository<Task, String> {
     List<Task> findByStatusOrderByCreatedAtDesc(TaskStatus status, Pageable pageable);
 
     List<Task> findByProjectIdAndStatusOrderByCreatedAtDesc(String projectId, TaskStatus status, Pageable pageable);
+
+    long countByProjectId(String projectId);
+
+    long countByStatus(TaskStatus status);
+
+    long countByProjectIdAndStatus(String projectId, TaskStatus status);
 }

@@ -15,6 +15,12 @@ public interface SampleRepository extends JpaRepository<Sample, String> {
 
     List<Sample> findByStatus(SampleStatus status);
 
+    long countByProjectId(String projectId);
+
+    long countByStatus(SampleStatus status);
+
+    long countByProjectIdAndStatus(String projectId, SampleStatus status);
+
     boolean existsByFileHash(String fileHash);
 
     boolean existsByProjectIdAndFileHash(String projectId, String fileHash);

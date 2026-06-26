@@ -250,6 +250,14 @@ export const memoryApi = {
     request<any[]>(api.get(`/projects/${projectId}/memory/snapshots/list`)),
   getSnapshot: (projectId: string, snapshotId: string) =>
     request(api.get(`/projects/${projectId}/memory/snapshots/${snapshotId}`)),
+  getVersions: (projectId: string) =>
+    request<any[]>(api.get(`/projects/${projectId}/memory/versions`)),
+  createVersion: (projectId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/memory/versions`, data || {})),
+  getVersion: (projectId: string, versionId: string) =>
+    request(api.get(`/projects/${projectId}/memory/versions/${versionId}`)),
+  restoreVersion: (projectId: string, versionId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/memory/versions/${versionId}/restore`, data || {})),
   rebuild: (projectId: string, config: any) =>
     request(api.post(`/projects/${projectId}/memory/rebuild`, config)),
   getDb: (projectId: string) =>

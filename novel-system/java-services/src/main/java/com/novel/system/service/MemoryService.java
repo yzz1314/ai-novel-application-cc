@@ -17,11 +17,14 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 @Service
@@ -29,6 +32,20 @@ import java.util.regex.Pattern;
 public class MemoryService {
 
     private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9_-]+$");
+    private static final DateTimeFormatter VERSION_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
+    private static final List<String> VERSIONED_MEMORY_FILES = List.of(
+        "characters.md",
+        "foreshadowing.md",
+        "timeline.md",
+        "relationships.md",
+        "cognition.md",
+        "canon.md",
+        "characters.json",
+        "world_settings.json",
+        "plots.json",
+        "suspenses.json",
+        "timeline.json"
+    );
 
     private final ProjectService projectService;
     private final TaskExecutorService taskExecutorService;
@@ -43,6 +60,7 @@ public class MemoryService {
         overview.put("projectId", projectId);
         overview.put("types", memoryTypes().stream().map(type -> memoryTypeSummary(projectId, type)).toList());
         overview.put("snapshots", listSnapshots(projectId));
+        overview.put("versions", listVersions(projectId));
         overview.put("continuityReports", listContinuityReports(projectId));
         overview.put("auditReports", listAuditReports(projectId));
         overview.put("latestTasks", taskExecutorService.listTasksByProject(projectId).stream()
@@ -120,6 +138,126 @@ public class MemoryService {
         response.put("id", snapshotId);
         response.put("path", relative(projectId, file));
         response.put("updatedAt", modifiedAt(file));
+        return response;
+    }
+
+    public List<Map<String, Object>> listVersions(String projectId) {
+        projectService.getProject(projectId);
+        Path versionsDir = memoryVersionsDir(projectId);
+        if (!Files.exists(versionsDir)) {
+            return List.of();
+        }
+
+        List<Map<String, Object>> versions = new ArrayList<>();
+        try (var stream = Files.list(versionsDir)) {
+            stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".json"))
+                .forEach(path -> {
+                    try {
+                        Map<String, Object> version = readJsonMap(path);
+                        if ("memory_snapshot".equals(version.get("version_type"))) {
+                            versions.add(versionSummary(projectId, path, version));
+                        }
+                    } catch (Exception ignored) {
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("id", stripSuffix(path.getFileName().toString(), ".json"));
+                        item.put("path", relative(projectId, path));
+                        item.put("updatedAt", modifiedAt(path));
+                        versions.add(item);
+                    }
+                });
+        } catch (IOException e) {
+            throw new RuntimeException("读取记忆版本失败", e);
+        }
+
+        versions.sort(Comparator.comparing(version -> String.valueOf(version.get("createdAt")), Comparator.reverseOrder()));
+        return versions;
+    }
+
+    public Map<String, Object> getVersion(String projectId, String versionId) {
+        projectService.getProject(projectId);
+        validateId(versionId, "versionId");
+        Path file = memoryVersionsDir(projectId).resolve(versionId + ".json");
+        if (!Files.exists(file)) {
+            throw new ResourceNotFoundException("记忆版本不存在: " + versionId);
+        }
+        Map<String, Object> version = readJsonMap(file);
+        version.put("id", versionId);
+        version.put("path", relative(projectId, file));
+        version.put("updatedAt", modifiedAt(file));
+        return version;
+    }
+
+    public Map<String, Object> createVersion(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        return createMemoryVersion(projectId, request == null ? Map.of() : request);
+    }
+
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> restoreVersion(String projectId, String versionId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        Map<String, Object> version = getVersion(projectId, versionId);
+        Object rawFiles = version.get("files");
+        if (!(rawFiles instanceof List<?> rawList)) {
+            throw new IllegalArgumentException("记忆版本文件清单为空: " + versionId);
+        }
+
+        Map<String, Object> previousVersion = createMemoryVersion(
+            projectId,
+            Map.of(
+                "reason", "before_memory_restore",
+                "actor", stringValue(requestValue(request, "actor"), "system"),
+                "note", "Before restoring memory version " + versionId
+            )
+        );
+
+        Path memoryDir = memoryDir(projectId);
+        try {
+            Files.createDirectories(memoryDir);
+            Set<String> restoredNames = new HashSet<>();
+            for (Object rawFile : rawList) {
+                if (!(rawFile instanceof Map<?, ?> map)) {
+                    continue;
+                }
+                String name = stringValue(map.get("name"), "");
+                if (!VERSIONED_MEMORY_FILES.contains(name)) {
+                    continue;
+                }
+                String content = stringValue(map.get("content"), "");
+                Files.writeString(memoryDir.resolve(name), content, StandardCharsets.UTF_8);
+                restoredNames.add(name);
+            }
+
+            if (Boolean.TRUE.equals(requestValue(request, "deleteMissing"))) {
+                for (String name : VERSIONED_MEMORY_FILES) {
+                    if (!restoredNames.contains(name)) {
+                        Files.deleteIfExists(memoryDir.resolve(name));
+                    }
+                }
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("恢复记忆版本失败: " + versionId, e);
+        }
+
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("project_id", projectId);
+        event.put("event_type", "memory_restore");
+        event.put("restored_from_version_id", versionId);
+        event.put("previous_version_id", previousVersion.get("id"));
+        event.put("actor", stringValue(requestValue(request, "actor"), "system"));
+        event.put("note", stringValue(requestValue(request, "note"), ""));
+        event.put("restored_at", LocalDateTime.now().toString());
+        Path eventFile = memoryVersionsDir(projectId).resolve("memory_restore_" + LocalDateTime.now().format(VERSION_TIMESTAMP) + ".json");
+        writeJson(eventFile, event);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "restored");
+        response.put("projectId", projectId);
+        response.put("restoredFromVersionId", versionId);
+        response.put("previousVersionId", previousVersion.get("id"));
+        response.put("previousVersionPath", previousVersion.get("path"));
+        response.put("restoreEventPath", relative(projectId, eventFile));
+        response.put("restoredFileCount", rawList.size());
         return response;
     }
 
@@ -309,6 +447,11 @@ public class MemoryService {
         Map<String, Object> parameters = new LinkedHashMap<>(request == null ? Map.of() : request);
         parameters.putIfAbsent("project_id", projectId);
         parameters.putIfAbsent("book_id", "default");
+        createMemoryVersion(projectId, Map.of(
+            "reason", "before_memory_rebuild",
+            "actor", stringValue(requestValue(request, "actor"), "system"),
+            "note", stringValue(requestValue(request, "note"), "Automatic snapshot before memory rebuild")
+        ));
 
         Task task = taskExecutorService.createTask(
             projectId,
@@ -327,6 +470,82 @@ public class MemoryService {
             chapterNumber = parameters.get("chapterNumber");
         }
         return chapterNumber == null ? "chapter_1" : "chapter_" + chapterNumber;
+    }
+
+    private Map<String, Object> createMemoryVersion(String projectId, Map<String, Object> request) {
+        Path versionsDir = memoryVersionsDir(projectId);
+        try {
+            Files.createDirectories(versionsDir);
+        } catch (IOException e) {
+            throw new RuntimeException("创建记忆版本目录失败", e);
+        }
+
+        String reason = stringValue(requestValue(request, "reason"), "manual_snapshot");
+        String timestamp = LocalDateTime.now().format(VERSION_TIMESTAMP);
+        String versionId = "memory_" + sanitizeFilePart(reason) + "_" + timestamp;
+        Path versionFile = versionsDir.resolve(versionId + ".json");
+        List<Map<String, Object>> files = new ArrayList<>();
+        int markdownCount = 0;
+        int jsonCount = 0;
+        long totalSizeBytes = 0;
+
+        for (String name : VERSIONED_MEMORY_FILES) {
+            Path file = memoryDir(projectId).resolve(name);
+            if (!Files.exists(file) || !Files.isRegularFile(file)) {
+                continue;
+            }
+            String content = readText(file);
+            long sizeBytes = size(file);
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("name", name);
+            item.put("path", relative(projectId, file));
+            item.put("updatedAt", modifiedAt(file));
+            item.put("sizeBytes", sizeBytes);
+            item.put("contentLength", content.length());
+            item.put("content", content);
+            files.add(item);
+            totalSizeBytes += sizeBytes;
+            if (name.endsWith(".md")) {
+                markdownCount++;
+            } else if (name.endsWith(".json")) {
+                jsonCount++;
+            }
+        }
+
+        Map<String, Object> version = new LinkedHashMap<>();
+        version.put("id", versionId);
+        version.put("project_id", projectId);
+        version.put("version_type", "memory_snapshot");
+        version.put("reason", reason);
+        version.put("actor", stringValue(requestValue(request, "actor"), "system"));
+        version.put("note", stringValue(requestValue(request, "note"), ""));
+        version.put("created_at", LocalDateTime.now().toString());
+        version.put("file_count", files.size());
+        version.put("markdown_count", markdownCount);
+        version.put("json_count", jsonCount);
+        version.put("total_size_bytes", totalSizeBytes);
+        version.put("files", files);
+        writeJson(versionFile, version);
+
+        Map<String, Object> response = versionSummary(projectId, versionFile, version);
+        response.put("files", files);
+        return response;
+    }
+
+    private Map<String, Object> versionSummary(String projectId, Path versionFile, Map<String, Object> version) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", version.getOrDefault("id", stripSuffix(versionFile.getFileName().toString(), ".json")));
+        item.put("reason", version.get("reason"));
+        item.put("actor", version.get("actor"));
+        item.put("note", version.get("note"));
+        item.put("createdAt", firstPresent(version.get("created_at"), version.get("createdAt")));
+        item.put("fileCount", version.get("file_count"));
+        item.put("markdownCount", version.get("markdown_count"));
+        item.put("jsonCount", version.get("json_count"));
+        item.put("totalSizeBytes", version.get("total_size_bytes"));
+        item.put("path", relative(projectId, versionFile));
+        item.put("updatedAt", modifiedAt(versionFile));
+        return item;
     }
 
     @SuppressWarnings("unchecked")
@@ -659,8 +878,20 @@ public class MemoryService {
         return projectRoot(projectId).resolve("memory");
     }
 
+    private Path memoryVersionsDir(String projectId) {
+        return memoryDir(projectId).resolve("versions");
+    }
+
     private String relative(String projectId, Path path) {
         return projectRoot(projectId).relativize(path).toString().replace("\\", "/");
+    }
+
+    private long size(Path file) {
+        try {
+            return Files.size(file);
+        } catch (IOException e) {
+            return 0L;
+        }
     }
 
     private String modifiedAt(Path file) {

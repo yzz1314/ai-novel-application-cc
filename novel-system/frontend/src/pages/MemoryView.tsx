@@ -11,6 +11,7 @@ import {
   Input,
   InputNumber,
   List,
+  Popconfirm,
   Row,
   Space,
   Statistic,
@@ -49,9 +50,11 @@ const MemoryView: React.FC = () => {
   const [memoryDetail, setMemoryDetail] = useState<Record<string, any>>({})
   const [activeType, setActiveType] = useState('characters')
   const [snapshots, setSnapshots] = useState<any[]>([])
+  const [versions, setVersions] = useState<any[]>([])
   const [continuityReports, setContinuityReports] = useState<any[]>([])
   const [auditReports, setAuditReports] = useState<any[]>([])
   const [snapshotDrawer, setSnapshotDrawer] = useState<any>(null)
+  const [versionDrawer, setVersionDrawer] = useState<any>(null)
   const [continuityDrawer, setContinuityDrawer] = useState<any>(null)
   const [auditDrawer, setAuditDrawer] = useState<any>(null)
   const [searchText, setSearchText] = useState('')
@@ -69,6 +72,7 @@ const MemoryView: React.FC = () => {
       const overviewData = await memoryApi.getOverview(projectId)
       setOverview(overviewData)
       setSnapshots(overviewData?.snapshots || [])
+      setVersions(overviewData?.versions || [])
       setContinuityReports(overviewData?.continuityReports || [])
       setAuditReports(overviewData?.auditReports || [])
 
@@ -106,6 +110,48 @@ const MemoryView: React.FC = () => {
       setSnapshotDrawer(data)
     } catch (error) {
       message.error('加载快照失败')
+    }
+  }
+
+  const createMemoryVersion = async () => {
+    if (!projectId) return
+    try {
+      message.loading({ content: '正在创建记忆版本', key: 'memory-version' })
+      const version: any = await memoryApi.createVersion(projectId, {
+        reason: 'manual_snapshot',
+        actor: 'human',
+        note: 'Manual snapshot from MemoryView',
+      })
+      message.success({ content: `记忆版本已创建：${version.id}`, key: 'memory-version' })
+      await loadMemories()
+    } catch (error) {
+      message.error({ content: '创建记忆版本失败', key: 'memory-version' })
+    }
+  }
+
+  const openVersion = async (version: any) => {
+    if (!projectId) return
+    try {
+      const data = await memoryApi.getVersion(projectId, version.id)
+      setVersionDrawer(data)
+    } catch (error) {
+      message.error('加载记忆版本失败')
+    }
+  }
+
+  const restoreMemoryVersion = async (versionId: string) => {
+    if (!projectId) return
+    try {
+      message.loading({ content: '正在恢复记忆版本', key: 'memory-restore' })
+      await memoryApi.restoreVersion(projectId, versionId, {
+        actor: 'human',
+        note: 'Restore from MemoryView',
+      })
+      message.success({ content: '记忆版本已恢复', key: 'memory-restore' })
+      setVersionDrawer(null)
+      await loadMemories()
+    } catch (error) {
+      message.error({ content: '恢复记忆版本失败', key: 'memory-restore' })
     }
   }
 
@@ -250,6 +296,26 @@ const MemoryView: React.FC = () => {
       width: 90,
       render: (_: any, record: any) => (
         <Button type="link" onClick={() => openSnapshot(record)}>
+          查看
+        </Button>
+      ),
+    },
+  ]
+
+  const versionColumns = [
+    { title: '版本', dataIndex: 'id', key: 'id' },
+    { title: '原因', dataIndex: 'reason', key: 'reason', width: 160 },
+    { title: '创建人', dataIndex: 'actor', key: 'actor', width: 110 },
+    { title: '文件数', dataIndex: 'fileCount', key: 'fileCount', width: 90 },
+    { title: 'Markdown', dataIndex: 'markdownCount', key: 'markdownCount', width: 110 },
+    { title: 'JSON', dataIndex: 'jsonCount', key: 'jsonCount', width: 80 },
+    { title: '创建时间', dataIndex: 'createdAt', key: 'createdAt', width: 190 },
+    {
+      title: '操作',
+      key: 'action',
+      width: 90,
+      render: (_: any, record: any) => (
+        <Button type="link" onClick={() => openVersion(record)}>
           查看
         </Button>
       ),
@@ -437,7 +503,7 @@ const MemoryView: React.FC = () => {
               <Statistic title="快照" value={snapshots.length} />
             </Col>
             <Col span={6}>
-              <Statistic title="审计报告" value={auditReports.length} />
+              <Statistic title="记忆版本" value={versions.length} />
             </Col>
           </Row>
           <Table
@@ -534,6 +600,31 @@ const MemoryView: React.FC = () => {
           rowKey="id"
           loading={loading}
         />
+      ),
+    },
+    {
+      key: 'versions',
+      label: '版本',
+      children: (
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="记忆版本会保存 6 类 Markdown 与 JSON 记忆文件；恢复版本前会自动保留当前记忆快照。"
+          />
+          <Space>
+            <Button type="primary" onClick={createMemoryVersion}>
+              创建当前版本
+            </Button>
+          </Space>
+          <Table
+            columns={versionColumns}
+            dataSource={versions}
+            rowKey="id"
+            loading={loading}
+            pagination={{ pageSize: 8 }}
+          />
+        </Space>
       ),
     },
     {
@@ -688,6 +779,54 @@ const MemoryView: React.FC = () => {
         <pre style={{ whiteSpace: 'pre-wrap' }}>
           {JSON.stringify(snapshotDrawer, null, 2)}
         </pre>
+      </Drawer>
+
+      <Drawer
+        title={versionDrawer?.id || '记忆版本'}
+        width={980}
+        open={!!versionDrawer}
+        onClose={() => setVersionDrawer(null)}
+        extra={
+          versionDrawer?.id ? (
+            <Popconfirm
+              title="恢复此记忆版本？"
+              description="恢复前会自动保存当前记忆版本。"
+              onConfirm={() => restoreMemoryVersion(versionDrawer.id)}
+              okText="恢复"
+              cancelText="取消"
+            >
+              <Button danger>恢复版本</Button>
+            </Popconfirm>
+          ) : null
+        }
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Descriptions bordered column={3}>
+            <Descriptions.Item label="原因">{versionDrawer?.reason || '-'}</Descriptions.Item>
+            <Descriptions.Item label="创建人">{versionDrawer?.actor || '-'}</Descriptions.Item>
+            <Descriptions.Item label="创建时间">{versionDrawer?.created_at || versionDrawer?.createdAt || '-'}</Descriptions.Item>
+            <Descriptions.Item label="文件数">{versionDrawer?.file_count ?? versionDrawer?.fileCount ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="Markdown">{versionDrawer?.markdown_count ?? versionDrawer?.markdownCount ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="JSON">{versionDrawer?.json_count ?? versionDrawer?.jsonCount ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="备注" span={3}>{versionDrawer?.note || '-'}</Descriptions.Item>
+            <Descriptions.Item label="路径" span={3}>{versionDrawer?.path || '-'}</Descriptions.Item>
+          </Descriptions>
+          <Table
+            size="small"
+            columns={[
+              { title: '文件', dataIndex: 'name', key: 'name', width: 180 },
+              { title: '路径', dataIndex: 'path', key: 'path' },
+              { title: '大小', dataIndex: 'sizeBytes', key: 'sizeBytes', width: 100 },
+              { title: '更新时间', dataIndex: 'updatedAt', key: 'updatedAt', width: 190 },
+            ]}
+            dataSource={versionDrawer?.files || []}
+            rowKey="name"
+            pagination={false}
+          />
+          <pre style={{ whiteSpace: 'pre-wrap' }}>
+            {JSON.stringify(versionDrawer, null, 2)}
+          </pre>
+        </Space>
       </Drawer>
 
       <Drawer

@@ -41,6 +41,33 @@ public class MemoryController {
         return ResponseEntity.ok(memoryArtifactService.syncMemoryFromWorkspace(projectId, request == null ? Map.of() : request));
     }
 
+    @GetMapping("/versions")
+    public ResponseEntity<List<Map<String, Object>>> listVersions(@PathVariable String projectId) {
+        return ResponseEntity.ok(memoryService.listVersions(projectId));
+    }
+
+    @PostMapping("/versions")
+    public ResponseEntity<Map<String, Object>> createVersion(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(memoryService.createVersion(projectId, request == null ? Map.of() : request));
+    }
+
+    @GetMapping("/versions/{versionId}")
+    public ResponseEntity<Map<String, Object>> getVersion(
+            @PathVariable String projectId,
+            @PathVariable String versionId) {
+        return ResponseEntity.ok(memoryService.getVersion(projectId, versionId));
+    }
+
+    @PostMapping("/versions/{versionId}/restore")
+    public ResponseEntity<Map<String, Object>> restoreVersion(
+            @PathVariable String projectId,
+            @PathVariable String versionId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(memoryService.restoreVersion(projectId, versionId, request == null ? Map.of() : request));
+    }
+
     @GetMapping("/{type}")
     public ResponseEntity<Map<String, Object>> getMemoryType(
             @PathVariable String projectId,

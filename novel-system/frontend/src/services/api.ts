@@ -134,6 +134,10 @@ export const outlineApi = {
     request(api.get(`/projects/${projectId}/books/${bookId}/soul`)),
   getSoulVersions: (projectId: string, bookId: string) =>
     request<any[]>(api.get(`/projects/${projectId}/books/${bookId}/soul/versions`)),
+  getSoulVersion: (projectId: string, bookId: string, versionId: string) =>
+    request(api.get(`/projects/${projectId}/books/${bookId}/soul/versions/${versionId}`)),
+  restoreSoulVersion: (projectId: string, bookId: string, versionId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/books/${bookId}/soul/versions/${versionId}/restore`, data || {})),
   lockSoul: (projectId: string, bookId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/books/${bookId}/soul/lock`, data || {})),
   unlockSoul: (projectId: string, bookId: string, data?: any) =>

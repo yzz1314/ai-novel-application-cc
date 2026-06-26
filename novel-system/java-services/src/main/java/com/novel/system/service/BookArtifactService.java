@@ -143,6 +143,73 @@ public class BookArtifactService {
         }
     }
 
+    public Map<String, Object> getProjectSoulVersion(String projectId, String bookId, String versionId) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Path versionFile = resolveProjectSoulVersionFile(projectId, versionId);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("bookId", resolvedBookId);
+        response.put("id", stripSuffix(versionFile.getFileName().toString(), ".md"));
+        response.put("path", relative(projectId, versionFile));
+        response.put("content", readText(versionFile));
+        response.put("sizeBytes", fileSize(versionFile));
+        response.put("archivedAt", modifiedAt(versionFile));
+        return response;
+    }
+
+    public Map<String, Object> restoreProjectSoulVersion(
+            String projectId,
+            String bookId,
+            String versionId,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        Map<String, Object> governance = readSoulGovernance(projectId, resolvedBookId);
+        if (booleanValue(governance.get("locked"), false)
+                && !booleanOption(options, "overrideSoulLock", false)) {
+            throw new IllegalArgumentException("Project Soul is locked; unlock it before restoring a version.");
+        }
+
+        Path versionFile = resolveProjectSoulVersionFile(projectId, versionId);
+        Path soulPath = projectRoot(projectId).resolve("novel").resolve("soul").resolve("project_soul.md");
+        Path previousSnapshotPath = null;
+        if (Files.exists(soulPath) && booleanOption(options, "createVersionSnapshot", true)) {
+            previousSnapshotPath = archiveTextSnapshot(
+                projectId,
+                soulPath,
+                projectRoot(projectId).resolve("novel").resolve("soul").resolve("versions"),
+                "project_soul",
+                "md"
+            );
+        }
+
+        String actor = stringValue(valueOf(options, "actor", "restoredBy"), "human");
+        String note = stringValue(valueOf(options, "note", "reason"), "");
+        String restoredAt = LocalDateTime.now().toString();
+        writeText(soulPath, readText(versionFile));
+
+        governance.put("bookId", resolvedBookId);
+        governance.put("approvalStatus", "pending_review");
+        governance.put("restoredBy", actor);
+        governance.put("restoredAt", restoredAt);
+        governance.put("restoreNote", note);
+        governance.put("restoredFromVersionId", stripSuffix(versionFile.getFileName().toString(), ".md"));
+        governance.put("restoredFromPath", relative(projectId, versionFile));
+        governance.put("previousSnapshotPath", previousSnapshotPath != null ? relative(projectId, previousSnapshotPath) : null);
+        governance.put("updatedAt", restoredAt);
+        writeJson(soulGovernanceFile(projectId), decamelizeMap(governance));
+
+        Map<String, Object> response = getProjectSoul(projectId, resolvedBookId);
+        response.put("status", "restored");
+        response.put("restoredFromVersionId", stripSuffix(versionFile.getFileName().toString(), ".md"));
+        response.put("restoredFromPath", relative(projectId, versionFile));
+        response.put("previousSnapshotPath", previousSnapshotPath != null ? relative(projectId, previousSnapshotPath) : null);
+        response.put("restoredAt", restoredAt);
+        return response;
+    }
+
     public Map<String, Object> updateProjectSoulGovernance(
             String projectId,
             String bookId,
@@ -980,6 +1047,18 @@ public class BookArtifactService {
             throw new IllegalArgumentException("sourceStage 仅支持 draft/final/auto");
         }
         throw new ResourceNotFoundException("指定阶段章节不存在: " + bookId + "/" + volumeNumber + "/" + chapterNumber + "/" + normalizedStage);
+    }
+
+    private Path resolveProjectSoulVersionFile(String projectId, String versionId) {
+        if (versionId == null || !versionId.matches("project_soul_[A-Za-z0-9_-]+")) {
+            throw new IllegalArgumentException("Invalid Project Soul version id: " + versionId);
+        }
+        Path versionsDir = projectRoot(projectId).resolve("novel").resolve("soul").resolve("versions").normalize();
+        Path versionFile = versionsDir.resolve(versionId + ".md").normalize();
+        if (!versionFile.startsWith(versionsDir) || !Files.exists(versionFile) || !Files.isRegularFile(versionFile)) {
+            throw new ResourceNotFoundException("Project Soul version does not exist: " + versionId);
+        }
+        return versionFile;
     }
 
     private List<Path> outlineFiles(String projectId) {

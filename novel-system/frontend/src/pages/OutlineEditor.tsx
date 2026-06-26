@@ -74,6 +74,7 @@ const OutlineEditor: React.FC = () => {
   const [reviewing, setReviewing] = useState(false);
   const [soulVersions, setSoulVersions] = useState<any[]>([]);
   const [soulVersionOpen, setSoulVersionOpen] = useState(false);
+  const [soulVersionPreview, setSoulVersionPreview] = useState<any>(null);
   const [soulGovernanceLoading, setSoulGovernanceLoading] = useState(false);
   const [form] = Form.useForm();
 
@@ -254,6 +255,42 @@ const OutlineEditor: React.FC = () => {
       setSoulVersionOpen(true);
     } catch (error) {
       message.error('加载Project Soul版本失败');
+    } finally {
+      setSoulGovernanceLoading(false);
+    }
+  };
+
+  const previewSoulVersion = async (version: any) => {
+    if (!projectId || !outline) return;
+    try {
+      setSoulGovernanceLoading(true);
+      const bookId = selectedBookId || outline.bookId || 'default';
+      const detail = await outlineApi.getSoulVersion(projectId, bookId, version.id);
+      setSoulVersionPreview(detail);
+    } catch (error) {
+      message.error('加载Project Soul版本内容失败');
+    } finally {
+      setSoulGovernanceLoading(false);
+    }
+  };
+
+  const restoreSoulVersion = async (version: any, overrideSoulLock = false) => {
+    if (!projectId || !outline) return;
+    try {
+      setSoulGovernanceLoading(true);
+      const bookId = selectedBookId || outline.bookId || 'default';
+      await outlineApi.restoreSoulVersion(projectId, bookId, version.id, {
+        actor: 'human',
+        note: `Restore Project Soul from ${version.id}`,
+        createVersionSnapshot: true,
+        overrideSoulLock,
+      });
+      message.success('Project Soul版本已恢复');
+      setSoulVersionPreview(null);
+      setSoulVersionOpen(false);
+      await loadOutline();
+    } catch (error) {
+      message.error('恢复Project Soul版本失败');
     } finally {
       setSoulGovernanceLoading(false);
     }
@@ -783,6 +820,9 @@ const OutlineEditor: React.FC = () => {
           dataSource={soulVersions}
           rowKey="id"
           pagination={{ pageSize: 6 }}
+          onRow={(record: any) => ({
+            onClick: () => previewSoulVersion(record),
+          })}
           columns={[
             { title: '版本ID', dataIndex: 'id', key: 'id', ellipsis: true },
             { title: '路径', dataIndex: 'path', key: 'path', ellipsis: true },
@@ -791,6 +831,24 @@ const OutlineEditor: React.FC = () => {
           ]}
           locale={{ emptyText: '暂无Project Soul历史版本' }}
         />
+        {soulVersionPreview && (
+          <Card size="small" title={soulVersionPreview.id} style={{ marginTop: 16 }}>
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="Path">{soulVersionPreview.path}</Descriptions.Item>
+                <Descriptions.Item label="Archived">{soulVersionPreview.archivedAt}</Descriptions.Item>
+              </Descriptions>
+              <Button
+                danger
+                loading={soulGovernanceLoading}
+                onClick={() => restoreSoulVersion(soulVersionPreview, !!soulGovernance.locked)}
+              >
+                Restore this version
+              </Button>
+              <ParagraphText content={soulVersionPreview.content || ''} />
+            </Space>
+          </Card>
+        )}
       </Modal>
     </div>
   );

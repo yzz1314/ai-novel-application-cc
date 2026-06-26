@@ -87,6 +87,28 @@ public class BookController {
         return ResponseEntity.ok(bookArtifactService.listProjectSoulVersions(projectId, bookId));
     }
 
+    @GetMapping("/{bookId}/soul/versions/{versionId}")
+    public ResponseEntity<Map<String, Object>> getProjectSoulVersion(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @PathVariable String versionId) {
+        return ResponseEntity.ok(bookArtifactService.getProjectSoulVersion(projectId, bookId, versionId));
+    }
+
+    @PostMapping("/{bookId}/soul/versions/{versionId}/restore")
+    public ResponseEntity<Map<String, Object>> restoreProjectSoulVersion(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @PathVariable String versionId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.restoreProjectSoulVersion(
+            projectId,
+            bookId,
+            versionId,
+            request == null ? Map.of() : request
+        ));
+    }
+
     @PostMapping("/{bookId}/soul/lock")
     public ResponseEntity<Map<String, Object>> lockProjectSoul(
             @PathVariable String projectId,

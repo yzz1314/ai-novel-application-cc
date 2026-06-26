@@ -8,7 +8,7 @@ import uuid
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional, Set, Tuple
 
 from agents.base import BaseAgent
 from schemas.agent_request import AgentRequest
@@ -46,8 +46,15 @@ class GraphBuilderAgent(BaseAgent):
             # 加载记忆数据
             memories = await self._load_memories(build_request)
 
+            previous_graph = await self._load_existing_graph(build_request) if build_request.incremental else None
+
             # 构建图谱
             graph = await self._build_graph(build_request, memories)
+            if previous_graph:
+                graph, incremental_summary = self._merge_incremental_graph(previous_graph, graph)
+            else:
+                incremental_summary = self._fresh_build_summary(graph, build_request.incremental)
+            graph.analysis["incremental_build"] = incremental_summary
 
             # 保存图谱
             graph_files = await self._save_graph(build_request, graph)
@@ -56,6 +63,12 @@ class GraphBuilderAgent(BaseAgent):
                 "graph_id": graph.graph_id,
                 "total_nodes": graph.node_count,
                 "total_edges": graph.edge_count,
+                "incremental": build_request.incremental,
+                "incremental_summary": incremental_summary,
+                "nodes_created": incremental_summary.get("nodes_created", graph.node_count),
+                "nodes_updated": incremental_summary.get("nodes_updated", 0),
+                "edges_created": incremental_summary.get("edges_created", graph.edge_count),
+                "edges_updated": incremental_summary.get("edges_updated", 0),
                 "connected_components": graph.statistics.get("connected_components", 0),
                 "top_nodes_by_centrality": graph.statistics.get("top_nodes_by_centrality", []),
                 "graph_file": str(graph_files[0]),
@@ -283,6 +296,120 @@ class GraphBuilderAgent(BaseAgent):
         graph.statistics, graph.analysis = self._analyze_graph(graph)
 
         return graph
+
+    async def _load_existing_graph(self, build_request: GraphBuildRequest) -> Optional[KnowledgeGraph]:
+        for graph_file in self._existing_graph_paths(build_request):
+            if not graph_file.exists():
+                continue
+            try:
+                with open(graph_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return KnowledgeGraph(**data)
+            except Exception as exc:
+                self.logger.warning(f"Skipping unreadable existing graph {graph_file}: {exc}")
+        return None
+
+    def _merge_incremental_graph(
+        self,
+        previous: KnowledgeGraph,
+        current: KnowledgeGraph
+    ) -> Tuple[KnowledgeGraph, Dict[str, Any]]:
+        previous_nodes = {node.node_id: node for node in previous.nodes}
+        previous_edges = {edge.edge_id: edge for edge in previous.edges}
+        current_nodes = {node.node_id: node for node in current.nodes}
+        current_edges = {edge.edge_id: edge for edge in current.edges}
+
+        node_updates = 0
+        edge_updates = 0
+        merged_nodes: Dict[str, GraphNode] = dict(previous_nodes)
+        merged_edges: Dict[str, GraphEdge] = dict(previous_edges)
+
+        for node_id, node in current_nodes.items():
+            previous_node = previous_nodes.get(node_id)
+            if previous_node:
+                node.created_at = previous_node.created_at
+                if self._node_signature(previous_node) != self._node_signature(node):
+                    node_updates += 1
+            merged_nodes[node_id] = node
+
+        for edge_id, edge in current_edges.items():
+            previous_edge = previous_edges.get(edge_id)
+            if previous_edge:
+                edge.created_at = previous_edge.created_at
+                if self._edge_signature(previous_edge) != self._edge_signature(edge):
+                    edge_updates += 1
+            merged_edges[edge_id] = edge
+
+        merged = previous.model_copy(deep=True)
+        merged.nodes = list(merged_nodes.values())
+        merged.edges = list(merged_edges.values())
+        merged.book_id = current.book_id
+        merged.updated_at = datetime.now()
+        merged.node_count = len(merged.nodes)
+        merged.edge_count = len(merged.edges)
+        merged.character_count = sum(1 for node in merged.nodes if node.node_type == "character")
+        merged.location_count = sum(1 for node in merged.nodes if node.node_type == "location")
+        merged.organization_count = sum(1 for node in merged.nodes if node.node_type == "organization")
+        merged.item_count = sum(1 for node in merged.nodes if node.node_type == "item")
+        merged.skill_count = sum(1 for node in merged.nodes if node.node_type == "skill")
+        merged.last_updated_chapter = max((node.last_updated for node in merged.nodes), default=0)
+        merged.statistics, merged.analysis = self._analyze_graph(merged)
+
+        previous_only_nodes = set(previous_nodes) - set(current_nodes)
+        previous_only_edges = set(previous_edges) - set(current_edges)
+        return merged, {
+            "enabled": True,
+            "used_existing_graph": True,
+            "previous_graph_id": previous.graph_id,
+            "graph_id": merged.graph_id,
+            "nodes_created": len(set(current_nodes) - set(previous_nodes)),
+            "nodes_updated": node_updates,
+            "nodes_unchanged": len(set(previous_nodes) & set(current_nodes)) - node_updates,
+            "nodes_preserved_from_previous": len(previous_only_nodes),
+            "edges_created": len(set(current_edges) - set(previous_edges)),
+            "edges_updated": edge_updates,
+            "edges_unchanged": len(set(previous_edges) & set(current_edges)) - edge_updates,
+            "edges_preserved_from_previous": len(previous_only_edges),
+            "previous_node_count": len(previous_nodes),
+            "previous_edge_count": len(previous_edges),
+            "current_generated_node_count": len(current_nodes),
+            "current_generated_edge_count": len(current_edges),
+            "merged_node_count": len(merged_nodes),
+            "merged_edge_count": len(merged_edges),
+            "preserved_node_ids": sorted(previous_only_nodes),
+            "preserved_edge_ids": sorted(previous_only_edges),
+            "updated_at": datetime.now().isoformat(),
+        }
+
+    def _fresh_build_summary(self, graph: KnowledgeGraph, incremental_requested: bool) -> Dict[str, Any]:
+        return {
+            "enabled": bool(incremental_requested),
+            "used_existing_graph": False,
+            "graph_id": graph.graph_id,
+            "nodes_created": graph.node_count,
+            "nodes_updated": 0,
+            "nodes_unchanged": 0,
+            "nodes_preserved_from_previous": 0,
+            "edges_created": graph.edge_count,
+            "edges_updated": 0,
+            "edges_unchanged": 0,
+            "edges_preserved_from_previous": 0,
+            "previous_node_count": 0,
+            "previous_edge_count": 0,
+            "current_generated_node_count": graph.node_count,
+            "current_generated_edge_count": graph.edge_count,
+            "merged_node_count": graph.node_count,
+            "merged_edge_count": graph.edge_count,
+            "preserved_node_ids": [],
+            "preserved_edge_ids": [],
+            "updated_at": datetime.now().isoformat(),
+        }
+
+    def _node_signature(self, node: GraphNode) -> Dict[str, Any]:
+        return node.model_dump(exclude={"created_at", "updated_at"})
+
+    def _edge_signature(self, edge: GraphEdge) -> Dict[str, Any]:
+        return edge.model_dump(exclude={"created_at", "updated_at"})
 
     def _analyze_graph(self, graph: KnowledgeGraph) -> tuple[Dict[str, Any], Dict[str, Any]]:
         nodes = graph.nodes
@@ -614,23 +741,25 @@ class GraphBuilderAgent(BaseAgent):
 
     async def _save_graph(self, build_request: GraphBuildRequest, graph: KnowledgeGraph) -> List[Path]:
         """保存图谱"""
-        project_root = Path(settings.PROJECT_BASE_PATH) / "projects" / build_request.project_id
-        standard_dir = project_root / "graph"
-        book_dir = project_root / "books" / build_request.book_id / "graph"
-
-        files = [
-            standard_dir / "graph.json",
-            standard_dir / f"{build_request.book_id}_graph.json",
-            book_dir / "knowledge_graph.json"
-        ]
+        files = self._existing_graph_paths(build_request)
 
         for graph_file in files:
             graph_file.parent.mkdir(parents=True, exist_ok=True)
             with open(graph_file, 'w', encoding='utf-8') as f:
-                json.dump(graph.dict(), f, ensure_ascii=False, indent=2, default=str)
+                json.dump(graph.model_dump(), f, ensure_ascii=False, indent=2, default=str)
 
         self.logger.info(f"Saved graph to {files[0]}")
         return files
+
+    def _existing_graph_paths(self, build_request: GraphBuildRequest) -> List[Path]:
+        project_root = Path(settings.PROJECT_BASE_PATH) / "projects" / build_request.project_id
+        standard_dir = project_root / "graph"
+        book_dir = project_root / "books" / build_request.book_id / "graph"
+        return [
+            standard_dir / "graph.json",
+            standard_dir / f"{build_request.book_id}_graph.json",
+            book_dir / "knowledge_graph.json",
+        ]
 
     async def _resolve_book_id(self, project_id: str, book_id: str) -> str:
         """将 default 书籍解析为最近大纲对应的真实 book_id。"""

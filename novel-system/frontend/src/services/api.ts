@@ -340,6 +340,8 @@ export const artifactApi = {
     ),
   archive: (projectId: string, data: any) =>
     request(api.post(`/projects/${projectId}/artifacts/archive`, data || {})),
+  restore: (projectId: string, data: any) =>
+    request(api.post(`/projects/${projectId}/artifacts/restore`, data || {})),
   diff: (projectId: string, data: any) =>
     request(api.post(`/projects/${projectId}/artifacts/diff`, data || {})),
   audit: (projectId: string, params?: any) =>

@@ -25,6 +25,7 @@ import {
   FolderOpenOutlined,
   HistoryOutlined,
   ReloadOutlined,
+  RollbackOutlined,
 } from '@ant-design/icons'
 import { useParams } from 'react-router-dom'
 import { artifactApi } from '../services/api'
@@ -74,6 +75,7 @@ const ArtifactView: React.FC = () => {
     () => items.filter((item) => selectedRowKeys.includes(item.path)),
     [items, selectedRowKeys]
   )
+  const isArchivedArtifact = (record: any) => String(record?.path || '').startsWith('artifacts/archive/')
 
   const loadData = async (nextQuery = query) => {
     if (!projectId) return
@@ -229,6 +231,32 @@ const ArtifactView: React.FC = () => {
     })
   }
 
+  const restoreArtifact = (record: any) => {
+    if (!projectId) return
+    Modal.confirm({
+      title: '恢复归档产物？',
+      content: '文件将移动回原始 workspace 路径，并记录治理审计事件。',
+      okText: '恢复',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          setActionLoading(true)
+          await artifactApi.restore(projectId, {
+            path: record.path,
+            actor: 'human',
+            reason: 'ArtifactView归档恢复',
+          })
+          message.success('归档产物已恢复')
+          await loadData()
+        } catch (error) {
+          message.error('恢复归档产物失败')
+        } finally {
+          setActionLoading(false)
+        }
+      },
+    })
+  }
+
   const runDiff = async (allowSensitive = false) => {
     if (!projectId || selectedItems.length !== 2) {
       message.warning('请选择两个文本产物进行对比')
@@ -320,9 +348,15 @@ const ArtifactView: React.FC = () => {
           <Button type="link" icon={<DownloadOutlined />} onClick={() => downloadArtifact(record)}>
             下载
           </Button>
-          <Button type="link" danger icon={<DeleteOutlined />} onClick={() => archiveArtifact(record)}>
-            归档
-          </Button>
+          {isArchivedArtifact(record) ? (
+            <Button type="link" icon={<RollbackOutlined />} onClick={() => restoreArtifact(record)}>
+              恢复
+            </Button>
+          ) : (
+            <Button type="link" danger icon={<DeleteOutlined />} onClick={() => archiveArtifact(record)}>
+              归档
+            </Button>
+          )}
         </Space>
       ),
     },

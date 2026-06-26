@@ -302,6 +302,56 @@ public class ArtifactService {
         }
     }
 
+    public Map<String, Object> restoreArtifact(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String pathValue = stringValue(request == null ? null : request.get("path"), null);
+        String actor = stringValue(request == null ? null : request.get("actor"), "human");
+        String reason = stringValue(request == null ? null : request.get("reason"), "");
+        if (pathValue == null || pathValue.isBlank()) {
+            throw new IllegalArgumentException("path cannot be empty");
+        }
+
+        Path archived = resolveProjectPath(projectId, pathValue);
+        if (!Files.isRegularFile(archived)) {
+            throw new ResourceNotFoundException("Archived artifact does not exist: " + pathValue);
+        }
+
+        String archivedRelative = relative(projectId, archived);
+        String restoreRelative = restorePathFromArchive(archivedRelative);
+        if (isGovernanceArtifact(restoreRelative)) {
+            throw new IllegalArgumentException("Governance artifacts cannot be restored over governance directories: " + restoreRelative);
+        }
+
+        Path restored = projectRoot(projectId).resolve(restoreRelative).normalize();
+        if (!restored.startsWith(projectRoot(projectId))) {
+            throw new IllegalArgumentException("Restore target escapes project workspace: " + restoreRelative);
+        }
+        if (Files.exists(restored)) {
+            throw new IllegalStateException("Restore target already exists: " + restoreRelative);
+        }
+
+        try {
+            Files.createDirectories(restored.getParent());
+            Files.move(archived, restored);
+            cleanupEmptyParents(archived.getParent(), projectRoot(projectId).resolve("artifacts").resolve("archive"));
+
+            Map<String, Object> audit = auditBase(projectId, "restore", actor, reason);
+            audit.put("archivedPath", archivedRelative);
+            audit.put("restoredPath", restoreRelative);
+            audit.put("sensitive", isSensitivePath(restoreRelative));
+            appendAudit(projectId, audit);
+
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("status", "restored");
+            response.put("archivedPath", archivedRelative);
+            response.put("restoredPath", restoreRelative);
+            response.put("audit", audit);
+            return response;
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to restore artifact: " + archivedRelative, e);
+        }
+    }
+
     public Map<String, Object> diffArtifacts(String projectId, Map<String, Object> request) {
         projectService.getProject(projectId);
         String leftPath = stringValue(request == null ? null : request.get("leftPath"), stringValue(request == null ? null : request.get("left"), null));
@@ -554,6 +604,38 @@ public class ArtifactService {
 
     private boolean isGovernanceArtifact(String relative) {
         return relative.startsWith("artifacts/audit/") || relative.startsWith("artifacts/archive/");
+    }
+
+    private String restorePathFromArchive(String archivedRelative) {
+        String prefix = "artifacts/archive/";
+        if (!archivedRelative.startsWith(prefix)) {
+            throw new IllegalArgumentException("Artifact is not in archive: " + archivedRelative);
+        }
+        String remainder = archivedRelative.substring(prefix.length());
+        int separator = remainder.indexOf('/');
+        if (separator <= 0 || separator == remainder.length() - 1) {
+            throw new IllegalArgumentException("Archived artifact path is missing original location: " + archivedRelative);
+        }
+        return remainder.substring(separator + 1);
+    }
+
+    private void cleanupEmptyParents(Path start, Path stop) {
+        Path current = start;
+        while (current != null && current.startsWith(stop) && !current.equals(stop)) {
+            try (Stream<Path> children = Files.list(current)) {
+                if (children.findAny().isPresent()) {
+                    return;
+                }
+            } catch (IOException e) {
+                return;
+            }
+            try {
+                Files.deleteIfExists(current);
+            } catch (IOException e) {
+                return;
+            }
+            current = current.getParent();
+        }
     }
 
     private Map<String, Object> auditBase(String projectId, String action, String actor, String reason) {

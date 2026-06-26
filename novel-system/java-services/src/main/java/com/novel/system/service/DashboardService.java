@@ -39,6 +39,7 @@ public class DashboardService {
     private final GraphArtifactRepository graphArtifactRepository;
     private final RetrievalArtifactRepository retrievalArtifactRepository;
     private final PythonClientService pythonClientService;
+    private final TaskExecutorService taskExecutorService;
 
     public Map<String, Object> getDashboard() {
         List<Project> recentProjects = projectRepository.findAll().stream()
@@ -53,7 +54,9 @@ public class DashboardService {
         response.put("taskSummary", taskSummary());
         response.put("workflowSummary", workflowSummary(recentProjects));
         response.put("recentProjects", recentProjects.stream().map(this::projectCard).toList());
-        response.put("recentTasks", recentTasks.stream().map(TaskResponse::from).toList());
+        response.put("recentTasks", recentTasks.stream()
+            .map(task -> TaskResponse.from(task, taskExecutorService.getTaskProgress(task)))
+            .toList());
         response.put("serviceStatus", serviceStatus());
         return response;
     }

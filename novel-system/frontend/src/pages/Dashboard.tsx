@@ -37,6 +37,21 @@ const statusColor = (status?: string) => {
   return 'warning'
 }
 
+const taskPercent = (task: any) => {
+  if (task.status === 'SUCCESS') return 100
+  const backendPercent = Number(task.progress?.percent)
+  if (Number.isFinite(backendPercent) && backendPercent >= 0) {
+    return Math.max(0, Math.min(100, Math.round(backendPercent)))
+  }
+  if (task.status === 'FAILED' || task.status === 'CANCELLED') return 100
+  if (task.status === 'RUNNING') return 45
+  if (task.status === 'PENDING') return 5
+  if (task.status === 'PARTIAL') return 70
+  return 0
+}
+
+const taskProgressLabel = (task: any) => task.progress?.label || `${taskPercent(task)}%`
+
 const Dashboard: React.FC = () => {
   const navigate = useNavigate()
   const [loading, setLoading] = useState(false)
@@ -181,8 +196,14 @@ const Dashboard: React.FC = () => {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 110,
-      render: (status: string) => <Tag color={statusColor(status)}>{status}</Tag>,
+      width: 170,
+      render: (status: string, record: any) => (
+        <Space direction="vertical" size={2} style={{ width: 140 }}>
+          <Tag color={statusColor(status)}>{status}</Tag>
+          <Progress percent={taskPercent(record)} size="small" />
+          <Text type="secondary" style={{ fontSize: 12 }}>{taskProgressLabel(record)}</Text>
+        </Space>
+      ),
     },
     { title: '创建时间', dataIndex: 'createdAt', key: 'createdAt', width: 180 },
   ]

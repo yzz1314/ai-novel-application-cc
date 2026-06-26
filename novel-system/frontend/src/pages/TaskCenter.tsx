@@ -10,6 +10,7 @@ import {
   Form,
   Input,
   InputNumber,
+  Modal,
   Progress,
   Row,
   Select,
@@ -21,7 +22,9 @@ import {
   message,
 } from 'antd'
 import {
+  CheckCircleOutlined,
   ClockCircleOutlined,
+  CloseCircleOutlined,
   FileSearchOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
@@ -79,13 +82,22 @@ const eventDetailsText = (details: any) => {
   return JSON.stringify(details)
 }
 
+const isWaitingForHuman = (task: any) =>
+  task?.status === 'PARTIAL' && !!task?.result?.waiting_for_human?.node_id
+
+const taskIdentity = (task: any) => task?.id || task?.taskId
+
 const TaskCenter: React.FC = () => {
   const navigate = useNavigate()
   const [form] = Form.useForm()
+  const [approvalForm] = Form.useForm()
   const [loading, setLoading] = useState(false)
   const [tasks, setTasks] = useState<any[]>([])
   const [taskDrawer, setTaskDrawer] = useState<any>(null)
   const [resumeInput, setResumeInput] = useState('{}')
+  const [approvalTask, setApprovalTask] = useState<any>(null)
+  const [approvalDecision, setApprovalDecision] = useState<'approve' | 'reject'>('approve')
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false)
 
   useEffect(() => {
     loadTasks()
@@ -101,6 +113,7 @@ const TaskCenter: React.FC = () => {
       active: counts.PENDING + counts.RUNNING,
       failed: counts.FAILED,
       waiting: tasks.filter((task) => task.checkpointRef && ['PARTIAL', 'FAILED', 'CANCELLED'].includes(task.status)).length,
+      approvals: tasks.filter((task) => isWaitingForHuman(task)).length,
       counts,
     }
   }, [tasks])
@@ -126,7 +139,19 @@ const TaskCenter: React.FC = () => {
     try {
       const data = await taskApi.getLogs(taskId)
       setTaskDrawer(data)
-      setResumeInput(JSON.stringify(data?.parameters?.resume_input || { decision: 'approve' }, null, 2))
+      const waiting = data?.result?.waiting_for_human
+      const resumePayload = waiting?.node_id
+        ? {
+            human_confirmations: {
+              [waiting.node_id]: {
+                approved: true,
+                reviewer: 'human',
+                note: '',
+              },
+            },
+          }
+        : data?.parameters?.resume_input || { decision: 'approve' }
+      setResumeInput(JSON.stringify(resumePayload, null, 2))
     } catch (error) {
       message.error('加载任务详情失败')
     }
@@ -167,6 +192,52 @@ const TaskCenter: React.FC = () => {
     }
   }
 
+  const openApprovalModal = (task: any, decision: 'approve' | 'reject') => {
+    if (!isWaitingForHuman(task)) {
+      message.warning('这个任务没有等待人工确认的节点')
+      return
+    }
+    setApprovalTask(task)
+    setApprovalDecision(decision)
+    approvalForm.setFieldsValue({
+      reviewer: 'human',
+      note: '',
+    })
+  }
+
+  const submitApproval = async () => {
+    if (!approvalTask) return
+    const waiting = approvalTask.result?.waiting_for_human
+    const taskId = taskIdentity(approvalTask)
+    if (!waiting?.node_id || !taskId) {
+      message.warning('这个任务没有可恢复的人工确认节点')
+      return
+    }
+
+    try {
+      const values = await approvalForm.validateFields()
+      setApprovalSubmitting(true)
+      await taskApi.resume(taskId, {
+        human_confirmations: {
+          [waiting.node_id]: {
+            approved: approvalDecision === 'approve',
+            reviewer: values.reviewer || 'human',
+            note: values.note || '',
+            decided_at: new Date().toISOString(),
+          },
+        },
+      })
+      message.success(approvalDecision === 'approve' ? '已批准，工作流恢复执行' : '已驳回，工作流将取消')
+      setApprovalTask(null)
+      setTaskDrawer(null)
+      await loadTasks()
+    } catch (error) {
+      message.error('提交工作流审批失败')
+    } finally {
+      setApprovalSubmitting(false)
+    }
+  }
+
   const columns = [
     {
       title: '任务',
@@ -198,6 +269,7 @@ const TaskCenter: React.FC = () => {
       render: (status: string, record: any) => (
         <Space direction="vertical" size={2} style={{ width: 110 }}>
           <Tag color={statusColor(status)}>{status}</Tag>
+          {isWaitingForHuman(record) && <Tag color="warning">等待人工确认</Tag>}
           <Progress percent={taskPercent(record)} size="small" />
           <Text type="secondary" style={{ fontSize: 12 }}>{taskProgressLabel(record)}</Text>
         </Space>
@@ -237,13 +309,23 @@ const TaskCenter: React.FC = () => {
       title: '操作',
       key: 'action',
       fixed: 'right' as const,
-      width: 220,
+      width: 300,
       render: (_: any, record: any) => (
         <Space wrap>
           <Button size="small" icon={<FileSearchOutlined />} onClick={() => openTaskLogs(record.id)}>
             详情
           </Button>
-          {['FAILED', 'CANCELLED', 'PARTIAL'].includes(record.status) && (
+          {isWaitingForHuman(record) && (
+            <>
+              <Button size="small" type="primary" icon={<CheckCircleOutlined />} onClick={() => openApprovalModal(record, 'approve')}>
+                批准
+              </Button>
+              <Button size="small" danger icon={<CloseCircleOutlined />} onClick={() => openApprovalModal(record, 'reject')}>
+                驳回
+              </Button>
+            </>
+          )}
+          {['FAILED', 'CANCELLED', 'PARTIAL'].includes(record.status) && !isWaitingForHuman(record) && (
             <Button size="small" icon={<RedoOutlined />} onClick={() => retryTask(record.id)}>
               重试
             </Button>
@@ -317,9 +399,17 @@ const TaskCenter: React.FC = () => {
           <Card><Statistic title="失败任务" value={stats.failed} valueStyle={{ color: stats.failed ? '#cf1322' : undefined }} /></Card>
         </Col>
         <Col span={6}>
-          <Card><Statistic title="可恢复任务" value={stats.waiting} prefix={<PauseCircleOutlined />} /></Card>
+          <Card><Statistic title="等待人工确认" value={stats.approvals} prefix={<PauseCircleOutlined />} /></Card>
         </Col>
       </Row>
+
+      {stats.approvals > 0 ? (
+        <Alert
+          type="info"
+          showIcon
+          message={`当前筛选范围内有 ${stats.approvals} 个工作流等待人工确认，可在操作列直接批准或驳回。`}
+        />
+      ) : null}
 
       {stats.failed > 0 ? (
         <Alert
@@ -390,6 +480,28 @@ const TaskCenter: React.FC = () => {
               <Descriptions.Item label="完成时间">{taskDrawer.finishedAt || '-'}</Descriptions.Item>
             </Descriptions>
 
+            {isWaitingForHuman(taskDrawer) ? (
+              <Alert
+                type="info"
+                showIcon
+                message={taskDrawer.result?.waiting_for_human?.prompt || '等待人工确认'}
+                description={
+                  <Space direction="vertical" size={2}>
+                    <Text>节点：{taskDrawer.result?.waiting_for_human?.node_id}</Text>
+                    {taskDrawer.checkpointRef && <Text>Checkpoint：{taskDrawer.checkpointRef}</Text>}
+                    <Space wrap style={{ marginTop: 8 }}>
+                      <Button type="primary" icon={<CheckCircleOutlined />} onClick={() => openApprovalModal(taskDrawer, 'approve')}>
+                        批准并恢复
+                      </Button>
+                      <Button danger icon={<CloseCircleOutlined />} onClick={() => openApprovalModal(taskDrawer, 'reject')}>
+                        驳回并取消
+                      </Button>
+                    </Space>
+                  </Space>
+                }
+              />
+            ) : null}
+
             {taskDrawer.checkpointRef && !['RUNNING', 'PENDING'].includes(taskDrawer.status) ? (
               <Card title="Checkpoint 恢复" size="small">
                 <Space direction="vertical" style={{ width: '100%' }}>
@@ -429,6 +541,44 @@ const TaskCenter: React.FC = () => {
           </Space>
         ) : null}
       </Drawer>
+
+      <Modal
+        title={approvalDecision === 'approve' ? '批准工作流继续执行' : '驳回并取消工作流'}
+        open={!!approvalTask}
+        confirmLoading={approvalSubmitting}
+        okText={approvalDecision === 'approve' ? '批准并恢复' : '确认驳回'}
+        okButtonProps={{ danger: approvalDecision === 'reject' }}
+        cancelText="取消"
+        onOk={submitApproval}
+        onCancel={() => setApprovalTask(null)}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Alert
+            type={approvalDecision === 'approve' ? 'info' : 'warning'}
+            showIcon
+            message={approvalTask?.result?.waiting_for_human?.prompt || '等待人工确认'}
+            description={
+              <Space direction="vertical" size={0}>
+                <Text>任务：{taskIdentity(approvalTask)}</Text>
+                <Text>节点：{approvalTask?.result?.waiting_for_human?.node_id}</Text>
+                {approvalTask?.checkpointRef && <Text>Checkpoint：{approvalTask.checkpointRef}</Text>}
+              </Space>
+            }
+          />
+          <Form form={approvalForm} layout="vertical">
+            <Form.Item
+              name="reviewer"
+              label="审批人"
+              rules={[{ required: true, message: '请输入审批人' }]}
+            >
+              <Input placeholder="human" />
+            </Form.Item>
+            <Form.Item name="note" label="审批意见">
+              <Input.TextArea rows={4} placeholder="记录本次批准或驳回原因" />
+            </Form.Item>
+          </Form>
+        </Space>
+      </Modal>
     </Space>
   )
 }

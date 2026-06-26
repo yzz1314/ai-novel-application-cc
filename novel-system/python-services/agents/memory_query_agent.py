@@ -699,7 +699,15 @@ class MemoryQueryAgent(BaseAgent):
             chapter for chapter in conflict_chapters
             if isinstance(chapter, int)
         ]
+        issue_id = self._issue_id(
+            issue_type=issue_type,
+            severity=severity,
+            title=title,
+            description=description,
+            conflict_chapters=clean_chapters,
+        )
         return ContinuityIssue(
+            issue_id=issue_id,
             issue_type=issue_type,
             severity=severity,
             title=title,
@@ -708,6 +716,25 @@ class MemoryQueryAgent(BaseAgent):
             conflict_details=description,
             suggestion=suggestion
         ).dict()
+
+    def _issue_id(
+        self,
+        issue_type: str,
+        severity: str,
+        title: str,
+        description: str,
+        conflict_chapters: List[int],
+    ) -> str:
+        import hashlib
+
+        raw = json.dumps({
+            "issue_type": issue_type,
+            "severity": severity,
+            "title": title,
+            "description": description,
+            "conflict_chapters": conflict_chapters,
+        }, ensure_ascii=False, sort_keys=True)
+        return "issue_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
     def _count_by_severity(self, issues: List[Dict[str, Any]]) -> Dict[str, int]:
         counts = {"critical": 0, "major": 0, "minor": 0}

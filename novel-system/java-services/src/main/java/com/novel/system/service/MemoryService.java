@@ -13,6 +13,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -148,6 +150,12 @@ public class MemoryService {
                         item.put("majorCount", report.get("major_count"));
                         item.put("minorCount", report.get("minor_count"));
                         item.put("checkedAt", report.get("checked_at"));
+                        Map<String, Object> summary = resolutionSummary(report);
+                        item.put("resolvedCount", summary.get("resolved_count"));
+                        item.put("acceptedRiskCount", summary.get("accepted_risk_count"));
+                        item.put("ignoredCount", summary.get("ignored_count"));
+                        item.put("openCount", summary.get("open_count"));
+                        item.put("allIssuesHandled", summary.get("all_issues_handled"));
                     } catch (Exception ignored) {
                         // Keep listing usable even if a report is partially written.
                     }
@@ -169,6 +177,10 @@ public class MemoryService {
             throw new ResourceNotFoundException("连续性检查报告不存在: " + reportId);
         }
         Map<String, Object> response = readJsonMap(file);
+        normalizeIssues(response);
+        Map<String, Object> summary = resolutionSummary(response);
+        response.put("resolution_summary", summary);
+        response.put("resolutionSummary", summary);
         response.put("id", reportId);
         response.put("path", relative(projectId, file));
         response.put("updatedAt", modifiedAt(file));
@@ -200,6 +212,12 @@ public class MemoryService {
                         item.put("majorCount", report.get("major_count"));
                         item.put("minorCount", report.get("minor_count"));
                         item.put("auditedAt", report.get("audited_at"));
+                        Map<String, Object> summary = resolutionSummary(report);
+                        item.put("resolvedCount", summary.get("resolved_count"));
+                        item.put("acceptedRiskCount", summary.get("accepted_risk_count"));
+                        item.put("ignoredCount", summary.get("ignored_count"));
+                        item.put("openCount", summary.get("open_count"));
+                        item.put("allIssuesHandled", summary.get("all_issues_handled"));
                     } catch (Exception ignored) {
                         // Keep listing usable even if a report is partially written.
                     }
@@ -221,10 +239,30 @@ public class MemoryService {
             throw new ResourceNotFoundException("记忆审计报告不存在: " + reportId);
         }
         Map<String, Object> response = readJsonMap(file);
+        normalizeIssues(response);
+        Map<String, Object> summary = resolutionSummary(response);
+        response.put("resolution_summary", summary);
+        response.put("resolutionSummary", summary);
         response.put("id", reportId);
         response.put("path", relative(projectId, file));
         response.put("updatedAt", modifiedAt(file));
         return response;
+    }
+
+    public Map<String, Object> resolveContinuityIssue(
+            String projectId,
+            String reportId,
+            Integer issueIndex,
+            Map<String, Object> request) {
+        return resolveReportIssue(projectId, "continuity", reportId, issueIndex, request);
+    }
+
+    public Map<String, Object> resolveAuditIssue(
+            String projectId,
+            String reportId,
+            Integer issueIndex,
+            Map<String, Object> request) {
+        return resolveReportIssue(projectId, "audit", reportId, issueIndex, request);
     }
 
     public Task auditMemory(String projectId, Map<String, Object> request) {
@@ -289,6 +327,222 @@ public class MemoryService {
             chapterNumber = parameters.get("chapterNumber");
         }
         return chapterNumber == null ? "chapter_1" : "chapter_" + chapterNumber;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> resolveReportIssue(
+            String projectId,
+            String reportType,
+            String reportId,
+            Integer issueIndex,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        validateId(reportId, "reportId");
+        if (issueIndex == null || issueIndex < 0) {
+            throw new IllegalArgumentException("非法issueIndex: " + issueIndex);
+        }
+
+        Path file = reportFile(projectId, reportType, reportId);
+        if (!Files.exists(file)) {
+            throw new ResourceNotFoundException(reportDisplayName(reportType) + "不存在: " + reportId);
+        }
+
+        Map<String, Object> report = readJsonMap(file);
+        List<Map<String, Object>> issues = normalizeIssues(report);
+        if (issueIndex >= issues.size()) {
+            throw new IllegalArgumentException("issueIndex超出范围: " + issueIndex);
+        }
+
+        Map<String, Object> issue = issues.get(issueIndex);
+        Map<String, Object> previousResolution = asMap(issue.get("resolution"));
+        String status = normalizeResolutionStatus(stringValue(
+            firstPresent(requestValue(request, "status"), requestValue(request, "resolutionStatus")),
+            "resolved"
+        ));
+        String actor = stringValue(firstPresent(
+            requestValue(request, "actor"),
+            requestValue(request, "reviewer"),
+            requestValue(request, "user")
+        ), "human");
+        String note = stringValue(firstPresent(
+            requestValue(request, "note"),
+            requestValue(request, "decisionNote"),
+            requestValue(request, "resolution")
+        ), "");
+        String action = stringValue(firstPresent(requestValue(request, "action"), requestValue(request, "decision")), status);
+        String now = LocalDateTime.now().toString();
+
+        Map<String, Object> resolution = new LinkedHashMap<>();
+        resolution.put("status", status);
+        resolution.put("action", action);
+        resolution.put("note", note);
+        resolution.put("actor", actor);
+        resolution.put("updated_at", now);
+        resolution.put("updatedAt", now);
+        if ("open".equals(status)) {
+            resolution.put("reopened_at", now);
+        } else {
+            resolution.put("resolved_at", now);
+        }
+
+        List<Map<String, Object>> history = issue.get("resolution_history") instanceof List<?> rawHistory
+            ? new ArrayList<>((List<Map<String, Object>>) rawHistory)
+            : new ArrayList<>();
+        Map<String, Object> historyItem = new LinkedHashMap<>(resolution);
+        historyItem.put("previous_status", previousResolution.get("status"));
+        historyItem.put("issue_index", issueIndex);
+        historyItem.put("issue_id", issue.get("issue_id"));
+        history.add(historyItem);
+
+        issue.put("resolution", resolution);
+        issue.put("resolution_status", status);
+        issue.put("resolutionStatus", status);
+        issue.put("resolution_history", history);
+        issue.put("resolved", !"open".equals(status));
+
+        Map<String, Object> summary = resolutionSummary(report);
+        report.put("resolution_summary", summary);
+        report.put("resolutionSummary", summary);
+        report.put("resolution_updated_at", now);
+        report.put("resolutionUpdatedAt", now);
+
+        writeJson(file, report);
+        Path decisionFile = saveResolutionDecision(
+            projectId,
+            reportType,
+            reportId,
+            issueIndex,
+            issue,
+            previousResolution,
+            resolution
+        );
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("reportType", reportType);
+        response.put("reportId", reportId);
+        response.put("issueIndex", issueIndex);
+        response.put("issue", issue);
+        response.put("resolution", resolution);
+        response.put("resolutionSummary", summary);
+        response.put("decisionPath", relative(projectId, decisionFile));
+        response.put("reportPath", relative(projectId, file));
+        return response;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> normalizeIssues(Map<String, Object> report) {
+        Object rawIssues = report.get("issues");
+        if (!(rawIssues instanceof List<?> rawList)) {
+            report.put("issues", new ArrayList<Map<String, Object>>());
+            return new ArrayList<>();
+        }
+
+        List<Map<String, Object>> normalized = new ArrayList<>();
+        for (int index = 0; index < rawList.size(); index++) {
+            Object rawIssue = rawList.get(index);
+            Map<String, Object> issue;
+            if (rawIssue instanceof Map<?, ?> map) {
+                issue = new LinkedHashMap<>();
+                map.forEach((key, value) -> issue.put(String.valueOf(key), value));
+            } else {
+                issue = new LinkedHashMap<>();
+                issue.put("title", String.valueOf(rawIssue));
+                issue.put("description", String.valueOf(rawIssue));
+            }
+            if (!issue.containsKey("issue_id") || stringValue(issue.get("issue_id"), "").isBlank()) {
+                issue.put("issue_id", stableIssueId(issue, index));
+            }
+            if (!issue.containsKey("resolution_status")) {
+                Map<String, Object> resolution = asMap(issue.get("resolution"));
+                String status = stringValue(resolution.get("status"), "open");
+                issue.put("resolution_status", status);
+                issue.put("resolutionStatus", status);
+                issue.put("resolved", !"open".equals(status));
+            }
+            normalized.add(issue);
+        }
+        report.put("issues", normalized);
+        return normalized;
+    }
+
+    private Map<String, Object> resolutionSummary(Map<String, Object> report) {
+        List<Map<String, Object>> issues = normalizeIssues(report);
+        int resolvedCount = 0;
+        int acceptedRiskCount = 0;
+        int ignoredCount = 0;
+        int openCount = 0;
+        for (Map<String, Object> issue : issues) {
+            String status = normalizeResolutionStatus(stringValue(firstPresent(
+                issue.get("resolution_status"),
+                issue.get("resolutionStatus"),
+                asMap(issue.get("resolution")).get("status")
+            ), "open"));
+            if ("resolved".equals(status)) {
+                resolvedCount++;
+            } else if ("accepted_risk".equals(status)) {
+                acceptedRiskCount++;
+            } else if ("ignored".equals(status)) {
+                ignoredCount++;
+            } else {
+                openCount++;
+            }
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("total_issues", issues.size());
+        summary.put("resolved_count", resolvedCount);
+        summary.put("accepted_risk_count", acceptedRiskCount);
+        summary.put("ignored_count", ignoredCount);
+        summary.put("open_count", openCount);
+        summary.put("handled_count", resolvedCount + acceptedRiskCount + ignoredCount);
+        summary.put("all_issues_handled", !issues.isEmpty() && openCount == 0);
+        return summary;
+    }
+
+    private Path saveResolutionDecision(
+            String projectId,
+            String reportType,
+            String reportId,
+            Integer issueIndex,
+            Map<String, Object> issue,
+            Map<String, Object> previousResolution,
+            Map<String, Object> resolution) {
+        Path dir = memoryDir(projectId).resolve("resolutions");
+        try {
+            Files.createDirectories(dir);
+        } catch (IOException e) {
+            throw new RuntimeException("创建记忆处理记录目录失败", e);
+        }
+
+        String timestamp = LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"));
+        String issueId = sanitizeFilePart(stringValue(issue.get("issue_id"), "issue_" + issueIndex));
+        Path file = dir.resolve(reportType + "_" + sanitizeFilePart(reportId) + "_" + issueId + "_" + timestamp + ".json");
+        Map<String, Object> decision = new LinkedHashMap<>();
+        decision.put("project_id", projectId);
+        decision.put("report_type", reportType);
+        decision.put("report_id", reportId);
+        decision.put("issue_index", issueIndex);
+        decision.put("issue_id", issue.get("issue_id"));
+        decision.put("issue_title", issue.get("title"));
+        decision.put("issue_severity", issue.get("severity"));
+        decision.put("previous_resolution", previousResolution);
+        decision.put("resolution", resolution);
+        decision.put("created_at", LocalDateTime.now().toString());
+        writeJson(file, decision);
+        return file;
+    }
+
+    private Path reportFile(String projectId, String reportType, String reportId) {
+        return switch (reportType) {
+            case "continuity" -> memoryDir(projectId).resolve("continuity").resolve(reportId + ".json");
+            case "audit" -> memoryDir(projectId).resolve("audits").resolve(reportId + ".json");
+            default -> throw new IllegalArgumentException("不支持的报告类型: " + reportType);
+        };
+    }
+
+    private String reportDisplayName(String reportType) {
+        return "continuity".equals(reportType) ? "连续性检查报告" : "记忆审计报告";
     }
 
     private Map<String, Object> memoryTypeSummary(String projectId, String type) {
@@ -424,6 +678,81 @@ public class MemoryService {
         if (value == null || !SAFE_ID.matcher(value).matches()) {
             throw new IllegalArgumentException("非法" + fieldName + ": " + value);
         }
+    }
+
+    private void writeJson(Path file, Map<String, Object> value) {
+        try {
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(file.toFile(), value);
+        } catch (IOException e) {
+            throw new RuntimeException("写入记忆报告失败: " + file.getFileName(), e);
+        }
+    }
+
+    private Object requestValue(Map<String, Object> request, String key) {
+        return request == null ? null : request.get(key);
+    }
+
+    private Object firstPresent(Object... values) {
+        for (Object value : values) {
+            if (value == null) {
+                continue;
+            }
+            if (value instanceof String text && text.isBlank()) {
+                continue;
+            }
+            return value;
+        }
+        return null;
+    }
+
+    private Map<String, Object> asMap(Object value) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (value instanceof Map<?, ?> map) {
+            map.forEach((key, item) -> result.put(String.valueOf(key), item));
+        }
+        return result;
+    }
+
+    private String normalizeResolutionStatus(String status) {
+        String normalized = status == null ? "open" : status.trim().toLowerCase().replace("-", "_");
+        return switch (normalized) {
+            case "resolved", "fixed", "done", "closed", "已解决", "完成" -> "resolved";
+            case "accepted_risk", "accept_risk", "risk_accepted", "接受风险" -> "accepted_risk";
+            case "ignored", "ignore", "false_positive", "忽略" -> "ignored";
+            case "open", "reopened", "pending", "待处理", "重开" -> "open";
+            default -> throw new IllegalArgumentException("不支持的问题处理状态: " + status);
+        };
+    }
+
+    private String stableIssueId(Map<String, Object> issue, int index) {
+        Map<String, Object> signature = new LinkedHashMap<>();
+        signature.put("index", index);
+        signature.put("issue_type", issue.get("issue_type"));
+        signature.put("severity", issue.get("severity"));
+        signature.put("title", issue.get("title"));
+        signature.put("description", issue.get("description"));
+        signature.put("conflict_chapters", issue.get("conflict_chapters"));
+        try {
+            String raw = objectMapper.writeValueAsString(signature);
+            MessageDigest digest = MessageDigest.getInstance("SHA-1");
+            byte[] bytes = digest.digest(raw.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (int i = 0; i < Math.min(bytes.length, 6); i++) {
+                hex.append(String.format("%02x", bytes[i]));
+            }
+            return "issue_" + hex;
+        } catch (IOException | NoSuchAlgorithmException e) {
+            return "issue_" + index;
+        }
+    }
+
+    private String sanitizeFilePart(String value) {
+        String sanitized = value == null ? "" : value.replaceAll("[^A-Za-z0-9_-]", "_");
+        return sanitized.isBlank() ? "item" : sanitized;
+    }
+
+    private String stringValue(Object value, String fallback) {
+        return value == null ? fallback : String.valueOf(value);
     }
 
     private String stripSuffix(String value, String suffix) {

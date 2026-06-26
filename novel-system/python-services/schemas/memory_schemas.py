@@ -224,6 +224,7 @@ class ContinuityCheckRequest(BaseModel):
 
 class ContinuityIssue(BaseModel):
     """连续性问题"""
+    issue_id: Optional[str] = Field(None, description="稳定问题ID")
     issue_type: str = Field(..., description="问题类型：character/setting/timeline")
     severity: str = Field(..., description="严重程度：critical/major/minor")
 

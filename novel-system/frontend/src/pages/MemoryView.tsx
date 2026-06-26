@@ -55,6 +55,7 @@ const MemoryView: React.FC = () => {
   const [continuityDrawer, setContinuityDrawer] = useState<any>(null)
   const [auditDrawer, setAuditDrawer] = useState<any>(null)
   const [searchText, setSearchText] = useState('')
+  const [resolutionNotes, setResolutionNotes] = useState<Record<string, string>>({})
   const [continuityForm] = Form.useForm()
 
   useEffect(() => {
@@ -161,6 +162,61 @@ const MemoryView: React.FC = () => {
     }
   }
 
+  const issueKey = (reportType: 'continuity' | 'audit', issueIndex: number) => `${reportType}-${issueIndex}`
+
+  const resolutionStatus = (issue: any) =>
+    issue?.resolution_status || issue?.resolutionStatus || issue?.resolution?.status || 'open'
+
+  const resolutionLabel = (status: string) => {
+    const normalized = status || 'open'
+    if (normalized === 'resolved') return '已解决'
+    if (normalized === 'accepted_risk') return '接受风险'
+    if (normalized === 'ignored') return '忽略'
+    return '待处理'
+  }
+
+  const resolutionColor = (status: string) => {
+    const normalized = status || 'open'
+    if (normalized === 'resolved') return 'success'
+    if (normalized === 'accepted_risk') return 'warning'
+    if (normalized === 'ignored') return 'default'
+    return 'processing'
+  }
+
+  const handleResolveIssue = async (
+    reportType: 'continuity' | 'audit',
+    issueIndex: number,
+    status: 'resolved' | 'accepted_risk' | 'ignored' | 'open'
+  ) => {
+    if (!projectId) return
+    const drawer = reportType === 'continuity' ? continuityDrawer : auditDrawer
+    if (!drawer?.id) return
+    const key = issueKey(reportType, issueIndex)
+    try {
+      const payload = {
+        status,
+        note: resolutionNotes[key] || '',
+        actor: 'human',
+      }
+      await (reportType === 'continuity'
+        ? memoryApi.resolveContinuityIssue(projectId, drawer.id, issueIndex, payload)
+        : memoryApi.resolveAuditIssue(projectId, drawer.id, issueIndex, payload))
+      const refreshed = reportType === 'continuity'
+        ? await memoryApi.getContinuityReport(projectId, drawer.id)
+        : await memoryApi.getAuditReport(projectId, drawer.id)
+      if (reportType === 'continuity') {
+        setContinuityDrawer(refreshed)
+      } else {
+        setAuditDrawer(refreshed)
+      }
+      setResolutionNotes((prev) => ({ ...prev, [key]: '' }))
+      await loadMemories()
+      message.success('问题处理状态已保存')
+    } catch (error) {
+      message.error('保存问题处理状态失败')
+    }
+  }
+
   const currentDetail = memoryDetail[activeType]
   const currentJson = useMemo(() => {
     const list = currentDetail?.json || []
@@ -215,6 +271,15 @@ const MemoryView: React.FC = () => {
     { title: '严重', dataIndex: 'criticalCount', key: 'criticalCount', width: 80 },
     { title: '重要', dataIndex: 'majorCount', key: 'majorCount', width: 80 },
     { title: '轻微', dataIndex: 'minorCount', key: 'minorCount', width: 80 },
+    {
+      title: '待处理',
+      dataIndex: 'openCount',
+      key: 'openCount',
+      width: 90,
+      render: (openCount: number) => (
+        <Tag color={openCount > 0 ? 'warning' : 'success'}>{openCount ?? 0}</Tag>
+      ),
+    },
     { title: '检查时间', dataIndex: 'checkedAt', key: 'checkedAt' },
     {
       title: '操作',
@@ -244,6 +309,15 @@ const MemoryView: React.FC = () => {
     { title: '严重', dataIndex: 'criticalCount', key: 'criticalCount', width: 80 },
     { title: '重要', dataIndex: 'majorCount', key: 'majorCount', width: 80 },
     { title: '轻微', dataIndex: 'minorCount', key: 'minorCount', width: 80 },
+    {
+      title: '待处理',
+      dataIndex: 'openCount',
+      key: 'openCount',
+      width: 90,
+      render: (openCount: number) => (
+        <Tag color={openCount > 0 ? 'warning' : 'success'}>{openCount ?? 0}</Tag>
+      ),
+    },
     { title: '审计时间', dataIndex: 'auditedAt', key: 'auditedAt' },
     {
       title: '操作',
@@ -273,6 +347,53 @@ const MemoryView: React.FC = () => {
     { title: '标题', dataIndex: 'title', key: 'title' },
     { title: '说明', dataIndex: 'description', key: 'description' },
     { title: '建议', dataIndex: 'suggestion', key: 'suggestion' },
+  ]
+
+  const buildIssueColumns = (reportType: 'continuity' | 'audit') => [
+    ...issueColumns,
+    {
+      title: '状态',
+      key: 'resolutionStatus',
+      width: 110,
+      render: (_: any, record: any) => {
+        const status = resolutionStatus(record)
+        return <Tag color={resolutionColor(status)}>{resolutionLabel(status)}</Tag>
+      },
+    },
+    {
+      title: '处理',
+      key: 'resolutionAction',
+      width: 320,
+      render: (_: any, record: any, index: number) => {
+        const key = issueKey(reportType, index)
+        return (
+          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <Input
+              size="small"
+              placeholder="处理备注"
+              value={resolutionNotes[key] || ''}
+              onChange={(event) =>
+                setResolutionNotes((prev) => ({ ...prev, [key]: event.target.value }))
+              }
+            />
+            <Space wrap>
+              <Button size="small" onClick={() => handleResolveIssue(reportType, index, 'resolved')}>
+                已解决
+              </Button>
+              <Button size="small" onClick={() => handleResolveIssue(reportType, index, 'accepted_risk')}>
+                接受风险
+              </Button>
+              <Button size="small" onClick={() => handleResolveIssue(reportType, index, 'ignored')}>
+                忽略
+              </Button>
+              <Button size="small" onClick={() => handleResolveIssue(reportType, index, 'open')}>
+                重开
+              </Button>
+            </Space>
+          </Space>
+        )
+      },
+    },
   ]
 
   const resolutionColumns = [
@@ -581,13 +702,15 @@ const MemoryView: React.FC = () => {
             <Descriptions.Item label="严重">{continuityDrawer?.critical_count ?? 0}</Descriptions.Item>
             <Descriptions.Item label="重要">{continuityDrawer?.major_count ?? 0}</Descriptions.Item>
             <Descriptions.Item label="轻微">{continuityDrawer?.minor_count ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="待处理">{continuityDrawer?.resolutionSummary?.open_count ?? continuityDrawer?.resolution_summary?.open_count ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="已处理">{continuityDrawer?.resolutionSummary?.handled_count ?? continuityDrawer?.resolution_summary?.handled_count ?? 0}</Descriptions.Item>
             <Descriptions.Item label="报告路径" span={2}>{continuityDrawer?.path || '-'}</Descriptions.Item>
           </Descriptions>
           <Table
-            columns={issueColumns}
+            columns={buildIssueColumns('continuity')}
             dataSource={continuityDrawer?.issues || []}
             rowKey={(_, index) => String(index)}
-            pagination={false}
+            pagination={{ pageSize: 6 }}
           />
           <pre style={{ whiteSpace: 'pre-wrap' }}>
             {JSON.stringify(continuityDrawer, null, 2)}
@@ -608,6 +731,8 @@ const MemoryView: React.FC = () => {
             <Descriptions.Item label="严重">{auditDrawer?.critical_count ?? 0}</Descriptions.Item>
             <Descriptions.Item label="重要">{auditDrawer?.major_count ?? 0}</Descriptions.Item>
             <Descriptions.Item label="轻微">{auditDrawer?.minor_count ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="待处理">{auditDrawer?.resolutionSummary?.open_count ?? auditDrawer?.resolution_summary?.open_count ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="已处理">{auditDrawer?.resolutionSummary?.handled_count ?? auditDrawer?.resolution_summary?.handled_count ?? 0}</Descriptions.Item>
             <Descriptions.Item label="报告路径">{auditDrawer?.path || '-'}</Descriptions.Item>
           </Descriptions>
           <Card title="解决顺序" size="small">
@@ -620,7 +745,7 @@ const MemoryView: React.FC = () => {
           </Card>
           <Card title="冲突详情" size="small">
             <Table
-              columns={issueColumns}
+              columns={buildIssueColumns('audit')}
               dataSource={auditDrawer?.issues || []}
               rowKey={(_, index) => String(index)}
               pagination={{ pageSize: 8 }}

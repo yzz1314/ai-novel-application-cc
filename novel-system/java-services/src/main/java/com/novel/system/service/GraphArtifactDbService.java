@@ -272,6 +272,24 @@ public class GraphArtifactDbService {
         return Map.of();
     }
 
+    private Map<String, Object> asObjectMap(Object value) {
+        return mapOf(value);
+    }
+
+    private double doubleValue(Object value) {
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        if (value != null) {
+            try {
+                return Double.parseDouble(value.toString());
+            } catch (NumberFormatException ignored) {
+                return 0.0;
+            }
+        }
+        return 0.0;
+    }
+
     private String resolveBookId(Map<String, Object> request) {
         if (request == null || request.isEmpty()) {
             return "default";

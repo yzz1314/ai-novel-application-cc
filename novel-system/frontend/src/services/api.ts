@@ -254,12 +254,16 @@ export const memoryApi = {
     request<any[]>(api.get(`/projects/${projectId}/memory/continuity/reports`)),
   getContinuityReport: (projectId: string, reportId: string) =>
     request(api.get(`/projects/${projectId}/memory/continuity/reports/${reportId}`)),
+  resolveContinuityIssue: (projectId: string, reportId: string, issueIndex: number, data?: any) =>
+    request(api.post(`/projects/${projectId}/memory/continuity/reports/${reportId}/issues/${issueIndex}/resolution`, data || {})),
   audit: (projectId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/memory/audit`, data || {})),
   getAuditReports: (projectId: string) =>
     request<any[]>(api.get(`/projects/${projectId}/memory/audits`)),
   getAuditReport: (projectId: string, reportId: string) =>
     request(api.get(`/projects/${projectId}/memory/audits/${reportId}`)),
+  resolveAuditIssue: (projectId: string, reportId: string, issueIndex: number, data?: any) =>
+    request(api.post(`/projects/${projectId}/memory/audits/${reportId}/issues/${issueIndex}/resolution`, data || {})),
 }
 
 export const graphApi = {

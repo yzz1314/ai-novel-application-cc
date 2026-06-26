@@ -87,6 +87,20 @@ public class MemoryController {
         return ResponseEntity.ok(memoryService.getContinuityReport(projectId, reportId));
     }
 
+    @PostMapping("/continuity/reports/{reportId}/issues/{issueIndex}/resolution")
+    public ResponseEntity<Map<String, Object>> resolveContinuityIssue(
+            @PathVariable String projectId,
+            @PathVariable String reportId,
+            @PathVariable Integer issueIndex,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(memoryService.resolveContinuityIssue(
+            projectId,
+            reportId,
+            issueIndex,
+            request == null ? Map.of() : request
+        ));
+    }
+
     @GetMapping("/audits")
     public ResponseEntity<List<Map<String, Object>>> listAuditReports(@PathVariable String projectId) {
         return ResponseEntity.ok(memoryService.listAuditReports(projectId));
@@ -97,6 +111,20 @@ public class MemoryController {
             @PathVariable String projectId,
             @PathVariable String reportId) {
         return ResponseEntity.ok(memoryService.getAuditReport(projectId, reportId));
+    }
+
+    @PostMapping("/audits/{reportId}/issues/{issueIndex}/resolution")
+    public ResponseEntity<Map<String, Object>> resolveAuditIssue(
+            @PathVariable String projectId,
+            @PathVariable String reportId,
+            @PathVariable Integer issueIndex,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(memoryService.resolveAuditIssue(
+            projectId,
+            reportId,
+            issueIndex,
+            request == null ? Map.of() : request
+        ));
     }
 
     @PostMapping("/audit")

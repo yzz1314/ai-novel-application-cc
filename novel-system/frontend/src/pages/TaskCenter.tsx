@@ -48,6 +48,10 @@ const statusColor = (status?: string) => {
 
 const taskPercent = (task: any) => {
   if (task.status === 'SUCCESS') return 100
+  const backendPercent = Number(task.progress?.percent)
+  if (Number.isFinite(backendPercent) && backendPercent >= 0) {
+    return Math.max(0, Math.min(100, Math.round(backendPercent)))
+  }
   if (task.status === 'FAILED' || task.status === 'CANCELLED') return 100
   const metricsPercent = Number(task.metrics?.progress ?? task.result?.progress ?? task.result?.progress_percent)
   if (Number.isFinite(metricsPercent) && metricsPercent >= 0) {
@@ -58,6 +62,8 @@ const taskPercent = (task: any) => {
   if (task.status === 'PARTIAL') return 70
   return 0
 }
+
+const taskProgressLabel = (task: any) => task.progress?.label || `${taskPercent(task)}%`
 
 const TaskCenter: React.FC = () => {
   const navigate = useNavigate()
@@ -178,7 +184,8 @@ const TaskCenter: React.FC = () => {
       render: (status: string, record: any) => (
         <Space direction="vertical" size={2} style={{ width: 110 }}>
           <Tag color={statusColor(status)}>{status}</Tag>
-          <Progress percent={taskPercent(record)} size="small" showInfo={false} />
+          <Progress percent={taskPercent(record)} size="small" />
+          <Text type="secondary" style={{ fontSize: 12 }}>{taskProgressLabel(record)}</Text>
         </Space>
       ),
     },
@@ -323,6 +330,12 @@ const TaskCenter: React.FC = () => {
               <Descriptions.Item label="任务类型">{taskDrawer.taskType}</Descriptions.Item>
               <Descriptions.Item label="Agent">{taskDrawer.agentName}</Descriptions.Item>
               <Descriptions.Item label="Checkpoint" span={2}>{taskDrawer.checkpointRef || '-'}</Descriptions.Item>
+              <Descriptions.Item label="Progress" span={2}>
+                <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                  <Progress percent={taskPercent(taskDrawer)} size="small" />
+                  <Text type="secondary">{taskProgressLabel(taskDrawer)}</Text>
+                </Space>
+              </Descriptions.Item>
               <Descriptions.Item label="创建时间">{taskDrawer.createdAt}</Descriptions.Item>
               <Descriptions.Item label="完成时间">{taskDrawer.finishedAt || '-'}</Descriptions.Item>
             </Descriptions>

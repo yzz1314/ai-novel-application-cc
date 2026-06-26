@@ -19,6 +19,7 @@ public class TaskResponse {
     private Map<String, Object> errors;
     private Map<String, Object> warnings;
     private Map<String, Object> metrics;
+    private Map<String, Object> progress;
     private String checkpointRef;
     private Integer retryCount;
     private LocalDateTime createdAt;
@@ -38,11 +39,18 @@ public class TaskResponse {
         response.setErrors(task.getErrors());
         response.setWarnings(task.getWarnings());
         response.setMetrics(task.getMetrics());
+        response.setProgress(null);
         response.setCheckpointRef(task.getCheckpointRef());
         response.setRetryCount(task.getRetryCount());
         response.setCreatedAt(task.getCreatedAt());
         response.setStartedAt(task.getStartedAt());
         response.setFinishedAt(task.getFinishedAt());
+        return response;
+    }
+
+    public static TaskResponse from(Task task, Map<String, Object> progress) {
+        TaskResponse response = from(task);
+        response.setProgress(progress);
         return response;
     }
 }

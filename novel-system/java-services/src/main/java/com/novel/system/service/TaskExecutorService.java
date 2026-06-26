@@ -1,18 +1,25 @@
 package com.novel.system.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.novel.system.entity.Task;
 import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.repository.TaskRepository;
 import com.novel.system.exception.ResourceNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -33,6 +40,10 @@ public class TaskExecutorService {
     private final MemoryArtifactService memoryArtifactService;
     private final GraphArtifactDbService graphArtifactDbService;
     private final RetrievalArtifactDbService retrievalArtifactDbService;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Value("${file.storage.base-path:/workspace}")
+    private String basePath;
 
     /**
      * 创建任务
@@ -510,11 +521,202 @@ public class TaskExecutorService {
         logs.put("errors", task.getErrors());
         logs.put("warnings", task.getWarnings());
         logs.put("metrics", task.getMetrics());
+        logs.put("progress", getTaskProgress(task));
         logs.put("checkpointRef", task.getCheckpointRef());
         logs.put("retryCount", task.getRetryCount());
         logs.put("createdAt", task.getCreatedAt());
         logs.put("startedAt", task.getStartedAt());
         logs.put("finishedAt", task.getFinishedAt());
         return logs;
+    }
+
+    public Map<String, Object> getTaskProgress(Task task) {
+        Map<String, Object> fromCheckpoint = progressFromCheckpoint(task);
+        if (!fromCheckpoint.isEmpty()) {
+            return fromCheckpoint;
+        }
+
+        Map<String, Object> fromResult = progressFromResult(task);
+        if (!fromResult.isEmpty()) {
+            return fromResult;
+        }
+
+        Map<String, Object> fromMetrics = progressFromMap(task.getMetrics(), "metrics");
+        if (!fromMetrics.isEmpty()) {
+            return fromMetrics;
+        }
+
+        return progressFromStatus(task);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> progressFromCheckpoint(Task task) {
+        String checkpointRef = task.getCheckpointRef();
+        if (checkpointRef == null || checkpointRef.isBlank()) {
+            return Map.of();
+        }
+
+        try {
+            Path checkpointPath = resolveProjectPath(task.getProjectId(), checkpointRef);
+            if (!Files.exists(checkpointPath)) {
+                return Map.of();
+            }
+
+            Map<String, Object> payload = objectMapper.readValue(
+                checkpointPath.toFile(),
+                new TypeReference<>() {}
+            );
+            Object stateValue = payload.get("state");
+            Map<String, Object> state = stateValue instanceof Map<?, ?> stateMap
+                ? new HashMap<>((Map<String, Object>) stateMap)
+                : payload;
+
+            Integer total = toInteger(state.get("total_chunks"));
+            Integer processed = toInteger(state.get("processed_chunks"));
+            if (processed == null && state.get("completed_chunk_ids") instanceof Collection<?> completed) {
+                processed = completed.size();
+            }
+            Integer failed = null;
+            if (state.get("failed_chunk_ids") instanceof Collection<?> failedChunks) {
+                failed = failedChunks.size();
+            }
+
+            if (total != null && total > 0 && processed != null) {
+                return progressMap(
+                    "checkpoint",
+                    processed,
+                    total,
+                    failed,
+                    task.getStatus(),
+                    checkpointRef
+                );
+            }
+        } catch (Exception e) {
+            log.debug("Unable to read progress checkpoint for task {}: {}", task.getId(), e.getMessage());
+        }
+        return Map.of();
+    }
+
+    private Map<String, Object> progressFromResult(Task task) {
+        Map<String, Object> result = task.getResult();
+        if (result == null || result.isEmpty()) {
+            return Map.of();
+        }
+
+        Integer total = toInteger(firstValue(result, "total_chunks", "total_nodes", "total_items"));
+        Integer processed = toInteger(firstValue(result, "analyzed_chunks", "processed_chunks", "completed_nodes", "completed_items"));
+        Integer failed = toInteger(firstValue(result, "failed_chunks", "failed_nodes", "failed_items"));
+        if (total != null && total > 0 && processed != null) {
+            return progressMap("result", processed, total, failed, task.getStatus(), task.getCheckpointRef());
+        }
+
+        return progressFromMap(result, "result");
+    }
+
+    private Map<String, Object> progressFromMap(Map<String, Object> values, String source) {
+        if (values == null || values.isEmpty()) {
+            return Map.of();
+        }
+        Object value = firstValue(values, "progress", "progress_percent", "percent", "completion_ratio");
+        Double ratio = toRatio(value);
+        if (ratio == null) {
+            return Map.of();
+        }
+
+        Map<String, Object> progress = new LinkedHashMap<>();
+        progress.put("source", source);
+        progress.put("ratio", ratio);
+        progress.put("percent", (int) Math.round(ratio * 100.0));
+        progress.put("label", progress.get("percent") + "%");
+        return progress;
+    }
+
+    private Map<String, Object> progressFromStatus(Task task) {
+        double ratio = switch (task.getStatus()) {
+            case SUCCESS, FAILED, CANCELLED -> 1.0;
+            case PARTIAL -> 0.5;
+            case RUNNING, PENDING -> 0.0;
+        };
+
+        Map<String, Object> progress = new LinkedHashMap<>();
+        progress.put("source", "status");
+        progress.put("ratio", ratio);
+        progress.put("percent", (int) Math.round(ratio * 100.0));
+        progress.put("label", task.getStatus().name());
+        return progress;
+    }
+
+    private Map<String, Object> progressMap(
+            String source,
+            Integer processed,
+            Integer total,
+            Integer failed,
+            TaskStatus status,
+            String checkpointRef) {
+        int boundedProcessed = Math.max(0, Math.min(processed, total));
+        double ratio = total > 0 ? (double) boundedProcessed / (double) total : 0.0;
+        if ((status == TaskStatus.SUCCESS || status == TaskStatus.FAILED || status == TaskStatus.CANCELLED)
+                && boundedProcessed >= total) {
+            ratio = 1.0;
+        }
+
+        Map<String, Object> progress = new LinkedHashMap<>();
+        progress.put("source", source);
+        progress.put("ratio", ratio);
+        progress.put("percent", (int) Math.round(ratio * 100.0));
+        progress.put("processed", boundedProcessed);
+        progress.put("total", total);
+        progress.put("failed", failed != null ? failed : 0);
+        progress.put("label", boundedProcessed + "/" + total + " chunks");
+        if (checkpointRef != null && !checkpointRef.isBlank()) {
+            progress.put("checkpointRef", checkpointRef);
+        }
+        return progress;
+    }
+
+    private Path resolveProjectPath(String projectId, String path) {
+        Path candidate = Path.of(path);
+        if (!candidate.isAbsolute()) {
+            candidate = projectRoot(projectId).resolve(path);
+        }
+        Path resolved = candidate.normalize().toAbsolutePath();
+        Path root = projectRoot(projectId).normalize().toAbsolutePath();
+        if (!resolved.startsWith(root)) {
+            throw new IllegalArgumentException("Task checkpoint must stay inside project workspace");
+        }
+        return resolved;
+    }
+
+    private Path projectRoot(String projectId) {
+        return Path.of(basePath, "projects", projectId);
+    }
+
+    private Object firstValue(Map<String, Object> values, String... keys) {
+        for (String key : keys) {
+            if (values.containsKey(key) && values.get(key) != null) {
+                return values.get(key);
+            }
+        }
+        return null;
+    }
+
+    private Double toRatio(Object value) {
+        if (value == null) {
+            return null;
+        }
+        Double number;
+        if (value instanceof Number numeric) {
+            number = numeric.doubleValue();
+        } else {
+            try {
+                number = Double.parseDouble(value.toString());
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        if (number < 0) {
+            return null;
+        }
+        return number > 1.0 ? Math.min(1.0, number / 100.0) : Math.min(1.0, number);
     }
 }

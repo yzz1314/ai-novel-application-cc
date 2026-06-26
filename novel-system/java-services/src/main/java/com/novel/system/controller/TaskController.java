@@ -24,7 +24,7 @@ public class TaskController {
     @GetMapping("/{taskId}")
     public ResponseEntity<TaskResponse> getTask(@PathVariable String taskId) {
         Task task = taskExecutorService.getTask(taskId);
-        return ResponseEntity.ok(TaskResponse.from(task));
+        return ResponseEntity.ok(TaskResponse.from(task, taskExecutorService.getTaskProgress(task)));
     }
 
     /**
@@ -46,7 +46,7 @@ public class TaskController {
         }
 
         List<TaskResponse> responses = tasks.stream()
-            .map(TaskResponse::from)
+            .map(task -> TaskResponse.from(task, taskExecutorService.getTaskProgress(task)))
             .collect(Collectors.toList());
 
         return ResponseEntity.ok(responses);
@@ -69,7 +69,7 @@ public class TaskController {
     @PostMapping("/{taskId}/cancel")
     public ResponseEntity<TaskResponse> cancelTask(@PathVariable String taskId) {
         Task task = taskExecutorService.cancelTask(taskId);
-        return ResponseEntity.ok(TaskResponse.from(task));
+        return ResponseEntity.ok(TaskResponse.from(task, taskExecutorService.getTaskProgress(task)));
     }
 
     /**
@@ -78,7 +78,7 @@ public class TaskController {
     @PostMapping("/{taskId}/retry")
     public ResponseEntity<TaskResponse> retryTask(@PathVariable String taskId) {
         Task task = taskExecutorService.retryTask(taskId);
-        return ResponseEntity.ok(TaskResponse.from(task));
+        return ResponseEntity.ok(TaskResponse.from(task, taskExecutorService.getTaskProgress(task)));
     }
 
     /**
@@ -89,7 +89,7 @@ public class TaskController {
             @PathVariable String taskId,
             @RequestBody(required = false) Map<String, Object> resumeInput) {
         Task task = taskExecutorService.resumeTask(taskId, resumeInput);
-        return ResponseEntity.ok(TaskResponse.from(task));
+        return ResponseEntity.ok(TaskResponse.from(task, taskExecutorService.getTaskProgress(task)));
     }
 
     /**

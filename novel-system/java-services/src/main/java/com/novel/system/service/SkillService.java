@@ -1,0 +1,1276 @@
+package com.novel.system.service;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import com.novel.system.dto.response.SkillResponse;
+import com.novel.system.entity.SkillProfile;
+import com.novel.system.exception.ResourceNotFoundException;
+import com.novel.system.repository.SkillProfileRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class SkillService {
+
+    private static final Pattern SAFE_SKILL_NAME = Pattern.compile("^[A-Za-z0-9_-]+$");
+    private static final Pattern SAFE_VERSION_ID = Pattern.compile("^[A-Za-z0-9_.-]+$");
+    private static final Pattern FRONTMATTER_PATTERN = Pattern.compile("\\A---\\s*\\R(.*?)\\R---\\s*\\R", Pattern.DOTALL);
+    private static final Pattern FIRST_HEADING_PATTERN = Pattern.compile("(?m)^#\\s+(.+?)\\s*$");
+    private static final Pattern TEMPLATE_PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{[^}]+}}|____+");
+    private static final DateTimeFormatter SNAPSHOT_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
+
+    private final ProjectService projectService;
+    private final SkillProfileRepository skillProfileRepository;
+    private final ObjectMapper jsonMapper = new ObjectMapper();
+    private final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
+
+    @Value("${file.storage.base-path:/workspace}")
+    private String basePath;
+
+    public List<SkillResponse> listSkills(String projectId) {
+        projectService.getProject(projectId);
+
+        Path localSkillsDir = localSkillsDir(projectId);
+        if (!Files.exists(localSkillsDir)) {
+            return Collections.emptyList();
+        }
+
+        Map<String, Map<String, Object>> enabledConfig = readEnabledConfig(projectId);
+        List<SkillResponse> skills = new ArrayList<>();
+
+        try (var stream = Files.list(localSkillsDir)) {
+            stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".md"))
+                .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                .forEach(path -> skills.add(toResponse(projectId, path, enabledConfig, false)));
+        } catch (IOException e) {
+            throw new RuntimeException("读取项目Skill列表失败", e);
+        }
+
+        return skills;
+    }
+
+    public SkillResponse getSkill(String projectId, String skillName) {
+        projectService.getProject(projectId);
+        validateSkillName(skillName);
+
+        Path skillFile = resolveSkillFile(projectId, skillName);
+
+        return toResponse(projectId, skillFile, readEnabledConfig(projectId), true);
+    }
+
+    public SkillResponse updateSkill(String projectId, String skillName, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        validateSkillName(skillName);
+        Path skillFile = resolveSkillFile(projectId, skillName);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        String content = asString(options.get("content"), null);
+        if (content == null) {
+            throw new IllegalArgumentException("content 不能为空");
+        }
+
+        Path snapshotPath = archiveSkillFile(projectId, skillFile, "before_skill_edit");
+        writeText(skillFile, content);
+
+        String editor = asString(options.get("editor"), "human");
+        String editNote = asString(options.get("editNote"), asString(options.get("edit_note"), ""));
+        writeSkillReport(
+            projectId,
+            skillName,
+            "skill_manual_edit",
+            Map.of(
+                "editor", editor,
+                "edit_note", editNote,
+                "skill_path", relative(projectId, skillFile),
+                "snapshot_path", relative(projectId, snapshotPath),
+                "size_before", snapshotSize(snapshotPath),
+                "size_after", fileSize(skillFile)
+            )
+        );
+
+        syncProjectSkillProfile(projectId);
+        return getSkill(projectId, skillName);
+    }
+
+    public SkillResponse updateSkillConfig(String projectId, String skillName, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        validateSkillName(skillName);
+        Path skillFile = resolveSkillFile(projectId, skillName);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        Path enabledFile = enabledConfigFile(projectId);
+        Path snapshotPath = Files.exists(enabledFile)
+            ? archiveSkillConfig(projectId, enabledFile, "before_skill_config_edit")
+            : null;
+
+        Map<String, Object> config = mutableEnabledConfig(projectId);
+        List<Map<String, Object>> skills = mutableSkillEntries(config);
+        Map<String, Object> entry = findOrCreateSkillEntry(projectId, skillName, skillFile, skills);
+
+        if (options.containsKey("enabled")) {
+            entry.put("enabled", asBooleanFlexible(options.get("enabled"), true));
+        }
+        if (options.containsKey("priority")) {
+            entry.put("priority", asInteger(options.get("priority"), asInteger(entry.get("priority"), defaultPriority(asString(entry.get("type"), inferType(skillName))))));
+        }
+        if (options.containsKey("type")) {
+            entry.put("type", asString(options.get("type"), inferType(skillName)));
+        }
+        if (options.containsKey("scope")) {
+            entry.put("scope", asStringList(options.get("scope")));
+        }
+        entry.put("path", relative(projectId, skillFile));
+        config.put("updated_at", LocalDateTime.now().toString());
+        writeYaml(enabledFile, config);
+        syncProjectSkillProfile(projectId);
+
+        String editor = asString(options.get("editor"), "human");
+        String editNote = asString(options.get("editNote"), asString(options.get("edit_note"), ""));
+        writeSkillReport(
+            projectId,
+            skillName,
+            "skill_config_edit",
+            Map.of(
+                "editor", editor,
+                "edit_note", editNote,
+                "enabled", entry.getOrDefault("enabled", true),
+                "priority", entry.getOrDefault("priority", defaultPriority(asString(entry.get("type"), inferType(skillName)))),
+                "type", entry.getOrDefault("type", inferType(skillName)),
+                "scope", entry.getOrDefault("scope", List.of()),
+                "snapshot_path", snapshotPath != null ? relative(projectId, snapshotPath) : ""
+            )
+        );
+
+        return getSkill(projectId, skillName);
+    }
+
+    public Map<String, Object> detectConflicts(String projectId) {
+        projectService.getProject(projectId);
+        List<SkillResponse> skills = listSkills(projectId);
+        List<Map<String, Object>> conflicts = detectSkillConflicts(projectId, skills);
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("conflictCount", conflicts.size());
+        response.put("conflicts", conflicts);
+        response.put("checkedAt", LocalDateTime.now().toString());
+        return response;
+    }
+
+    public Map<String, Object> validateSkillQuality(String projectId, String skillName, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        validateSkillName(skillName);
+        Path skillFile = resolveSkillFile(projectId, skillName);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        String checkedBy = asString(options.get("checkedBy"), asString(options.get("checker"), "system"));
+        String content;
+        try {
+            content = Files.readString(skillFile, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new RuntimeException("读取Skill文件失败: " + skillName, e);
+        }
+
+        Map<String, Object> frontmatter = extractFrontmatter(content);
+        Map<String, Object> config = mutableEnabledConfig(projectId);
+        List<Map<String, Object>> entries = mutableSkillEntries(config);
+        Map<String, Object> entry = findOrCreateSkillEntry(projectId, skillName, skillFile, entries);
+        String type = asString(entry.get("type"), inferType(skillName));
+        List<Map<String, Object>> checks = buildSkillQualityChecks(projectId, skillName, type, content, frontmatter);
+        int score = calculateQualityScore(checks);
+        String status = score >= 80 ? "passed" : score >= 60 ? "needs_review" : "failed";
+        long failedRequiredCount = checks.stream()
+            .filter(check -> Boolean.TRUE.equals(check.get("required")) && !Boolean.TRUE.equals(check.get("passed")))
+            .count();
+        if (failedRequiredCount > 0 && score >= 80) {
+            status = "needs_review";
+        }
+
+        String checkedAt = LocalDateTime.now().toString();
+        Map<String, Object> reportDetails = new LinkedHashMap<>();
+        reportDetails.put("checked_by", checkedBy);
+        reportDetails.put("checked_at", checkedAt);
+        reportDetails.put("skill_path", relative(projectId, skillFile));
+        reportDetails.put("type", type);
+        reportDetails.put("status", status);
+        reportDetails.put("score", score);
+        reportDetails.put("checks", checks);
+        reportDetails.put("failed_required_count", failedRequiredCount);
+        reportDetails.put("content_size", fileSize(skillFile));
+        Path reportPath = writeSkillReport(projectId, skillName, "skill_quality_check", reportDetails);
+
+        Path enabledFile = enabledConfigFile(projectId);
+        Path snapshotPath = Files.exists(enabledFile)
+            ? archiveSkillConfig(projectId, enabledFile, "before_skill_quality_check")
+            : null;
+        entry.put("quality_status", status);
+        entry.put("quality_score", score);
+        entry.put("quality_checked_at", checkedAt);
+        entry.put("latest_quality_report_path", relative(projectId, reportPath));
+        entry.putIfAbsent("approval_status", "pending");
+        config.put("updated_at", LocalDateTime.now().toString());
+        writeYaml(enabledFile, config);
+        syncProjectSkillProfile(projectId);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("skill", getSkill(projectId, skillName));
+        response.put("status", status);
+        response.put("score", score);
+        response.put("checks", checks);
+        response.put("failedRequiredCount", failedRequiredCount);
+        response.put("reportPath", relative(projectId, reportPath));
+        response.put("configSnapshotPath", snapshotPath != null ? relative(projectId, snapshotPath) : null);
+        response.put("checkedAt", checkedAt);
+        return response;
+    }
+
+    public Map<String, Object> approveSkill(String projectId, String skillName, Map<String, Object> request) {
+        return updateSkillApproval(projectId, skillName, request, "approved");
+    }
+
+    public Map<String, Object> rejectSkill(String projectId, String skillName, Map<String, Object> request) {
+        return updateSkillApproval(projectId, skillName, request, "rejected");
+    }
+
+    public List<Map<String, Object>> listSkillVersions(String projectId, String skillName) {
+        projectService.getProject(projectId);
+        validateSkillName(skillName);
+        resolveSkillFile(projectId, skillName);
+        Path versionsDir = skillVersionsDir(projectId, skillName);
+        if (!Files.exists(versionsDir)) {
+            return List.of();
+        }
+
+        try (var stream = Files.list(versionsDir)) {
+            return stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".md"))
+                .sorted(Comparator.comparing(this::modifiedAt).reversed())
+                .map(path -> skillVersionItem(projectId, skillName, path, false))
+                .toList();
+        } catch (IOException e) {
+            throw new RuntimeException("读取Skill版本目录失败", e);
+        }
+    }
+
+    public Map<String, Object> getSkillVersion(String projectId, String skillName, String versionId) {
+        projectService.getProject(projectId);
+        validateSkillName(skillName);
+        resolveSkillFile(projectId, skillName);
+        Path versionFile = resolveSkillVersionFile(projectId, skillName, versionId);
+        return skillVersionItem(projectId, skillName, versionFile, true);
+    }
+
+    public Map<String, Object> restoreSkillVersion(
+            String projectId,
+            String skillName,
+            String versionId,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        validateSkillName(skillName);
+        Path skillFile = resolveSkillFile(projectId, skillName);
+        Path versionFile = resolveSkillVersionFile(projectId, skillName, versionId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+
+        Path previousSnapshotPath = null;
+        if (Files.exists(skillFile) && asBooleanFlexible(options.get("createVersionSnapshot"), true)) {
+            previousSnapshotPath = archiveSkillFile(projectId, skillFile, "before_skill_restore");
+        }
+
+        try {
+            Files.copy(versionFile, skillFile, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            throw new RuntimeException("恢复Skill版本失败: " + versionId, e);
+        }
+        syncProjectSkillProfile(projectId);
+
+        String restoredAt = LocalDateTime.now().toString();
+        String restorer = asString(options.get("restorer"), asString(options.get("editor"), "human"));
+        String note = asString(options.get("note"), asString(options.get("editNote"), ""));
+        Path reportPath = writeSkillReport(
+            projectId,
+            skillName,
+            "skill_restore",
+            Map.of(
+                "restorer", restorer,
+                "note", note,
+                "skill_path", relative(projectId, skillFile),
+                "restored_from_version_id", versionId,
+                "restored_from_path", relative(projectId, versionFile),
+                "previous_snapshot_path", previousSnapshotPath != null ? relative(projectId, previousSnapshotPath) : "",
+                "size_after", fileSize(skillFile),
+                "restored_at", restoredAt
+            )
+        );
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("skill", getSkill(projectId, skillName));
+        response.put("restoredPath", relative(projectId, skillFile));
+        response.put("restoredFromVersionId", versionId);
+        response.put("restoredFromPath", relative(projectId, versionFile));
+        response.put("previousSnapshotPath", previousSnapshotPath != null ? relative(projectId, previousSnapshotPath) : null);
+        response.put("reportPath", relative(projectId, reportPath));
+        response.put("restoredAt", restoredAt);
+        return response;
+    }
+
+    public List<Map<String, Object>> listSkillConfigVersions(String projectId) {
+        projectService.getProject(projectId);
+        Path versionsDir = projectRoot(projectId).resolve("skills").resolve("versions").resolve("enabled").normalize();
+        if (!Files.exists(versionsDir)) {
+            return List.of();
+        }
+
+        try (var stream = Files.list(versionsDir)) {
+            return stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".yaml"))
+                .sorted(Comparator.comparing(this::modifiedAt).reversed())
+                .map(path -> skillConfigVersionItem(projectId, path, false))
+                .toList();
+        } catch (IOException e) {
+            throw new RuntimeException("读取Skill配置版本目录失败", e);
+        }
+    }
+
+    public Map<String, Object> restoreSkillConfigVersion(
+            String projectId,
+            String versionId,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        Path enabledFile = enabledConfigFile(projectId);
+        Path versionFile = resolveSkillConfigVersionFile(projectId, versionId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+
+        Path previousSnapshotPath = null;
+        if (Files.exists(enabledFile) && asBooleanFlexible(options.get("createVersionSnapshot"), true)) {
+            previousSnapshotPath = archiveSkillConfig(projectId, enabledFile, "before_skill_config_restore");
+        }
+
+        try {
+            Files.createDirectories(enabledFile.getParent());
+            Files.copy(versionFile, enabledFile, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            throw new RuntimeException("恢复Skill配置版本失败: " + versionId, e);
+        }
+        syncProjectSkillProfile(projectId);
+
+        String restoredAt = LocalDateTime.now().toString();
+        Path reportPath = writeSkillReport(
+            projectId,
+            "enabled",
+            "skill_config_restore",
+            Map.of(
+                "restorer", asString(options.get("restorer"), asString(options.get("editor"), "human")),
+                "note", asString(options.get("note"), asString(options.get("editNote"), "")),
+                "config_path", relative(projectId, enabledFile),
+                "restored_from_version_id", versionId,
+                "restored_from_path", relative(projectId, versionFile),
+                "previous_snapshot_path", previousSnapshotPath != null ? relative(projectId, previousSnapshotPath) : "",
+                "restored_at", restoredAt
+            )
+        );
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("enabledConfig", getEnabledConfig(projectId));
+        response.put("restoredPath", relative(projectId, enabledFile));
+        response.put("restoredFromVersionId", versionId);
+        response.put("restoredFromPath", relative(projectId, versionFile));
+        response.put("previousSnapshotPath", previousSnapshotPath != null ? relative(projectId, previousSnapshotPath) : null);
+        response.put("reportPath", relative(projectId, reportPath));
+        response.put("restoredAt", restoredAt);
+        return response;
+    }
+
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> getEnabledConfig(String projectId) {
+        projectService.getProject(projectId);
+        Path enabledFile = projectRoot(projectId).resolve("skills").resolve("enabled.yaml");
+        if (!Files.exists(enabledFile)) {
+            return Map.of(
+                "version", "1.0.0",
+                "project_id", projectId,
+                "skills", List.of()
+            );
+        }
+
+        try {
+            return yamlMapper.readValue(enabledFile.toFile(), Map.class);
+        } catch (IOException e) {
+            throw new RuntimeException("读取Skill启用配置失败", e);
+        }
+    }
+
+    public Map<String, Object> getSkillProfile(String projectId) {
+        projectService.getProject(projectId);
+        SkillProfile profile = skillProfileRepository.findByProjectIdAndName(projectId, "default")
+            .orElseGet(() -> syncProjectSkillProfile(projectId));
+        return toSkillProfileMap(profile);
+    }
+
+    public Map<String, Object> syncSkillProfile(String projectId) {
+        projectService.getProject(projectId);
+        return toSkillProfileMap(syncProjectSkillProfile(projectId));
+    }
+
+    private SkillProfile syncProjectSkillProfile(String projectId) {
+        List<SkillResponse> skills = listSkills(projectId).stream()
+            .map(skill -> getSkill(projectId, skill.getName()))
+            .toList();
+        Map<String, Object> enabledConfig = getEnabledConfig(projectId);
+        List<Map<String, Object>> enabledSkills = skills.stream()
+            .map(this::skillResponseToProfileEntry)
+            .toList();
+
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("source", "workspace");
+        metadata.put("storage", "database-snapshot");
+        metadata.put("skillCount", skills.size());
+        metadata.put("enabledCount", skills.stream().filter(skill -> Boolean.TRUE.equals(skill.getEnabled())).count());
+        metadata.put("qualityCheckedCount", skills.stream().filter(skill -> skill.getQualityScore() != null).count());
+        metadata.put("approvedCount", skills.stream().filter(skill -> "approved".equals(skill.getApprovalStatus())).count());
+        metadata.put("conflictCount", detectSkillConflicts(projectId, skills).size());
+        metadata.put("enabledConfigPath", Files.exists(enabledConfigFile(projectId)) ? "skills/enabled.yaml" : "");
+        metadata.put("enabledConfig", enabledConfig);
+        metadata.put("syncedAt", LocalDateTime.now().toString());
+
+        SkillProfile profile = skillProfileRepository.findByProjectIdAndName(projectId, "default")
+            .orElseGet(() -> {
+                SkillProfile created = new SkillProfile();
+                created.setId(projectId + ":default");
+                created.setProjectId(projectId);
+                created.setName("default");
+                created.setCreatedAt(LocalDateTime.now());
+                return created;
+            });
+        profile.setDescription("Default project skill profile synchronized from skills/local and skills/enabled.yaml");
+        profile.setEnabledSkills(enabledSkills);
+        profile.setTaskOverrides(buildTaskOverrides(enabledSkills));
+        profile.setSkillMetadata(metadata);
+        profile.setUpdatedAt(LocalDateTime.now());
+        return skillProfileRepository.save(profile);
+    }
+
+    private Map<String, Object> skillResponseToProfileEntry(SkillResponse skill) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("name", skill.getName());
+        entry.put("fileName", skill.getFileName());
+        entry.put("type", skill.getType());
+        entry.put("title", skill.getTitle());
+        entry.put("description", skill.getDescription());
+        entry.put("path", skill.getPath());
+        entry.put("enabled", skill.getEnabled());
+        entry.put("priority", skill.getPriority());
+        entry.put("scope", skill.getScope() != null ? skill.getScope() : List.of());
+        entry.put("conflicts", skill.getConflicts() != null ? skill.getConflicts() : List.of());
+        entry.put("qualityStatus", skill.getQualityStatus());
+        entry.put("qualityScore", skill.getQualityScore());
+        entry.put("qualityCheckedAt", skill.getQualityCheckedAt());
+        entry.put("latestQualityReportPath", skill.getLatestQualityReportPath());
+        entry.put("approvalStatus", skill.getApprovalStatus());
+        entry.put("approvedAt", skill.getApprovedAt());
+        entry.put("approvedBy", skill.getApprovedBy());
+        entry.put("rejectedAt", skill.getRejectedAt());
+        entry.put("rejectedBy", skill.getRejectedBy());
+        entry.put("rejectionReason", skill.getRejectionReason());
+        entry.put("latestApprovalReportPath", skill.getLatestApprovalReportPath());
+        entry.put("sizeBytes", skill.getSizeBytes());
+        entry.put("updatedAt", skill.getUpdatedAt() != null ? skill.getUpdatedAt().toString() : "");
+        entry.put("content", skill.getContent());
+        return entry;
+    }
+
+    private Map<String, Object> buildTaskOverrides(List<Map<String, Object>> enabledSkills) {
+        Map<String, List<String>> byScope = new LinkedHashMap<>();
+        for (Map<String, Object> skill : enabledSkills) {
+            if (!Boolean.TRUE.equals(skill.get("enabled"))) {
+                continue;
+            }
+            String name = asString(skill.get("name"), "");
+            if (name.isBlank()) {
+                continue;
+            }
+            for (String scope : asStringList(skill.get("scope"))) {
+                byScope.computeIfAbsent(scope, ignored -> new ArrayList<>()).add(name);
+            }
+        }
+        Map<String, Object> overrides = new LinkedHashMap<>();
+        byScope.forEach((scope, skillNames) -> overrides.put(scope, skillNames));
+        return overrides;
+    }
+
+    private Map<String, Object> toSkillProfileMap(SkillProfile profile) {
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("id", profile.getId());
+        response.put("projectId", profile.getProjectId());
+        response.put("name", profile.getName());
+        response.put("description", profile.getDescription());
+        response.put("enabledSkills", profile.getEnabledSkills() != null ? profile.getEnabledSkills() : List.of());
+        response.put("taskOverrides", profile.getTaskOverrides() != null ? profile.getTaskOverrides() : Map.of());
+        response.put("skillMetadata", profile.getSkillMetadata() != null ? profile.getSkillMetadata() : Map.of());
+        response.put("createdAt", profile.getCreatedAt() != null ? profile.getCreatedAt().toString() : "");
+        response.put("updatedAt", profile.getUpdatedAt() != null ? profile.getUpdatedAt().toString() : "");
+        response.put("storage", "database");
+        return response;
+    }
+
+    private SkillResponse toResponse(
+            String projectId,
+            Path skillFile,
+            Map<String, Map<String, Object>> enabledConfig,
+            boolean includeContent) {
+        try {
+            String content = Files.readString(skillFile, StandardCharsets.UTF_8);
+            String skillName = stripExtension(skillFile.getFileName().toString());
+            Map<String, Object> frontmatter = extractFrontmatter(content);
+            Map<String, Object> enabled = enabledConfig.getOrDefault(skillName, Collections.emptyMap());
+            String type = asString(enabled.get("type"), inferType(skillName));
+            List<String> explicitConflicts = asStringList(frontmatter.getOrDefault("conflicts_with", frontmatter.get("conflictsWith")));
+
+            return SkillResponse.builder()
+                .name(skillName)
+                .fileName(skillFile.getFileName().toString())
+                .type(type)
+                .title(asString(frontmatter.get("title"), extractFirstHeading(content, skillName)))
+                .description(asString(frontmatter.get("description"), ""))
+                .path(projectRoot(projectId).relativize(skillFile).toString().replace("\\", "/"))
+                .enabled(asBoolean(enabled.get("enabled"), true))
+                .priority(asInteger(enabled.get("priority"), defaultPriority(type)))
+                .scope(asStringList(enabled.get("scope")))
+                .conflicts(explicitConflicts)
+                .qualityStatus(asString(enabled.get("quality_status"), "unchecked"))
+                .qualityScore(asInteger(enabled.get("quality_score"), null))
+                .qualityCheckedAt(asString(enabled.get("quality_checked_at"), ""))
+                .latestQualityReportPath(asString(enabled.get("latest_quality_report_path"), ""))
+                .approvalStatus(asString(enabled.get("approval_status"), "pending"))
+                .approvedAt(asString(enabled.get("approved_at"), ""))
+                .approvedBy(asString(enabled.get("approved_by"), ""))
+                .rejectedAt(asString(enabled.get("rejected_at"), ""))
+                .rejectedBy(asString(enabled.get("rejected_by"), ""))
+                .rejectionReason(asString(enabled.get("rejection_reason"), ""))
+                .latestApprovalReportPath(asString(enabled.get("latest_approval_report_path"), ""))
+                .sizeBytes(Files.size(skillFile))
+                .updatedAt(LocalDateTime.ofInstant(
+                    Files.getLastModifiedTime(skillFile).toInstant(),
+                    ZoneId.systemDefault()
+                ))
+                .content(includeContent ? content : null)
+                .build();
+        } catch (IOException e) {
+            throw new RuntimeException("读取Skill文件失败: " + skillFile.getFileName(), e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Map<String, Object>> readEnabledConfig(String projectId) {
+        Map<String, Map<String, Object>> byName = new HashMap<>();
+        Map<String, Object> config = getEnabledConfig(projectId);
+        Object skillsObject = config.get("skills");
+        if (!(skillsObject instanceof List<?> skills)) {
+            return byName;
+        }
+
+        for (Object item : skills) {
+            if (!(item instanceof Map<?, ?> raw)) {
+                continue;
+            }
+            Map<String, Object> skill = new HashMap<>();
+            raw.forEach((key, value) -> skill.put(String.valueOf(key), value));
+            String name = asString(skill.get("name"), "");
+            if (!name.isBlank()) {
+                byName.put(name, skill);
+            }
+        }
+
+        return byName;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> extractFrontmatter(String content) {
+        Matcher matcher = FRONTMATTER_PATTERN.matcher(content);
+        if (!matcher.find()) {
+            return Collections.emptyMap();
+        }
+
+        try {
+            return yamlMapper.readValue(matcher.group(1), Map.class);
+        } catch (IOException e) {
+            log.warn("Failed to parse Skill frontmatter", e);
+            return Collections.emptyMap();
+        }
+    }
+
+    private String extractFirstHeading(String content, String fallback) {
+        Matcher matcher = FIRST_HEADING_PATTERN.matcher(content);
+        return matcher.find() ? matcher.group(1).trim() : fallback;
+    }
+
+    private void validateSkillName(String skillName) {
+        if (skillName == null || !SAFE_SKILL_NAME.matcher(skillName).matches()) {
+            throw new IllegalArgumentException("非法Skill名称: " + skillName);
+        }
+    }
+
+    private void validateVersionId(String versionId) {
+        if (versionId == null || !SAFE_VERSION_ID.matcher(versionId).matches()) {
+            throw new IllegalArgumentException("非法版本ID: " + versionId);
+        }
+    }
+
+    private Path resolveSkillFile(String projectId, String skillName) {
+        Path skillFile = localSkillsDir(projectId).resolve(skillName + ".md").normalize();
+        if (!skillFile.startsWith(localSkillsDir(projectId)) || !Files.exists(skillFile)) {
+            throw new ResourceNotFoundException("Skill不存在: " + skillName);
+        }
+        return skillFile;
+    }
+
+    private Path projectRoot(String projectId) {
+        return Paths.get(basePath, "projects", projectId).normalize();
+    }
+
+    private Path localSkillsDir(String projectId) {
+        return projectRoot(projectId).resolve("skills").resolve("local").normalize();
+    }
+
+    private Path enabledConfigFile(String projectId) {
+        return projectRoot(projectId).resolve("skills").resolve("enabled.yaml");
+    }
+
+    private Path skillVersionsDir(String projectId, String skillName) {
+        return projectRoot(projectId).resolve("skills").resolve("versions").resolve(skillName).normalize();
+    }
+
+    private String relative(String projectId, Path path) {
+        return projectRoot(projectId).relativize(path).toString().replace("\\", "/");
+    }
+
+    private Path archiveSkillFile(String projectId, Path sourceFile, String reason) {
+        String skillName = stripExtension(sourceFile.getFileName().toString());
+        Path snapshotFile = skillVersionsDir(projectId, skillName)
+            .resolve(skillName + "_" + LocalDateTime.now().format(SNAPSHOT_TIMESTAMP) + ".md");
+        try {
+            Files.createDirectories(snapshotFile.getParent());
+            Files.copy(sourceFile, snapshotFile);
+            writeSkillReport(projectId, skillName, "skill_snapshot", Map.of(
+                "reason", reason,
+                "source_path", relative(projectId, sourceFile),
+                "snapshot_path", relative(projectId, snapshotFile)
+            ));
+            return snapshotFile;
+        } catch (IOException e) {
+            throw new RuntimeException("归档Skill失败: " + sourceFile.getFileName(), e);
+        }
+    }
+
+    private Path archiveSkillConfig(String projectId, Path sourceFile, String reason) {
+        Path snapshotFile = projectRoot(projectId).resolve("skills").resolve("versions").resolve("enabled")
+            .resolve("enabled_" + LocalDateTime.now().format(SNAPSHOT_TIMESTAMP) + ".yaml");
+        try {
+            Files.createDirectories(snapshotFile.getParent());
+            Files.copy(sourceFile, snapshotFile);
+            writeSkillReport(projectId, "enabled", "skill_config_snapshot", Map.of(
+                "reason", reason,
+                "source_path", relative(projectId, sourceFile),
+                "snapshot_path", relative(projectId, snapshotFile)
+            ));
+            return snapshotFile;
+        } catch (IOException e) {
+            throw new RuntimeException("归档Skill配置失败: " + sourceFile.getFileName(), e);
+        }
+    }
+
+    private Path resolveSkillVersionFile(String projectId, String skillName, String versionId) {
+        validateVersionId(versionId);
+        Path versionsDir = skillVersionsDir(projectId, skillName);
+        Path versionFile = versionsDir.resolve(versionId + ".md").normalize();
+        if (!versionFile.startsWith(versionsDir) || !Files.exists(versionFile) || !Files.isRegularFile(versionFile)) {
+            throw new ResourceNotFoundException("Skill版本不存在: " + versionId);
+        }
+        return versionFile;
+    }
+
+    private Path resolveSkillConfigVersionFile(String projectId, String versionId) {
+        validateVersionId(versionId);
+        Path versionsDir = projectRoot(projectId).resolve("skills").resolve("versions").resolve("enabled").normalize();
+        Path versionFile = versionsDir.resolve(versionId + ".yaml").normalize();
+        if (!versionFile.startsWith(versionsDir) || !Files.exists(versionFile) || !Files.isRegularFile(versionFile)) {
+            throw new ResourceNotFoundException("Skill配置版本不存在: " + versionId);
+        }
+        return versionFile;
+    }
+
+    private Map<String, Object> skillVersionItem(
+            String projectId,
+            String skillName,
+            Path versionFile,
+            boolean includeContent) {
+        try {
+            String content = Files.readString(versionFile, StandardCharsets.UTF_8);
+            Map<String, Object> frontmatter = extractFrontmatter(content);
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", stripSuffix(versionFile.getFileName().toString(), ".md"));
+            item.put("skillName", skillName);
+            item.put("path", relative(projectId, versionFile));
+            item.put("title", asString(frontmatter.get("title"), extractFirstHeading(content, skillName)));
+            item.put("description", asString(frontmatter.get("description"), ""));
+            item.put("sizeBytes", Files.size(versionFile));
+            item.put("archivedAt", modifiedAt(versionFile));
+            if (includeContent) {
+                item.put("content", content);
+            }
+            return item;
+        } catch (IOException e) {
+            throw new RuntimeException("读取Skill版本失败: " + versionFile.getFileName(), e);
+        }
+    }
+
+    private Map<String, Object> skillConfigVersionItem(String projectId, Path versionFile, boolean includeContent) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", stripSuffix(versionFile.getFileName().toString(), ".yaml"));
+        item.put("path", relative(projectId, versionFile));
+        item.put("sizeBytes", fileSize(versionFile));
+        item.put("archivedAt", modifiedAt(versionFile));
+        if (includeContent) {
+            try {
+                item.put("content", Files.readString(versionFile, StandardCharsets.UTF_8));
+            } catch (IOException e) {
+                throw new RuntimeException("读取Skill配置版本失败: " + versionFile.getFileName(), e);
+            }
+        }
+        return item;
+    }
+
+    private void writeText(Path file, String content) {
+        try {
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, content, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new RuntimeException("写入Skill文件失败: " + file.getFileName(), e);
+        }
+    }
+
+    private void writeYaml(Path file, Map<String, Object> data) {
+        try {
+            Files.createDirectories(file.getParent());
+            yamlMapper.writeValue(file.toFile(), data);
+        } catch (IOException e) {
+            throw new RuntimeException("写入Skill配置失败: " + file.getFileName(), e);
+        }
+    }
+
+    private Path writeSkillReport(String projectId, String skillName, String reportType, Map<String, Object> details) {
+        Path reportFile = projectRoot(projectId).resolve("novel").resolve("reviews").resolve("skills")
+            .resolve(skillName + "_" + reportType + "_" + LocalDateTime.now().format(SNAPSHOT_TIMESTAMP) + ".json");
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("review_type", reportType);
+        report.put("skill_name", skillName);
+        report.put("created_at", LocalDateTime.now().toString());
+        report.putAll(details);
+        try {
+            Files.createDirectories(reportFile.getParent());
+            jsonMapper.writerWithDefaultPrettyPrinter().writeValue(reportFile.toFile(), report);
+            return reportFile;
+        } catch (IOException e) {
+            throw new RuntimeException("写入Skill报告失败: " + reportFile.getFileName(), e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> mutableEnabledConfig(String projectId) {
+        Map<String, Object> raw = new LinkedHashMap<>(getEnabledConfig(projectId));
+        raw.putIfAbsent("version", "1.0.0");
+        raw.put("project_id", projectId);
+        raw.putIfAbsent("skills", new ArrayList<Map<String, Object>>());
+        return raw;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> mutableSkillEntries(Map<String, Object> config) {
+        Object skillsObject = config.get("skills");
+        List<Map<String, Object>> entries = new ArrayList<>();
+        if (skillsObject instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> raw) {
+                    Map<String, Object> entry = new LinkedHashMap<>();
+                    raw.forEach((key, value) -> entry.put(String.valueOf(key), value));
+                    entries.add(entry);
+                }
+            }
+        }
+        config.put("skills", entries);
+        return entries;
+    }
+
+    private Map<String, Object> findOrCreateSkillEntry(
+            String projectId,
+            String skillName,
+            Path skillFile,
+            List<Map<String, Object>> entries) {
+        for (Map<String, Object> entry : entries) {
+            if (skillName.equals(asString(entry.get("name"), ""))) {
+                return entry;
+            }
+        }
+        Map<String, Object> entry = new LinkedHashMap<>();
+        String type = inferType(skillName);
+        entry.put("name", skillName);
+        entry.put("type", type);
+        entry.put("path", relative(projectId, skillFile));
+        entry.put("enabled", true);
+        entry.put("priority", defaultPriority(type));
+        entry.put("scope", defaultScope(type));
+        entries.add(entry);
+        return entry;
+    }
+
+    private List<Map<String, Object>> detectSkillConflicts(String projectId, List<SkillResponse> skills) {
+        List<Map<String, Object>> conflicts = new ArrayList<>();
+        Map<String, SkillResponse> byName = new HashMap<>();
+        for (SkillResponse skill : skills) {
+            byName.put(skill.getName(), skill);
+        }
+
+        for (SkillResponse skill : skills) {
+            if (!Boolean.TRUE.equals(skill.getEnabled())) {
+                continue;
+            }
+            for (String conflictName : skill.getConflicts()) {
+                SkillResponse other = byName.get(conflictName);
+                if (other != null && Boolean.TRUE.equals(other.getEnabled())) {
+                    conflicts.add(conflictItem("explicit_conflict", "error", skill.getName(), other.getName(),
+                        "Skill frontmatter 声明了 conflicts_with"));
+                }
+            }
+        }
+
+        for (int i = 0; i < skills.size(); i++) {
+            SkillResponse left = skills.get(i);
+            if (!Boolean.TRUE.equals(left.getEnabled())) {
+                continue;
+            }
+            for (int j = i + 1; j < skills.size(); j++) {
+                SkillResponse right = skills.get(j);
+                if (!Boolean.TRUE.equals(right.getEnabled())) {
+                    continue;
+                }
+                Set<String> overlap = new LinkedHashSet<>(left.getScope());
+                overlap.retainAll(right.getScope());
+                if (!overlap.isEmpty() && left.getType().equals(right.getType())) {
+                    conflicts.add(conflictItem("scope_overlap", "warning", left.getName(), right.getName(),
+                        "同类型启用 Skill 覆盖相同 scope: " + String.join(",", overlap)));
+                }
+                if (!overlap.isEmpty() && left.getPriority().equals(right.getPriority())) {
+                    conflicts.add(conflictItem("priority_tie", "info", left.getName(), right.getName(),
+                        "相同 scope 下优先级相同，路由结果可能不稳定: " + String.join(",", overlap)));
+                }
+            }
+        }
+        return conflicts;
+    }
+
+    private Map<String, Object> updateSkillApproval(
+            String projectId,
+            String skillName,
+            Map<String, Object> request,
+            String decision) {
+        projectService.getProject(projectId);
+        validateSkillName(skillName);
+        Path skillFile = resolveSkillFile(projectId, skillName);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        Path enabledFile = enabledConfigFile(projectId);
+        Path snapshotPath = Files.exists(enabledFile)
+            ? archiveSkillConfig(projectId, enabledFile, "before_skill_" + decision)
+            : null;
+
+        Map<String, Object> config = mutableEnabledConfig(projectId);
+        List<Map<String, Object>> entries = mutableSkillEntries(config);
+        Map<String, Object> entry = findOrCreateSkillEntry(projectId, skillName, skillFile, entries);
+        String actor = asString(options.get("reviewer"), asString(options.get("approver"), asString(options.get("user"), "human")));
+        String note = asString(options.get("note"), asString(options.get("reason"), ""));
+        String decidedAt = LocalDateTime.now().toString();
+        boolean enableAfterDecision = asBooleanFlexible(options.get("enabled"), "approved".equals(decision));
+
+        entry.put("approval_status", decision);
+        entry.put("enabled", enableAfterDecision);
+        if ("approved".equals(decision)) {
+            entry.put("approved_by", actor);
+            entry.put("approved_at", decidedAt);
+            entry.put("approval_note", note);
+            entry.remove("rejected_by");
+            entry.remove("rejected_at");
+            entry.remove("rejection_reason");
+        } else {
+            entry.put("rejected_by", actor);
+            entry.put("rejected_at", decidedAt);
+            entry.put("rejection_reason", note);
+        }
+
+        Map<String, Object> reportDetails = new LinkedHashMap<>();
+        reportDetails.put("decision", decision);
+        reportDetails.put("reviewer", actor);
+        reportDetails.put("note", note);
+        reportDetails.put("skill_path", relative(projectId, skillFile));
+        reportDetails.put("quality_status", entry.getOrDefault("quality_status", "unchecked"));
+        reportDetails.put("quality_score", entry.get("quality_score"));
+        reportDetails.put("enabled_after_decision", enableAfterDecision);
+        reportDetails.put("config_snapshot_path", snapshotPath != null ? relative(projectId, snapshotPath) : "");
+        reportDetails.put("decided_at", decidedAt);
+        Path reportPath = writeSkillReport(
+            projectId,
+            skillName,
+            "approved".equals(decision) ? "skill_approval" : "skill_rejection",
+            reportDetails
+        );
+        entry.put("latest_approval_report_path", relative(projectId, reportPath));
+        config.put("updated_at", LocalDateTime.now().toString());
+        writeYaml(enabledFile, config);
+        syncProjectSkillProfile(projectId);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("skill", getSkill(projectId, skillName));
+        response.put("decision", decision);
+        response.put("reportPath", relative(projectId, reportPath));
+        response.put("configSnapshotPath", snapshotPath != null ? relative(projectId, snapshotPath) : null);
+        response.put("decidedAt", decidedAt);
+        return response;
+    }
+
+    private List<Map<String, Object>> buildSkillQualityChecks(
+            String projectId,
+            String skillName,
+            String type,
+            String content,
+            Map<String, Object> frontmatter) {
+        String normalized = content.toLowerCase(Locale.ROOT);
+        List<Map<String, Object>> checks = new ArrayList<>();
+        addQualityCheck(
+            checks,
+            "frontmatter_title",
+            "包含 frontmatter 标题或一级标题",
+            true,
+            frontmatter.containsKey("title") || FIRST_HEADING_PATTERN.matcher(content).find(),
+            10,
+            "Skill 需要可读标题，方便人工管理和下游引用"
+        );
+        addQualityCheck(
+            checks,
+            "description",
+            "包含描述信息",
+            false,
+            hasAny(frontmatter, "description") || containsAny(normalized, "项目概述", "说明", "用途"),
+            5,
+            "缺描述会降低可维护性"
+        );
+        addQualityCheck(
+            checks,
+            "content_length",
+            "内容达到最低长度",
+            true,
+            content.length() >= 1200,
+            10,
+            "少于 1200 字符通常不足以承载样本技法、规则和约束"
+        );
+        addQualityCheck(
+            checks,
+            "source_trace",
+            "包含来源样本或分析来源",
+            true,
+            hasAny(frontmatter, "generated_from", "sample_books", "source_samples")
+                || containsAny(normalized, "样本", "sample", "分析数据", "来源"),
+            10,
+            "Skill 应能追溯到样本或分析结果"
+        );
+        addQualityCheck(
+            checks,
+            "scope",
+            "包含适用范围或作用域",
+            true,
+            containsAny(normalized, "适用范围", "作用域", "应用场景", "适用场景", "scope"),
+            8,
+            "缺少适用范围会影响 Skill 路由和人工判断"
+        );
+        addQualityCheck(
+            checks,
+            "inputs",
+            "声明输入来源",
+            false,
+            containsAny(normalized, "输入来源", "输入", "参照", "上下文", "project soul", "大纲"),
+            7,
+            "输入来源越明确，越利于 Agent 稳定拼装 prompt"
+        );
+        addQualityCheck(
+            checks,
+            "must_rules",
+            "包含必须遵守的规则",
+            true,
+            containsAny(normalized, "必须", "检查清单", "控制要点", "规则", "要点"),
+            10,
+            "文档要求 Skill 明确列出必须使用的规则"
+        );
+        addQualityCheck(
+            checks,
+            "evidence",
+            "包含证据引用或样本示例",
+            false,
+            containsAny(normalized, "证据", "引用", "示例", "出现率", "样本书籍"),
+            8,
+            "缺证据会削弱 Skill 的可信度和可审查性"
+        );
+        addQualityCheck(
+            checks,
+            "anti_copy_risk",
+            "包含复刻风险或避免事项",
+            false,
+            containsAny(normalized, "复刻", "避免", "禁止", "不得", "不要"),
+            8,
+            "文档要求 Skill 明确控制复刻风险"
+        );
+        addQualityCheck(
+            checks,
+            "template_placeholders",
+            "模板占位符已清理",
+            false,
+            !TEMPLATE_PLACEHOLDER_PATTERN.matcher(content).find(),
+            8,
+            "保留 {{placeholder}} 或 ____ 说明生成结果仍需人工补全"
+        );
+        addQualityCheck(
+            checks,
+            "conflict_risk",
+            "无启用冲突风险",
+            false,
+            conflictCountForSkill(projectId, skillName) == 0,
+            6,
+            "启用冲突会导致同一 scope 下路由不稳定"
+        );
+
+        if ("writing".equals(type)) {
+            addQualityCheck(
+                checks,
+                "writing_boundary",
+                "正文 Skill 包含章节边界控制",
+                true,
+                containsAny(normalized, "章节边界", "边界控制", "must_not_write", "stop_point", "后续章纲"),
+                10,
+                "正文创作必须防止越界透支后续章纲"
+            );
+        } else if ("outline".equals(type)) {
+            addQualityCheck(
+                checks,
+                "outline_boundary",
+                "大纲 Skill 包含分卷/章节边界或节奏结构",
+                true,
+                containsAny(normalized, "章节边界", "分卷", "章节结构", "节奏", "章末"),
+                10,
+                "大纲 Skill 应约束章节结构、节奏和边界"
+            );
+        } else if ("review".equals(type)) {
+            addQualityCheck(
+                checks,
+                "review_dimensions",
+                "审查 Skill 包含审查维度",
+                true,
+                containsAny(normalized, "审查维度", "检查", "质量", "一致性", "连续性"),
+                10,
+                "审查 Skill 必须定义可执行的审查维度"
+            );
+        }
+        return checks;
+    }
+
+    private void addQualityCheck(
+            List<Map<String, Object>> checks,
+            String id,
+            String title,
+            boolean required,
+            boolean passed,
+            int weight,
+            String message) {
+        Map<String, Object> check = new LinkedHashMap<>();
+        check.put("id", id);
+        check.put("title", title);
+        check.put("required", required);
+        check.put("passed", passed);
+        check.put("weight", weight);
+        check.put("message", passed ? "" : message);
+        checks.add(check);
+    }
+
+    private int calculateQualityScore(List<Map<String, Object>> checks) {
+        int total = 0;
+        int passed = 0;
+        for (Map<String, Object> check : checks) {
+            int weight = asInteger(check.get("weight"), 0);
+            total += weight;
+            if (Boolean.TRUE.equals(check.get("passed"))) {
+                passed += weight;
+            }
+        }
+        if (total == 0) {
+            return 0;
+        }
+        return Math.round((passed * 100.0f) / total);
+    }
+
+    private int conflictCountForSkill(String projectId, String skillName) {
+        List<Map<String, Object>> conflicts = detectSkillConflicts(projectId, listSkills(projectId));
+        int count = 0;
+        for (Map<String, Object> conflict : conflicts) {
+            if (skillName.equals(conflict.get("skillA")) || skillName.equals(conflict.get("skillB"))) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private boolean containsAny(String normalizedText, String... needles) {
+        for (String needle : needles) {
+            if (normalizedText.contains(needle.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasAny(Map<String, Object> map, String... keys) {
+        for (String key : keys) {
+            Object value = map.get(key);
+            if (value != null && !String.valueOf(value).isBlank()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Map<String, Object> conflictItem(String type, String severity, String left, String right, String message) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("type", type);
+        item.put("severity", severity);
+        item.put("skillA", left);
+        item.put("skillB", right);
+        item.put("message", message);
+        return item;
+    }
+
+    private long fileSize(Path file) {
+        try {
+            return Files.size(file);
+        } catch (IOException e) {
+            return 0L;
+        }
+    }
+
+    private long snapshotSize(Path file) {
+        return fileSize(file);
+    }
+
+    private String stripExtension(String fileName) {
+        int dotIndex = fileName.lastIndexOf('.');
+        return dotIndex > 0 ? fileName.substring(0, dotIndex) : fileName;
+    }
+
+    private String stripSuffix(String text, String suffix) {
+        return text != null && text.endsWith(suffix)
+            ? text.substring(0, text.length() - suffix.length())
+            : text;
+    }
+
+    private String modifiedAt(Path path) {
+        try {
+            return LocalDateTime.ofInstant(
+                Files.getLastModifiedTime(path).toInstant(),
+                ZoneId.systemDefault()
+            ).toString();
+        } catch (IOException e) {
+            return "";
+        }
+    }
+
+    private String inferType(String skillName) {
+        return skillName.endsWith("_skill")
+            ? skillName.substring(0, skillName.length() - "_skill".length())
+            : "general";
+    }
+
+    private int defaultPriority(String type) {
+        return switch (type) {
+            case "writing" -> 100;
+            case "outline" -> 90;
+            case "review" -> 80;
+            default -> 50;
+        };
+    }
+
+    private List<String> defaultScope(String type) {
+        return switch (type) {
+            case "writing" -> List.of("chapter_writing", "style_guidance");
+            case "outline" -> List.of("outline_generation", "chapter_boundary");
+            case "review" -> List.of("chapter_review", "quality_check");
+            default -> List.of("general");
+        };
+    }
+
+    private String asString(Object value, String fallback) {
+        return value == null ? fallback : String.valueOf(value);
+    }
+
+    private Boolean asBoolean(Object value, Boolean fallback) {
+        return value instanceof Boolean bool ? bool : fallback;
+    }
+
+    private Boolean asBooleanFlexible(Object value, Boolean fallback) {
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        if (value instanceof String text) {
+            return Boolean.parseBoolean(text);
+        }
+        return fallback;
+    }
+
+    private Integer asInteger(Object value, Integer fallback) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value instanceof String text) {
+            try {
+                return Integer.parseInt(text);
+            } catch (NumberFormatException ignored) {
+                return fallback;
+            }
+        }
+        return fallback;
+    }
+
+    private List<String> asStringList(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return List.of();
+        }
+
+        return list.stream()
+            .map(String::valueOf)
+            .toList();
+    }
+}

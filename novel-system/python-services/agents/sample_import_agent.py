@@ -12,6 +12,7 @@ from schemas.agent_request import AgentRequest
 from schemas.agent_response import AgentResponse
 from text_processing import TextNormalizer, ChapterDetector, Chunker, CoverageValidator
 from config import settings
+from utils.logger import get_logger
 
 class SampleImportAgent(BaseAgent):
     """样本导入Agent"""
@@ -19,6 +20,7 @@ class SampleImportAgent(BaseAgent):
     def __init__(self):
         super().__init__("SampleImportAgent")
         self.supported_tasks = ["sample_import"]
+        self.logger = get_logger("SampleImportAgent")
         self.normalizer = TextNormalizer()
         self.chapter_detector = ChapterDetector()
         self.chunker = Chunker(
@@ -44,9 +46,10 @@ class SampleImportAgent(BaseAgent):
         try:
             # 1. 验证请求
             await self.validate_request(request)
+            self._current_request = request
 
             project_id = request.project_id
-            sample_id = request.input_refs.get("sample_id")
+            sample_id = request.input_refs.get("sample_id") or request.parameters.get("sample_id")
 
             self.logger.info(f"Importing sample: {sample_id}")
 
@@ -148,17 +151,30 @@ class SampleImportAgent(BaseAgent):
 
     async def _read_raw_sample(self, project_id: str, sample_id: str) -> str:
         """读取原始样本文件"""
-        # 这里需要从Java服务获取文件路径，简化起见直接读取
-        # 实际应该通过API获取
+        file_path = None
+        # Prefer the authoritative path passed by Java after upload.
+        # Fallback to filename/sample_id based discovery for manually created tasks.
+        if hasattr(self, "_current_request"):
+            file_path = (
+                self._current_request.input_refs.get("file_path")
+                or self._current_request.parameters.get("file_path")
+            )
+
+        if file_path:
+            candidate = Path(file_path)
+            if candidate.exists() and candidate.is_file():
+                with open(candidate, 'r', encoding='utf-8') as f:
+                    return f.read()
+
         raw_dir = Path(settings.PROJECT_BASE_PATH) / "projects" / project_id / "samples" / "raw"
 
-        # 查找该sample_id对应的文件
-        for file_path in raw_dir.glob("*.md"):
-            # 简化：假设文件名包含sample_id或者是第一个文件
-            with open(file_path, 'r', encoding='utf-8') as f:
-                return f.read()
+        matching_files = [
+            path for path in list(raw_dir.glob("*.md")) + list(raw_dir.glob("*.txt"))
+            if sample_id and sample_id in path.name
+        ]
+        all_files = list(raw_dir.glob("*.md")) + list(raw_dir.glob("*.txt"))
 
-        for file_path in raw_dir.glob("*.txt"):
+        for file_path in matching_files or all_files:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read()
 

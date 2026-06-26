@@ -90,6 +90,7 @@ public class Task {
     public enum TaskStatus {
         PENDING,
         RUNNING,
+        PARTIAL,
         SUCCESS,
         FAILED,
         CANCELLED

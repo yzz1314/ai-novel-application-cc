@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestController
@@ -56,5 +57,33 @@ public class TaskController {
     public ResponseEntity<TaskResponse> cancelTask(@PathVariable String taskId) {
         Task task = taskExecutorService.cancelTask(taskId);
         return ResponseEntity.ok(TaskResponse.from(task));
+    }
+
+    /**
+     * 重试任务
+     */
+    @PostMapping("/{taskId}/retry")
+    public ResponseEntity<TaskResponse> retryTask(@PathVariable String taskId) {
+        Task task = taskExecutorService.retryTask(taskId);
+        return ResponseEntity.ok(TaskResponse.from(task));
+    }
+
+    /**
+     * 从任务 checkpoint 创建恢复任务。
+     */
+    @PostMapping("/{taskId}/resume")
+    public ResponseEntity<TaskResponse> resumeTask(
+            @PathVariable String taskId,
+            @RequestBody(required = false) Map<String, Object> resumeInput) {
+        Task task = taskExecutorService.resumeTask(taskId, resumeInput);
+        return ResponseEntity.ok(TaskResponse.from(task));
+    }
+
+    /**
+     * 获取任务日志和诊断信息
+     */
+    @GetMapping("/{taskId}/logs")
+    public ResponseEntity<Map<String, Object>> getTaskLogs(@PathVariable String taskId) {
+        return ResponseEntity.ok(taskExecutorService.getTaskLogs(taskId));
     }
 }

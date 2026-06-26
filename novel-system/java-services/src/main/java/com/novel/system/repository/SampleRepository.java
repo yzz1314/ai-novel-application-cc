@@ -16,4 +16,6 @@ public interface SampleRepository extends JpaRepository<Sample, String> {
     List<Sample> findByStatus(SampleStatus status);
 
     boolean existsByFileHash(String fileHash);
+
+    boolean existsByProjectIdAndFileHash(String projectId, String fileHash);
 }

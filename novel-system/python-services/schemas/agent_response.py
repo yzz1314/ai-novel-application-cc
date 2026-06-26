@@ -1,6 +1,6 @@
 """Agent响应模型"""
 from pydantic import BaseModel
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 class AgentResponse(BaseModel):

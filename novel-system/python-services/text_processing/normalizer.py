@@ -11,6 +11,7 @@ class TextNormalizer:
     def __init__(self):
         # 需要替换的字符映射
         self.char_replacements = {
+            '\ufeff': '',
             '…': '...',
             '—': '-',
             '―': '-',
@@ -34,7 +35,7 @@ class TextNormalizer:
         """
         original_length = len(text)
 
-        # 1. 字符替换
+        # 1. 字符替换（包含 UTF-8 BOM）
         text = self._replace_chars(text)
 
         # 2. 空白字符规范化

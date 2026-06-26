@@ -8,6 +8,7 @@ import java.time.LocalDateTime;
 public class SampleResponse {
 
     private String id;
+    private String sampleId;
     private String projectId;
     private String title;
     private String fileName;
@@ -21,6 +22,7 @@ public class SampleResponse {
     public static SampleResponse from(Sample sample) {
         SampleResponse response = new SampleResponse();
         response.setId(sample.getId());
+        response.setSampleId(sample.getId());
         response.setProjectId(sample.getProjectId());
         response.setTitle(sample.getTitle());
         response.setFileName(sample.getFileName());

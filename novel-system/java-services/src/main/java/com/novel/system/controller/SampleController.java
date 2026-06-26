@@ -36,11 +36,14 @@ public class SampleController {
         Sample sample = sampleService.uploadSample(projectId, file);
 
         // 2. 创建文本规范化任务
-        Map<String, Object> inputRefs = Map.of("sample_id", sample.getId());
+        Map<String, Object> inputRefs = Map.of(
+            "sample_id", sample.getId(),
+            "file_path", sample.getFilePath()
+        );
         Task task = taskExecutorService.createTask(
             projectId,
             "sample_import",
-            "SampleImportAgent",
+            "sample_import",
             inputRefs,
             new HashMap<>()
         );
@@ -76,6 +79,66 @@ public class SampleController {
     }
 
     /**
+     * 获取样本 DB 级章节/分块结构。
+     */
+    @GetMapping("/{sampleId}/structure")
+    public ResponseEntity<Map<String, Object>> getSampleStructure(
+            @PathVariable String projectId,
+            @PathVariable String sampleId) {
+        Sample sample = sampleService.getSample(sampleId);
+        if (!projectId.equals(sample.getProjectId())) {
+            throw new IllegalArgumentException("样本不属于当前项目: " + sampleId);
+        }
+        return ResponseEntity.ok(Map.of(
+            "sampleId", sampleId,
+            "stats", sampleService.getSampleStructureStats(sampleId),
+            "chapters", sampleService.listSampleChapters(sampleId),
+            "chunks", sampleService.listSampleChunks(sampleId)
+        ));
+    }
+
+    /**
+     * 从 workspace manifest/chunks 手动同步样本结构到数据库。
+     */
+    @PostMapping("/{sampleId}/structure/sync")
+    public ResponseEntity<Map<String, Object>> syncSampleStructure(
+            @PathVariable String projectId,
+            @PathVariable String sampleId) {
+        sampleService.syncSampleStructureFromWorkspace(projectId, sampleId);
+        return getSampleStructure(projectId, sampleId);
+    }
+
+    /**
+     * 删除样本
+     */
+    @DeleteMapping("/{sampleId}")
+    public ResponseEntity<Void> deleteSample(@PathVariable String sampleId) {
+        sampleService.deleteSample(sampleId);
+        return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * 开始单个样本分析
+     */
+    @PostMapping("/{sampleId}/analyze")
+    public ResponseEntity<TaskResponse> analyzeSample(
+            @PathVariable String projectId,
+            @PathVariable String sampleId) {
+
+        Map<String, Object> inputRefs = Map.of("sample_id", sampleId);
+        Task task = taskExecutorService.createTask(
+            projectId,
+            "full_text_analysis",
+            "full_text_analysis",
+            inputRefs,
+            new HashMap<>()
+        );
+
+        taskExecutorService.executeTaskAsync(task.getId());
+        return ResponseEntity.ok(TaskResponse.from(task));
+    }
+
+    /**
      * 开始样本分析
      */
     @PostMapping("/analyze")
@@ -86,7 +149,7 @@ public class SampleController {
         Task task = taskExecutorService.createTask(
             projectId,
             "full_text_analysis",
-            "FullTextAnalysisAgent",
+            "full_text_analysis",
             inputRefs,
             new HashMap<>()
         );

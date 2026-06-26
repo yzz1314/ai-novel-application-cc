@@ -1,7 +1,14 @@
 package com.novel.system.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.novel.system.entity.Sample;
+import com.novel.system.entity.SampleChapter;
+import com.novel.system.entity.SampleChunk;
 import com.novel.system.entity.Sample.SampleStatus;
+import com.novel.system.repository.AnalysisResultRepository;
+import com.novel.system.repository.SampleChapterRepository;
+import com.novel.system.repository.SampleChunkRepository;
 import com.novel.system.repository.SampleRepository;
 import com.novel.system.exception.ResourceNotFoundException;
 import lombok.RequiredArgsConstructor;
@@ -16,7 +23,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -24,6 +33,10 @@ import java.util.List;
 public class SampleService {
 
     private final SampleRepository sampleRepository;
+    private final SampleChapterRepository sampleChapterRepository;
+    private final SampleChunkRepository sampleChunkRepository;
+    private final AnalysisResultRepository analysisResultRepository;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Value("${file.storage.base-path:/workspace}")
     private String basePath;
@@ -42,9 +55,9 @@ public class SampleService {
             byte[] fileBytes = file.getBytes();
             String fileHash = calculateFileHash(fileBytes);
 
-            // 3. 检查是否已存在
-            if (sampleRepository.existsByFileHash(fileHash)) {
-                throw new IllegalArgumentException("该文件已存在");
+            // 3. 检查同项目是否已存在
+            if (sampleRepository.existsByProjectIdAndFileHash(projectId, fileHash)) {
+                throw new IllegalArgumentException("该项目下已存在相同内容的文件");
             }
 
             // 4. 保存原始文件
@@ -147,5 +160,169 @@ public class SampleService {
             sample.setTotalChapters(totalChapters);
         }
         return sampleRepository.save(sample);
+    }
+
+    @Transactional
+    public void syncSampleStructureFromWorkspace(String projectId, String sampleId) {
+        Sample sample = getSample(sampleId);
+        if (!projectId.equals(sample.getProjectId())) {
+            throw new ResourceNotFoundException("样本不属于当前项目: " + sampleId);
+        }
+
+        Path manifestPath = Paths.get(basePath, "projects", projectId, "samples", "manifests", sampleId + "_manifest.json");
+        if (!Files.exists(manifestPath)) {
+            log.warn("Sample manifest not found, skip DB sync: {}", manifestPath);
+            return;
+        }
+
+        try {
+            Map<String, Object> manifest = objectMapper.readValue(manifestPath.toFile(), new TypeReference<>() {});
+            syncChapters(projectId, sampleId, manifest);
+            syncChunks(projectId, sampleId);
+            log.info(
+                "Synced sample structure to DB: sample={}, chapters={}, chunks={}",
+                sampleId,
+                sampleChapterRepository.countBySampleId(sampleId),
+                sampleChunkRepository.countBySampleId(sampleId)
+            );
+        } catch (IOException e) {
+            throw new RuntimeException("同步样本章节/分块到数据库失败: " + sampleId, e);
+        }
+    }
+
+    public List<SampleChapter> listSampleChapters(String sampleId) {
+        getSample(sampleId);
+        return sampleChapterRepository.findBySampleIdOrderByChapterIndexAsc(sampleId);
+    }
+
+    public List<SampleChunk> listSampleChunks(String sampleId) {
+        getSample(sampleId);
+        return sampleChunkRepository.findBySampleIdOrderByChunkIndexAsc(sampleId);
+    }
+
+    public Map<String, Object> getSampleStructureStats(String sampleId) {
+        Sample sample = getSample(sampleId);
+        return Map.of(
+            "sampleId", sampleId,
+            "dbChapterCount", sampleChapterRepository.countBySampleId(sampleId),
+            "dbChunkCount", sampleChunkRepository.countBySampleId(sampleId),
+            "dbProcessedChunkCount", sampleChunkRepository.countBySampleIdAndProcessedTrue(sampleId),
+            "sampleTotalChapters", sample.getTotalChapters() != null ? sample.getTotalChapters() : 0
+        );
+    }
+
+    private void syncChapters(String projectId, String sampleId, Map<String, Object> manifest) {
+        sampleChapterRepository.deleteBySampleId(sampleId);
+        Object chaptersValue = manifest.get("chapters");
+        if (!(chaptersValue instanceof List<?> chapters)) {
+            return;
+        }
+
+        List<SampleChapter> entities = chapters.stream()
+            .filter(Map.class::isInstance)
+            .map(Map.class::cast)
+            .map(chapter -> {
+                Integer chapterIndex = toInteger(chapter.get("chapter_index"));
+                SampleChapter entity = new SampleChapter();
+                entity.setId(sampleId + "_chapter_" + (chapterIndex != null ? chapterIndex : 0));
+                entity.setProjectId(projectId);
+                entity.setSampleId(sampleId);
+                entity.setChapterIndex(chapterIndex);
+                entity.setTitle(stringValue(chapter.get("title")));
+                entity.setStartOffset(toInteger(chapter.get("start_offset")));
+                entity.setEndOffset(toInteger(chapter.get("end_offset")));
+                entity.setCharCount(toInteger(chapter.get("char_count")));
+                return entity;
+            })
+            .toList();
+        sampleChapterRepository.saveAll(entities);
+    }
+
+    private void syncChunks(String projectId, String sampleId) throws IOException {
+        sampleChunkRepository.deleteBySampleId(sampleId);
+        Path chunksDir = Paths.get(basePath, "projects", projectId, "samples", "chunks", sampleId);
+        if (!Files.exists(chunksDir)) {
+            return;
+        }
+
+        List<Path> chunkFiles;
+        try (var stream = Files.list(chunksDir)) {
+            chunkFiles = stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".json"))
+                .sorted()
+                .toList();
+        }
+
+        List<SampleChunk> entities = chunkFiles.stream()
+            .map(path -> readChunk(projectId, sampleId, chunksDir, path))
+            .sorted(Comparator.comparing(SampleChunk::getChunkIndex, Comparator.nullsLast(Integer::compareTo)))
+            .toList();
+        sampleChunkRepository.saveAll(entities);
+    }
+
+    private SampleChunk readChunk(String projectId, String sampleId, Path chunksDir, Path path) {
+        try {
+            Map<String, Object> chunk = objectMapper.readValue(path.toFile(), new TypeReference<>() {});
+            String chunkId = stringValue(chunk.get("id"));
+            SampleChunk entity = new SampleChunk();
+            entity.setId(sampleId + "_" + chunkId);
+            entity.setProjectId(projectId);
+            entity.setSampleId(sampleId);
+            entity.setChunkId(chunkId);
+            entity.setChunkIndex(parseChunkIndex(chunkId));
+            entity.setChapterIndex(toInteger(chunk.get("chapter_index")));
+            entity.setPartIndex(toInteger(chunk.get("part_index")));
+            entity.setStartOffset(toInteger(chunk.get("start_offset")));
+            entity.setEndOffset(toInteger(chunk.get("end_offset")));
+            entity.setCharCount(toInteger(chunk.get("char_count")));
+            entity.setHeadingPath(stringValue(chunk.get("heading_path")));
+            entity.setFilePath(chunksDir.relativize(path).toString().replace("\\", "/"));
+            Path analysisPath = Paths.get(basePath, "projects", projectId, "analysis", "per_chunk", sampleId, chunkId + "_analysis.json");
+            entity.setProcessed(Files.exists(analysisPath));
+            entity.setAnalysisPath(Files.exists(analysisPath)
+                ? Paths.get(basePath, "projects", projectId).relativize(analysisPath).toString().replace("\\", "/")
+                : null);
+            return entity;
+        } catch (IOException e) {
+            throw new RuntimeException("读取样本分块失败: " + path.getFileName(), e);
+        }
+    }
+
+    private Integer parseChunkIndex(String chunkId) {
+        if (chunkId == null) {
+            return null;
+        }
+        int pos = chunkId.lastIndexOf('_');
+        if (pos < 0 || pos == chunkId.length() - 1) {
+            return null;
+        }
+        return toInteger(chunkId.substring(pos + 1));
+    }
+
+    private Integer toInteger(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            return Integer.parseInt(value.toString());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private String stringValue(Object value) {
+        return value == null ? "" : value.toString();
+    }
+
+    @Transactional
+    public void deleteSample(String sampleId) {
+        Sample sample = getSample(sampleId);
+        analysisResultRepository.deleteBySampleId(sampleId);
+        sampleChapterRepository.deleteBySampleId(sampleId);
+        sampleChunkRepository.deleteBySampleId(sampleId);
+        sampleRepository.delete(sample);
     }
 }

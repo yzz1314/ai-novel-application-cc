@@ -16,7 +16,10 @@ public class TaskResponse {
     private Map<String, Object> inputRefs;
     private Map<String, Object> outputRefs;
     private Map<String, Object> result;
+    private Map<String, Object> errors;
+    private Map<String, Object> warnings;
     private Map<String, Object> metrics;
+    private String checkpointRef;
     private Integer retryCount;
     private LocalDateTime createdAt;
     private LocalDateTime startedAt;
@@ -32,7 +35,10 @@ public class TaskResponse {
         response.setInputRefs(task.getInputRefs());
         response.setOutputRefs(task.getOutputRefs());
         response.setResult(task.getResult());
+        response.setErrors(task.getErrors());
+        response.setWarnings(task.getWarnings());
         response.setMetrics(task.getMetrics());
+        response.setCheckpointRef(task.getCheckpointRef());
         response.setRetryCount(task.getRetryCount());
         response.setCreatedAt(task.getCreatedAt());
         response.setStartedAt(task.getStartedAt());

@@ -1,0 +1,134 @@
+version: '3.8'
+
+services:
+  # PostgreSQL数据库（带pgvector扩展）
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: novel-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: novel_system
+      POSTGRES_USER: novel_user
+      POSTGRES_PASSWORD: novel_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./novel-system/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - novel-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U novel_user -d novel_system"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis缓存
+  redis:
+    image: redis:7-alpine
+    container_name: novel-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - novel-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Python AI服务
+  python-ai:
+    build:
+      context: ./novel-system/python-services
+      dockerfile: Dockerfile
+    container_name: novel-python-ai
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./novel-system/python-services/.env
+    environment:
+      MOCK_LLM: ${MOCK_LLM:-false}
+    volumes:
+      - workspace-data:/workspace
+      - ./novel-system/python-services:/app
+    networks:
+      - novel-network
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Java后端服务
+  java-backend:
+    build:
+      context: ./novel-system/java-services
+      dockerfile: Dockerfile
+    container_name: novel-java-backend
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/novel_system
+      SPRING_DATASOURCE_USERNAME: novel_user
+      SPRING_DATASOURCE_PASSWORD: novel_pass
+      SPRING_REDIS_HOST: redis
+      SPRING_REDIS_PORT: 6379
+      PYTHON_SERVICE_URL: http://python-ai:8000
+      MODEL_PROFILE_ENCRYPTION_KEY: ${MODEL_PROFILE_ENCRYPTION_KEY:-novel-system-local-dev-key}
+    volumes:
+      - workspace-data:/workspace
+    networks:
+      - novel-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      python-ai:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # React前端
+  frontend:
+    build:
+      context: ./novel-system/frontend
+      dockerfile: Dockerfile
+    container_name: novel-frontend
+    restart: always
+    ports:
+      - "80:80"
+    networks:
+      - novel-network
+    depends_on:
+      - java-backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# 网络
+networks:
+  novel-network:
+    driver: bridge
+
+# 数据卷
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  workspace-data:
+    driver: local

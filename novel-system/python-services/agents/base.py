@@ -41,6 +41,20 @@ class BaseAgent(ABC):
         if self.metrics["start_time"]:
             duration_ms = int((datetime.now() - self.metrics["start_time"]).total_seconds() * 1000)
         
+        metrics = {
+            "llm_calls": self.metrics["llm_calls"],
+            "input_tokens": self.metrics["input_tokens"],
+            "output_tokens": self.metrics["output_tokens"],
+            "duration_ms": duration_ms
+        }
+        llm_client = getattr(self, "llm_client", None)
+        if llm_client and hasattr(llm_client, "current_model_metadata"):
+            metrics.update({
+                key: value
+                for key, value in llm_client.current_model_metadata().items()
+                if value not in (None, "")
+            })
+
         return AgentResponse(
             task_id=request.task_id,
             agent_name=self.agent_name,
@@ -50,12 +64,7 @@ class BaseAgent(ABC):
             structured_output=structured_output or {},
             errors=errors or [],
             warnings=warnings or [],
-            metrics={
-                "llm_calls": self.metrics["llm_calls"],
-                "input_tokens": self.metrics["input_tokens"],
-                "output_tokens": self.metrics["output_tokens"],
-                "duration_ms": duration_ms
-            },
+            metrics=metrics,
             created_at=self.metrics["start_time"],
             finished_at=datetime.now()
         )

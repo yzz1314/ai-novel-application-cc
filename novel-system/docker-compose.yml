@@ -47,7 +47,7 @@ services:
     networks:
       - novel-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -63,6 +63,7 @@ services:
       PROJECT_BASE_PATH: /workspace
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      MOCK_LLM: ${MOCK_LLM:-false}
       MAX_CONCURRENT_TASKS: ${MAX_CONCURRENT_TASKS}
       MAX_CHUNK_SIZE: ${MAX_CHUNK_SIZE}
       CHUNK_OVERLAP: ${CHUNK_OVERLAP}

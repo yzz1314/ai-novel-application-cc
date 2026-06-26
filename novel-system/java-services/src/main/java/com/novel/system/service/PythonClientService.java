@@ -23,9 +23,10 @@ public class PythonClientService {
      * 调用Python Agent执行任务
      */
     public Map<String, Object> callAgent(String agentName, Map<String, Object> request) {
-        String url = pythonServiceUrl + "/api/agents/" + agentName + "/run";
+        String normalizedAgentName = normalizeAgentName(agentName);
+        String url = pythonServiceUrl + "/api/agents/" + normalizedAgentName + "/run";
 
-        log.info("Calling Python agent: {} at {}", agentName, url);
+        log.info("Calling Python agent: {} at {}", normalizedAgentName, url);
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -41,13 +42,13 @@ public class PythonClientService {
             );
 
             if (response.getStatusCode() == HttpStatus.OK) {
-                log.info("Agent call successful: {}", agentName);
+                log.info("Agent call successful: {}", normalizedAgentName);
                 return response.getBody();
             } else {
                 throw new RuntimeException("Agent调用失败，状态码: " + response.getStatusCode());
             }
         } catch (Exception e) {
-            log.error("Failed to call agent: {}", agentName, e);
+            log.error("Failed to call agent: {}", normalizedAgentName, e);
             throw new RuntimeException("调用Python服务失败: " + e.getMessage(), e);
         }
     }
@@ -56,7 +57,7 @@ public class PythonClientService {
      * 取消任务
      */
     public void cancelTask(String taskId) {
-        String url = pythonServiceUrl + "/api/tasks/" + taskId + "/cancel";
+        String url = pythonServiceUrl + "/api/agents/tasks/" + taskId + "/cancel";
 
         log.info("Cancelling task: {}", taskId);
 
@@ -98,7 +99,35 @@ public class PythonClientService {
         request.put("task_type", taskType);
         request.put("input_refs", inputRefs != null ? inputRefs : new HashMap<>());
         request.put("parameters", parameters != null ? parameters : new HashMap<>());
+        request.put("config", parameters != null ? parameters : new HashMap<>());
+        if (parameters != null && parameters.get("model_profile_id") != null) {
+            request.put("model_profile_id", parameters.get("model_profile_id"));
+        }
+        if (parameters != null && parameters.get("resume_from_checkpoint") != null) {
+            request.put("resume_from_checkpoint", parameters.get("resume_from_checkpoint"));
+        }
 
         return request;
+    }
+
+    private String normalizeAgentName(String agentName) {
+        if (agentName == null) {
+            return "";
+        }
+
+        return switch (agentName) {
+            case "SampleImportAgent" -> "sample_import";
+            case "FullTextAnalysisAgent" -> "full_text_analysis";
+            case "BookSummaryAgent" -> "book_summary";
+            case "CrossBookSynthesisAgent" -> "cross_book_synthesis";
+            case "SkillGeneratorAgent" -> "skill_generation";
+            case "OutlineGeneratorAgent" -> "outline_generation";
+            case "ChapterWriterAgent" -> "chapter_writing";
+            case "RevisionAgent" -> "chapter_revision";
+            case "MemoryExtractorAgent" -> "memory_extraction";
+            case "MemoryQueryAgent" -> "memory_query";
+            case "GraphBuilderAgent" -> "graph_build";
+            default -> agentName;
+        };
     }
 }

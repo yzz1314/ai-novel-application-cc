@@ -1,0 +1,1149 @@
+import React, { useState, useEffect } from 'react';
+import {
+  Card,
+  Table,
+  Button,
+  Space,
+  Modal,
+  Form,
+  InputNumber,
+  Switch,
+  Tag,
+  Drawer,
+  Input,
+  Select,
+  Descriptions,
+  Progress,
+  message,
+  Empty,
+  Alert,
+  Popconfirm,
+  List,
+} from 'antd';
+import {
+  EditOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  PlusOutlined,
+  EyeOutlined,
+  SendOutlined,
+  HistoryOutlined,
+  AuditOutlined,
+  SaveOutlined,
+  CloseOutlined,
+} from '@ant-design/icons';
+import { useParams } from 'react-router-dom';
+import { bookApi, chapterApi, retrievalApi } from '../services/api';
+
+const { TextArea } = Input;
+
+interface Chapter {
+  id: string;
+  volumeNumber: number;
+  chapterNumber: number;
+  chapterTitle: string;
+  wordCount: number;
+  status: string;
+  stage?: string;
+  isFinal?: boolean;
+  qualityScore?: number;
+  reviewStatus?: string;
+  humanReviewStatus?: string;
+  boundaryCheck?: any;
+  revisionHistory?: any[];
+  humanReviewHistory?: any[];
+  createdAt: string;
+}
+
+const ChapterWriter: React.FC = () => {
+  const { projectId } = useParams<{ projectId: string }>();
+  const [books, setBooks] = useState<any[]>([]);
+  const [selectedBookId, setSelectedBookId] = useState('default');
+  const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [generateModalVisible, setGenerateModalVisible] = useState(false);
+  const [viewDrawerVisible, setViewDrawerVisible] = useState(false);
+  const [currentChapter, setCurrentChapter] = useState<any>(null);
+  const [contextPacks, setContextPacks] = useState<any[]>([]);
+  const [currentContextPack, setCurrentContextPack] = useState<any>(null);
+  const [revisionModalVisible, setRevisionModalVisible] = useState(false);
+  const [revisionTarget, setRevisionTarget] = useState<Chapter | null>(null);
+  const [reviewModalVisible, setReviewModalVisible] = useState(false);
+  const [reviewTarget, setReviewTarget] = useState<Chapter | null>(null);
+  const [editingChapter, setEditingChapter] = useState(false);
+  const [editTitle, setEditTitle] = useState('');
+  const [editContent, setEditContent] = useState('');
+  const [editNote, setEditNote] = useState('');
+  const [chapterVersions, setChapterVersions] = useState<any[]>([]);
+  const [chapterReviews, setChapterReviews] = useState<any[]>([]);
+  const [form] = Form.useForm();
+  const [revisionForm] = Form.useForm();
+  const [reviewForm] = Form.useForm();
+
+  useEffect(() => {
+    loadChapters();
+  }, [projectId, selectedBookId]);
+
+  const loadChapters = async () => {
+    if (!projectId) return;
+    try {
+      setLoading(true);
+      const bookList = await bookApi.getList(projectId).catch(() => []);
+      setBooks(bookList || []);
+      const effectiveBookId = selectedBookId === 'default'
+        ? (bookList?.[0]?.bookId || 'default')
+        : selectedBookId;
+      const data = await chapterApi.getList(projectId, effectiveBookId);
+      setChapters(data);
+      const packs = await retrievalApi.getContextPacks(projectId).catch(() => []);
+      setContextPacks(packs || []);
+    } catch (error) {
+      setChapters([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGenerate = async (values: any) => {
+    if (!projectId) return;
+
+    try {
+      setLoading(true);
+      const effectiveBookId = selectedBookId === 'default'
+        ? (books[0]?.bookId || 'default')
+        : selectedBookId;
+      await chapterApi.generate(projectId, {
+        book_id: effectiveBookId,
+        volume_number: values.volumeNumber,
+        chapter_number: values.chapterNumber,
+        chapter_title: values.chapterTitle,
+        target_word_count: values.targetWordCount || 3000,
+        use_project_skills: values.useProjectSkills,
+        use_previous_context: values.usePreviousContext,
+        auto_review: values.autoReview,
+      });
+
+      message.success('章节生成任务已启动，请稍后查看');
+      setGenerateModalVisible(false);
+      form.resetFields();
+
+      setTimeout(() => loadChapters(), 5000);
+    } catch (error) {
+      message.error('生成失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleView = async (chapter: Chapter) => {
+    if (!projectId) return;
+
+    try {
+      setLoading(true);
+      const bookId = selectedBookId === 'default' ? (books[0]?.bookId || 'default') : selectedBookId;
+      const data = await chapterApi.getContent(
+        projectId,
+        bookId,
+        chapter.volumeNumber,
+        chapter.chapterNumber
+      );
+      setCurrentChapter(data);
+      setEditingChapter(false);
+      setEditTitle(data?.chapterTitle || '');
+      setEditContent(data?.content || '');
+      setEditNote('');
+      const versions = await chapterApi
+        .getVersions(projectId, bookId, chapter.volumeNumber, chapter.chapterNumber)
+        .catch(() => []);
+      const reviews = await chapterApi
+        .getReviews(projectId, bookId, chapter.volumeNumber, chapter.chapterNumber)
+        .catch(() => []);
+      setChapterVersions(versions || []);
+      setChapterReviews(reviews || []);
+      const pack = contextPacks.find((item) =>
+        item.bookId === bookId &&
+        Number(item.volumeNumber) === Number(chapter.volumeNumber) &&
+        Number(item.chapterNumber) === Number(chapter.chapterNumber)
+      );
+      if (pack?.id) {
+        const packDetail = await retrievalApi.getContextPack(projectId, pack.id).catch(() => null);
+        setCurrentContextPack(packDetail);
+      } else {
+        setCurrentContextPack(null);
+      }
+      setViewDrawerVisible(true);
+    } catch (error) {
+      message.error('加载章节内容失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const refreshCurrentChapterArtifacts = async (
+    bookId: string,
+    volumeNumber: number,
+    chapterNumber: number
+  ) => {
+    if (!projectId) return;
+    const chapterDetail = await chapterApi.getContent(projectId, bookId, volumeNumber, chapterNumber);
+    const versions = await chapterApi.getVersions(projectId, bookId, volumeNumber, chapterNumber).catch(() => []);
+    const reviews = await chapterApi.getReviews(projectId, bookId, volumeNumber, chapterNumber).catch(() => []);
+    setCurrentChapter(chapterDetail);
+    setChapterVersions(versions || []);
+    setChapterReviews(reviews || []);
+    setEditTitle(chapterDetail?.chapterTitle || '');
+    setEditContent(chapterDetail?.content || '');
+    setEditNote('');
+  };
+
+  const openRevisionModal = (chapter: Chapter) => {
+    setRevisionTarget(chapter);
+    revisionForm.setFieldsValue({
+      userInstruction: '',
+      maxIterations: 1,
+      includeBoundaryWarnings: true,
+      createVersionSnapshot: true,
+      sourceStage: chapter.isFinal ? 'final' : 'draft',
+    });
+    setRevisionModalVisible(true);
+  };
+
+  const handleRevision = async (values: any) => {
+    if (!projectId || !revisionTarget) return;
+
+    try {
+      setLoading(true);
+      const bookId = selectedBookId === 'default' ? (books[0]?.bookId || 'default') : selectedBookId;
+      const task: any = await chapterApi.revise(
+        projectId,
+        bookId,
+        revisionTarget.volumeNumber,
+        revisionTarget.chapterNumber,
+        {
+          userInstruction: values.userInstruction,
+          maxIterations: values.maxIterations,
+          includeBoundaryWarnings: values.includeBoundaryWarnings,
+          createVersionSnapshot: values.createVersionSnapshot,
+          sourceStage: values.sourceStage,
+        }
+      );
+      message.success(`返修任务已启动：${task?.id || ''}`);
+      setRevisionModalVisible(false);
+      setRevisionTarget(null);
+      revisionForm.resetFields();
+      setTimeout(() => loadChapters(), 5000);
+    } catch (error) {
+      message.error('启动返修失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRestoreVersion = async (version: any, targetStage: 'draft' | 'final') => {
+    if (!projectId || !currentChapter) return;
+
+    try {
+      setLoading(true);
+      const bookId = selectedBookId === 'default' ? (books[0]?.bookId || 'default') : selectedBookId;
+      const result: any = await chapterApi.restoreVersion(
+        projectId,
+        bookId,
+        currentChapter.volumeNumber,
+        currentChapter.chapterNumber,
+        version.id,
+        {
+          targetStage,
+          createVersionSnapshot: true,
+        }
+      );
+      message.success(`已恢复为${targetStage === 'final' ? '终稿' : '草稿'}：${result?.restoredPath || ''}`);
+      await refreshCurrentChapterArtifacts(bookId, currentChapter.volumeNumber, currentChapter.chapterNumber);
+      await loadChapters();
+    } catch (error) {
+      message.error('恢复历史版本失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openReviewModal = (chapter: Chapter | any, decision = 'approved') => {
+    setReviewTarget(chapter);
+    reviewForm.setFieldsValue({
+      decision,
+      sourceStage: chapter?.isFinal ? 'final' : 'draft',
+      reviewer: 'human',
+      feedback: '',
+    });
+    setReviewModalVisible(true);
+  };
+
+  const handleHumanReview = async (values: any) => {
+    if (!projectId || !reviewTarget) return;
+
+    try {
+      setLoading(true);
+      const bookId = selectedBookId === 'default' ? (books[0]?.bookId || 'default') : selectedBookId;
+      const targetVolume = reviewTarget.volumeNumber;
+      const targetChapter = reviewTarget.chapterNumber;
+      const result: any = await chapterApi.review(
+        projectId,
+        bookId,
+        targetVolume,
+        targetChapter,
+        {
+          decision: values.decision,
+          sourceStage: values.sourceStage,
+          reviewer: values.reviewer || 'human',
+          feedback: values.feedback || '',
+        }
+      );
+      const decisionText: Record<string, string> = {
+        approved: '已批准',
+        needs_revision: '已标记需修改',
+        rejected: '已驳回',
+      };
+      message.success(decisionText[result?.decision] || '审查状态已更新');
+      setReviewModalVisible(false);
+      setReviewTarget(null);
+      reviewForm.resetFields();
+
+      if (
+        currentChapter &&
+        Number(currentChapter.volumeNumber) === Number(targetVolume) &&
+        Number(currentChapter.chapterNumber) === Number(targetChapter)
+      ) {
+        await refreshCurrentChapterArtifacts(bookId, targetVolume, targetChapter);
+      }
+      await loadChapters();
+    } catch (error) {
+      message.error('保存人工审查失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveChapterEdit = async () => {
+    if (!projectId || !currentChapter) return;
+
+    try {
+      setLoading(true);
+      const bookId = selectedBookId === 'default' ? (books[0]?.bookId || 'default') : selectedBookId;
+      const result: any = await chapterApi.update(
+        projectId,
+        bookId,
+        currentChapter.volumeNumber,
+        currentChapter.chapterNumber,
+        {
+          chapterTitle: editTitle,
+          content: editContent,
+          editNote,
+          editor: 'human',
+          sourceStage: currentChapter.isFinal ? 'final' : 'draft',
+          createVersionSnapshot: true,
+          incrementVersion: true,
+        }
+      );
+      message.success(`章节已保存：v${result?.versionBefore || '-'} -> v${result?.versionAfter || '-'}`);
+      setEditingChapter(false);
+      await refreshCurrentChapterArtifacts(bookId, currentChapter.volumeNumber, currentChapter.chapterNumber);
+      await loadChapters();
+    } catch (error) {
+      message.error('保存章节失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleFinalize = async (chapter: Chapter) => {
+    if (!projectId) return;
+
+    try {
+      setLoading(true);
+      const bookId = selectedBookId === 'default' ? (books[0]?.bookId || 'default') : selectedBookId;
+      const result: any = await chapterApi.finalize(
+        projectId,
+        bookId,
+        chapter.volumeNumber,
+        chapter.chapterNumber,
+        {
+          triggerMemoryExtraction: true,
+          overwrite: true,
+          createVersionSnapshot: true,
+          finalizer: 'human',
+          finalizeNote: '前端发布终稿',
+        }
+      );
+      message.success(
+        result?.memoryTaskId
+          ? `终稿已发布：v${result?.versionAfter || '-'}，记忆摄取任务已启动：${result.memoryTaskId}`
+          : `终稿已发布：v${result?.versionAfter || '-'}`
+      );
+      await loadChapters();
+    } catch (error) {
+      message.error('发布终稿失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const columns = [
+    {
+      title: '卷号',
+      dataIndex: 'volumeNumber',
+      key: 'volumeNumber',
+      width: 80,
+    },
+    {
+      title: '章节号',
+      dataIndex: 'chapterNumber',
+      key: 'chapterNumber',
+      width: 80,
+    },
+    {
+      title: '章节标题',
+      dataIndex: 'chapterTitle',
+      key: 'chapterTitle',
+    },
+    {
+      title: '字数',
+      dataIndex: 'wordCount',
+      key: 'wordCount',
+      width: 100,
+      render: (count: number) => count ? `${count}字` : '-',
+    },
+    {
+      title: '质量评分',
+      dataIndex: 'qualityScore',
+      key: 'qualityScore',
+      width: 120,
+      render: (score: number) => {
+        if (!score) return '-';
+        const color = score >= 80 ? 'green' : score >= 60 ? 'orange' : 'red';
+        return <Tag color={color}>{score}分</Tag>;
+      },
+    },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      width: 100,
+      render: (status: string) => {
+        const statusMap: Record<string, { color: string; text: string; icon: any }> = {
+          generating: { color: 'processing', text: '生成中', icon: <ClockCircleOutlined /> },
+          completed: { color: 'success', text: '已完成', icon: <CheckCircleOutlined /> },
+          finalized: { color: 'gold', text: '已终稿', icon: <CheckCircleOutlined /> },
+          failed: { color: 'error', text: '失败', icon: null },
+        };
+        const statusInfo = statusMap[status] || { color: 'default', text: status, icon: null };
+        return (
+          <Tag color={statusInfo.color} icon={statusInfo.icon}>
+            {statusInfo.text}
+          </Tag>
+        );
+      },
+    },
+    {
+      title: '审查',
+      dataIndex: 'reviewStatus',
+      key: 'reviewStatus',
+      width: 110,
+      render: (_: string, record: Chapter) => {
+        const status = record.humanReviewStatus || record.reviewStatus;
+        const statusMap: Record<string, { color: string; text: string }> = {
+          approved: { color: 'green', text: '已批准' },
+          reviewed: { color: 'blue', text: '自动审查' },
+          restored: { color: 'cyan', text: '已恢复' },
+          manual_edited: { color: 'geekblue', text: '已手改' },
+          needs_revision: { color: 'orange', text: '需修改' },
+          rejected: { color: 'red', text: '已驳回' },
+          draft: { color: 'default', text: '草稿' },
+        };
+        const statusInfo = statusMap[status || ''] || { color: 'default', text: status || '-' };
+        return <Tag color={statusInfo.color}>{statusInfo.text}</Tag>;
+      },
+    },
+    {
+      title: '边界',
+      dataIndex: 'boundaryCheck',
+      key: 'boundaryCheck',
+      width: 110,
+      render: (boundaryCheck: any) => {
+        if (!boundaryCheck) return '-';
+        if (boundaryCheck.passed) return <Tag color="success">通过</Tag>;
+        const blocking = boundaryCheck.blockingErrors?.length || 0;
+        const warnings = boundaryCheck.warnings?.length || 0;
+        return <Tag color={blocking > 0 ? 'error' : 'warning'}>{blocking > 0 ? `${blocking}阻塞` : `${warnings}警告`}</Tag>;
+      },
+    },
+    {
+      title: '返修',
+      dataIndex: 'revisionHistory',
+      key: 'revisionHistory',
+      width: 90,
+      render: (history: any[]) => {
+        const count = history?.length || 0;
+        return count > 0 ? <Tag color="purple">{count}轮</Tag> : '-';
+      },
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'createdAt',
+      key: 'createdAt',
+      width: 180,
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 150,
+      render: (_: any, record: Chapter) => (
+        <Space size="small">
+          <Button
+            type="link"
+            icon={<EyeOutlined />}
+            onClick={() => handleView(record)}
+            disabled={!['completed', 'finalized'].includes(record.status)}
+          >
+            查看
+          </Button>
+          <Popconfirm
+            title="发布为终稿"
+            description="发布后会写入 final 目录，并自动启动记忆摄取任务。"
+            okText="发布"
+            cancelText="取消"
+            onConfirm={() => handleFinalize(record)}
+            disabled={record.isFinal || record.status === 'finalized'}
+          >
+            <Button
+              type="link"
+              icon={<SendOutlined />}
+              disabled={record.isFinal || record.status === 'finalized' || record.status !== 'completed'}
+            >
+              发布终稿
+            </Button>
+          </Popconfirm>
+          <Button
+            type="link"
+            icon={<EditOutlined />}
+            onClick={() => openRevisionModal(record)}
+            disabled={!['completed', 'finalized'].includes(record.status)}
+          >
+            返修
+          </Button>
+          <Button
+            type="link"
+            icon={<AuditOutlined />}
+            onClick={() => openReviewModal(record)}
+            disabled={!['completed', 'finalized'].includes(record.status)}
+          >
+            审查
+          </Button>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div>
+      <Card
+        title="章节创作"
+        extra={
+          <Space>
+            {books.length > 0 && (
+              <Select
+                value={selectedBookId}
+                style={{ width: 220 }}
+                onChange={setSelectedBookId}
+                options={[
+                  { label: '最新书籍', value: 'default' },
+                  ...books.map((book) => ({ label: book.bookTitle || book.bookId, value: book.bookId })),
+                ]}
+              />
+            )}
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => setGenerateModalVisible(true)}
+              disabled={books.length === 0}
+            >
+              生成章节
+            </Button>
+          </Space>
+        }
+      >
+        {books.length === 0 ? (
+          <Empty description="请先生成大纲" />
+        ) : (
+          <Table
+            columns={columns}
+            dataSource={chapters}
+            loading={loading}
+            rowKey="id"
+          />
+        )}
+      </Card>
+
+      <Modal
+        title="生成章节"
+        open={generateModalVisible}
+        onOk={() => form.submit()}
+        onCancel={() => {
+          setGenerateModalVisible(false);
+          form.resetFields();
+        }}
+        confirmLoading={loading}
+        width={600}
+      >
+        <Form
+          form={form}
+          layout="vertical"
+          onFinish={handleGenerate}
+          initialValues={{
+            targetWordCount: 3000,
+            useProjectSkills: true,
+            usePreviousContext: true,
+            autoReview: true,
+          }}
+        >
+          <Form.Item
+            name="volumeNumber"
+            label="卷号"
+            rules={[{ required: true, message: '请输入卷号' }]}
+          >
+            <InputNumber min={1} style={{ width: '100%' }} placeholder="例如：1" />
+          </Form.Item>
+
+          <Form.Item
+            name="chapterNumber"
+            label="章节号"
+            rules={[{ required: true, message: '请输入章节号' }]}
+          >
+            <InputNumber min={1} style={{ width: '100%' }} placeholder="例如：1" />
+          </Form.Item>
+
+          <Form.Item
+            name="chapterTitle"
+            label="章节标题（可选）"
+          >
+            <Input placeholder="留空则使用大纲中的标题" />
+          </Form.Item>
+
+          <Form.Item
+            name="targetWordCount"
+            label="目标字数"
+          >
+            <InputNumber min={1000} max={5000} style={{ width: '100%' }} />
+          </Form.Item>
+
+          <Form.Item
+            name="useProjectSkills"
+            label="使用项目Skills指导"
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+
+          <Form.Item
+            name="usePreviousContext"
+            label="使用前文上下文"
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+
+          <Form.Item
+            name="autoReview"
+            label="自动审查"
+            valuePropName="checked"
+          >
+            <Switch />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={revisionTarget ? `返修第${revisionTarget.chapterNumber}章` : '章节返修'}
+        open={revisionModalVisible}
+        onOk={() => revisionForm.submit()}
+        onCancel={() => {
+          setRevisionModalVisible(false);
+          setRevisionTarget(null);
+          revisionForm.resetFields();
+        }}
+        confirmLoading={loading}
+        width={620}
+      >
+        <Form
+          form={revisionForm}
+          layout="vertical"
+          onFinish={handleRevision}
+          initialValues={{
+            maxIterations: 1,
+            includeBoundaryWarnings: true,
+            createVersionSnapshot: true,
+            sourceStage: 'draft',
+          }}
+        >
+          <Form.Item name="sourceStage" label="返修来源">
+            <Select
+              options={[
+                { label: '草稿', value: 'draft' },
+                { label: '终稿', value: 'final' },
+                { label: '自动选择', value: 'auto' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item
+            name="userInstruction"
+            label="返修要求"
+            rules={[{ required: true, message: '请输入返修要求' }]}
+          >
+            <TextArea rows={4} placeholder="例如：删除越界内容，加强章末钩子，保留当前主线节奏" />
+          </Form.Item>
+          <Form.Item name="maxIterations" label="最大返修轮数">
+            <InputNumber min={1} max={3} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="includeBoundaryWarnings" label="处理边界警告" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item name="createVersionSnapshot" label="返修前归档版本" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={reviewTarget ? `人工审查第${reviewTarget.chapterNumber}章` : '人工审查'}
+        open={reviewModalVisible}
+        onOk={() => reviewForm.submit()}
+        onCancel={() => {
+          setReviewModalVisible(false);
+          setReviewTarget(null);
+          reviewForm.resetFields();
+        }}
+        confirmLoading={loading}
+        width={600}
+      >
+        <Form
+          form={reviewForm}
+          layout="vertical"
+          onFinish={handleHumanReview}
+          initialValues={{
+            decision: 'approved',
+            sourceStage: 'draft',
+            reviewer: 'human',
+          }}
+        >
+          <Form.Item name="decision" label="审查结论" rules={[{ required: true, message: '请选择审查结论' }]}>
+            <Select
+              options={[
+                { label: '批准', value: 'approved' },
+                { label: '要求修改', value: 'needs_revision' },
+                { label: '驳回', value: 'rejected' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="sourceStage" label="审查对象">
+            <Select
+              options={[
+                { label: '自动选择', value: 'auto' },
+                { label: '草稿', value: 'draft' },
+                { label: '终稿', value: 'final' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="reviewer" label="审查人">
+            <Input placeholder="human" />
+          </Form.Item>
+          <Form.Item name="feedback" label="审查反馈">
+            <TextArea rows={4} placeholder="记录批准理由、需修改点或驳回原因" />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Drawer
+        title={currentChapter ? `第${currentChapter.chapterNumber}章 ${currentChapter.chapterTitle}` : '章节详情'}
+        width={800}
+        open={viewDrawerVisible}
+        onClose={() => {
+          setViewDrawerVisible(false);
+          setCurrentChapter(null);
+          setCurrentContextPack(null);
+          setEditingChapter(false);
+          setEditTitle('');
+          setEditContent('');
+          setEditNote('');
+        }}
+      >
+        {currentChapter && (
+          <Space direction="vertical" size="large" style={{ width: '100%' }}>
+            {/* 基本信息 */}
+            <Card title="基本信息" size="small">
+              <Descriptions column={2} size="small">
+                <Descriptions.Item label="卷号">{currentChapter.volumeNumber}</Descriptions.Item>
+                <Descriptions.Item label="章节号">{currentChapter.chapterNumber}</Descriptions.Item>
+                <Descriptions.Item label="字数">{currentChapter.wordCount}字</Descriptions.Item>
+                <Descriptions.Item label="阶段">
+                  {currentChapter.isFinal ? <Tag color="gold">终稿</Tag> : <Tag>草稿</Tag>}
+                </Descriptions.Item>
+                <Descriptions.Item label="质量评分">
+                  {currentChapter.qualityScore ? `${currentChapter.qualityScore}分` : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="返修次数">
+                  {currentChapter.revisionHistory?.length || 0}
+                </Descriptions.Item>
+                <Descriptions.Item label="人工审查">
+                  {(() => {
+                    const status = currentChapter.humanReviewStatus || currentChapter.reviewStatus;
+                    const statusMap: Record<string, { color: string; text: string }> = {
+                      approved: { color: 'green', text: '已批准' },
+                      reviewed: { color: 'blue', text: '自动审查' },
+                      restored: { color: 'cyan', text: '已恢复' },
+                      manual_edited: { color: 'geekblue', text: '已手改' },
+                      needs_revision: { color: 'orange', text: '需修改' },
+                      rejected: { color: 'red', text: '已驳回' },
+                    };
+                    const statusInfo = statusMap[status || ''] || { color: 'default', text: status || '-' };
+                    return <Tag color={statusInfo.color}>{statusInfo.text}</Tag>;
+                  })()}
+                </Descriptions.Item>
+                {currentChapter.humanReviewedAt && (
+                  <Descriptions.Item label="审查时间">{currentChapter.humanReviewedAt}</Descriptions.Item>
+                )}
+                {currentChapter.finalizedAt && (
+                  <Descriptions.Item label="终稿时间">{currentChapter.finalizedAt}</Descriptions.Item>
+                )}
+                {currentChapter.path && (
+                  <Descriptions.Item label="文件路径" span={2}>{currentChapter.path}</Descriptions.Item>
+                )}
+              </Descriptions>
+              <Space style={{ marginTop: 12 }}>
+                <Button
+                  size="small"
+                  icon={<AuditOutlined />}
+                  onClick={() => openReviewModal(currentChapter, 'approved')}
+                >
+                  批准
+                </Button>
+                <Button
+                  size="small"
+                  onClick={() => openReviewModal(currentChapter, 'needs_revision')}
+                >
+                  要求修改
+                </Button>
+                <Button
+                  size="small"
+                  danger
+                  onClick={() => openReviewModal(currentChapter, 'rejected')}
+                >
+                  驳回
+                </Button>
+              </Space>
+            </Card>
+
+            {(currentChapter.humanReviewHistory || []).length > 0 && (
+              <Card title="人工审查历史" size="small">
+                <List
+                  size="small"
+                  dataSource={currentChapter.humanReviewHistory}
+                  renderItem={(item: any) => (
+                    <List.Item>
+                      <Space direction="vertical" size={0}>
+                        <Space>
+                          <Tag color={item.decision === 'approved' ? 'green' : item.decision === 'rejected' ? 'red' : 'orange'}>
+                            {item.decision}
+                          </Tag>
+                          <span>{item.reviewer || 'human'}</span>
+                          <span>{item.reviewedAt || item.reviewed_at}</span>
+                        </Space>
+                        {item.feedback && <span>{item.feedback}</span>}
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+              </Card>
+            )}
+
+            {/* 审查结果 */}
+            {currentChapter.review && (
+              <Card title="审查结果" size="small">
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <div>
+                    <strong>总分：</strong>
+                    {currentChapter.review.totalScore}分 / 50分
+                  </div>
+                  <Progress
+                    percent={(currentChapter.review.totalScore / 50) * 100}
+                    strokeColor={{
+                      '0%': '#108ee9',
+                      '100%': '#87d068',
+                    }}
+                  />
+                  <Descriptions column={1} size="small" bordered>
+                    <Descriptions.Item label="风格一致性">
+                      {currentChapter.review.styleConsistency}/10
+                    </Descriptions.Item>
+                    <Descriptions.Item label="技巧运用">
+                      {currentChapter.review.skillApplication}/10
+                    </Descriptions.Item>
+                    <Descriptions.Item label="质量水平">
+                      {currentChapter.review.qualityLevel}/10
+                    </Descriptions.Item>
+                    <Descriptions.Item label="连续性">
+                      {currentChapter.review.continuity}/10
+                    </Descriptions.Item>
+                    <Descriptions.Item label="结构完整性">
+                      {currentChapter.review.structure}/10
+                    </Descriptions.Item>
+                  </Descriptions>
+                </Space>
+              </Card>
+            )}
+
+            {currentChapter.boundaryCheck && (
+              <Card title="章节边界检查" size="small">
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Alert
+                    type={currentChapter.boundaryCheck.passed ? 'success' : 'error'}
+                    showIcon
+                    message={currentChapter.boundaryCheck.passed ? '边界检查通过' : '发现章节越界风险'}
+                    description={`阻塞 ${currentChapter.boundaryCheck.blockingErrors?.length || 0} 项，警告 ${currentChapter.boundaryCheck.warnings?.length || 0} 项，提示 ${currentChapter.boundaryCheck.info?.length || 0} 项`}
+                  />
+                  {(currentChapter.boundaryCheck.blockingErrors || []).map((item: any, index: number) => (
+                    <Alert
+                      key={`blocking-${index}`}
+                      type="error"
+                      showIcon
+                      message={item.message}
+                      description={item.suggestion || item.evidence}
+                    />
+                  ))}
+                  {(currentChapter.boundaryCheck.warnings || []).map((item: any, index: number) => (
+                    <Alert
+                      key={`warning-${index}`}
+                      type="warning"
+                      showIcon
+                      message={item.message}
+                      description={item.suggestion || item.evidence}
+                    />
+                  ))}
+                  {currentChapter.boundaryCheck.boundaryControl && (
+                    <Descriptions column={1} size="small" bordered>
+                      <Descriptions.Item label="本章核心目标">
+                        {currentChapter.boundaryCheck.boundaryControl.coreGoal || '-'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="停止点">
+                        {currentChapter.boundaryCheck.boundaryControl.stopPoint || '-'}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="章末钩子">
+                        {currentChapter.boundaryCheck.boundaryControl.endingHook || '-'}
+                      </Descriptions.Item>
+                    </Descriptions>
+                  )}
+                </Space>
+              </Card>
+            )}
+
+            {(currentChapter.revisionHistory || []).length > 0 && (
+              <Card title="返修历史" size="small">
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {currentChapter.revisionHistory.map((item: any, index: number) => (
+                    <Card key={`revision-${index}`} size="small">
+                      <Descriptions column={1} size="small">
+                        <Descriptions.Item label="轮次">第{item.iteration}轮</Descriptions.Item>
+                        <Descriptions.Item label="时间">{item.revisedAt || item.revised_at}</Descriptions.Item>
+                        <Descriptions.Item label="触发类型">
+                          {(item.triggerTypes || item.trigger_types || []).map((type: string) => (
+                            <Tag key={type} color="purple">{type}</Tag>
+                          ))}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="字数变化">
+                          {`${item.wordCountBefore || item.word_count_before} -> ${item.wordCountAfter || item.word_count_after}`}
+                        </Descriptions.Item>
+                      </Descriptions>
+                    </Card>
+                  ))}
+                </Space>
+              </Card>
+            )}
+
+            {(chapterVersions.length > 0 || chapterReviews.length > 0) && (
+              <Card title="版本与审查归档" size="small">
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {chapterVersions.length > 0 && (
+                    <Card title="历史版本" size="small">
+                      <List
+                        size="small"
+                        dataSource={chapterVersions}
+                        renderItem={(item: any) => (
+                          <List.Item
+                            actions={[
+                              <Popconfirm
+                                key="restore-draft"
+                                title="恢复为草稿"
+                                description="会先归档当前草稿，再把该版本恢复为新的草稿。"
+                                okText="恢复"
+                                cancelText="取消"
+                                onConfirm={() => handleRestoreVersion(item, 'draft')}
+                              >
+                                <Button type="link" size="small">恢复为草稿</Button>
+                              </Popconfirm>,
+                              <Popconfirm
+                                key="restore-final"
+                                title="恢复为终稿"
+                                description="会先归档当前终稿，再把该版本发布为新的终稿。"
+                                okText="恢复"
+                                cancelText="取消"
+                                onConfirm={() => handleRestoreVersion(item, 'final')}
+                              >
+                                <Button type="link" size="small">恢复为终稿</Button>
+                              </Popconfirm>,
+                            ]}
+                          >
+                            <Space direction="vertical" size={0}>
+                              <Space>
+                                <HistoryOutlined />
+                                <strong>{item.id}</strong>
+                                <Tag>v{item.version}</Tag>
+                                <span>{item.wordCount}字</span>
+                              </Space>
+                              <span>{item.path}</span>
+                            </Space>
+                          </List.Item>
+                        )}
+                      />
+                    </Card>
+                  )}
+                  {chapterReviews.length > 0 && (
+                    <Card title="返修/审查报告" size="small">
+                      <List
+                        size="small"
+                        dataSource={chapterReviews}
+                        renderItem={(item: any) => (
+                          <List.Item>
+                            <Space direction="vertical" size={0}>
+                              <Space>
+                                <Tag color="blue">{item.reviewType || 'review'}</Tag>
+                                <strong>{item.id}</strong>
+                                <span>{item.updatedAt}</span>
+                              </Space>
+                              <span>
+                                {`v${item.versionBefore || '-'} -> v${item.versionAfter || '-'}，${item.wordCountBefore || 0} -> ${item.wordCountAfter || 0}字`}
+                              </span>
+                              <span>{item.path}</span>
+                            </Space>
+                          </List.Item>
+                        )}
+                      />
+                    </Card>
+                  )}
+                </Space>
+              </Card>
+            )}
+
+            {currentContextPack && (
+              <Card title="检索上下文包" size="small">
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Alert
+                    type="info"
+                    showIcon
+                    message={currentContextPack.path}
+                    description={`索引文档 ${currentContextPack.sources?.documents_indexed || 0} 个，关键词结果 ${currentContextPack.sources?.keyword_results || 0} 条，图谱节点 ${currentContextPack.sources?.graph_nodes || 0} 个`}
+                  />
+                  {(currentContextPack.retrieval_results || []).slice(0, 5).map((item: any) => (
+                    <Card key={item.doc_id} size="small">
+                      <Space direction="vertical" style={{ width: '100%' }}>
+                        <Space>
+                          <Tag color="blue">{item.source_type}</Tag>
+                          <strong>{item.title}</strong>
+                          <Tag>{item.score}</Tag>
+                        </Space>
+                        <div>{item.snippet}</div>
+                      </Space>
+                    </Card>
+                  ))}
+                </Space>
+              </Card>
+            )}
+
+            {/* 正文内容 */}
+            <Card
+              title="正文内容"
+              size="small"
+              extra={
+                editingChapter ? (
+                  <Space>
+                    <Button
+                      size="small"
+                      icon={<SaveOutlined />}
+                      type="primary"
+                      loading={loading}
+                      onClick={handleSaveChapterEdit}
+                    >
+                      保存
+                    </Button>
+                    <Button
+                      size="small"
+                      icon={<CloseOutlined />}
+                      onClick={() => {
+                        setEditingChapter(false);
+                        setEditTitle(currentChapter.chapterTitle || '');
+                        setEditContent(currentChapter.content || '');
+                        setEditNote('');
+                      }}
+                    >
+                      取消
+                    </Button>
+                  </Space>
+                ) : (
+                  <Button
+                    size="small"
+                    icon={<EditOutlined />}
+                    onClick={() => {
+                      setEditingChapter(true);
+                      setEditTitle(currentChapter.chapterTitle || '');
+                      setEditContent(currentChapter.content || '');
+                      setEditNote('');
+                    }}
+                  >
+                    编辑
+                  </Button>
+                )
+              }
+            >
+              {editingChapter ? (
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  <Input
+                    value={editTitle}
+                    onChange={(event) => setEditTitle(event.target.value)}
+                    placeholder="章节标题"
+                  />
+                  <TextArea
+                    value={editNote}
+                    onChange={(event) => setEditNote(event.target.value)}
+                    rows={2}
+                    placeholder="编辑说明"
+                  />
+                  <TextArea
+                    value={editContent}
+                    onChange={(event) => setEditContent(event.target.value)}
+                    rows={22}
+                    style={{ fontFamily: 'inherit' }}
+                  />
+                </Space>
+              ) : (
+                <TextArea
+                  value={currentChapter.content}
+                  rows={20}
+                  readOnly
+                  style={{ fontFamily: 'inherit' }}
+                />
+              )}
+            </Card>
+          </Space>
+        )}
+      </Drawer>
+    </div>
+  );
+};
+
+export default ChapterWriter;

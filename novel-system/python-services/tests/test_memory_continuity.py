@@ -200,3 +200,6 @@ async def test_memory_audit_detects_conflicts_and_writes_resolution_plan(tmp_pat
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["resolution_plan"]
     assert report["memory_counts"]["characters"] == 3
+    fixes = [issue.get("fix") for issue in report["issues"] if issue.get("fix")]
+    assert any(fix["action"] == "set_field" and fix["memory_file"] == "characters.json" for fix in fixes)
+    assert any(fix["action"] == "sort_by_chapter" and fix["memory_file"] == "timeline.json" for fix in fixes)

@@ -154,6 +154,20 @@ public class MemoryController {
         ));
     }
 
+    @PostMapping("/audits/{reportId}/issues/{issueIndex}/fix")
+    public ResponseEntity<Map<String, Object>> applyAuditIssueFix(
+            @PathVariable String projectId,
+            @PathVariable String reportId,
+            @PathVariable Integer issueIndex,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(memoryService.applyAuditIssueFix(
+            projectId,
+            reportId,
+            issueIndex,
+            request == null ? Map.of() : request
+        ));
+    }
+
     @PostMapping("/audit")
     public ResponseEntity<TaskResponse> auditMemory(
             @PathVariable String projectId,

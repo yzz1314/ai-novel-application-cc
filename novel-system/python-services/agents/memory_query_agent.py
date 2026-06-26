@@ -507,6 +507,13 @@ class MemoryQueryAgent(BaseAgent):
                     f"{name} first_mentioned={first_mentioned}，但 appearances 最早为第 {min(appearances)} 章。",
                     [first_mentioned, min(appearances)],
                     "将 first_mentioned 调整为最早出场章节，或删除误写的出场记录。",
+                    fix={
+                        "action": "set_field",
+                        "memory_file": "characters.json",
+                        "match": self._memory_match(character, ["character_id", "name"]),
+                        "field": "first_mentioned",
+                        "value": min(appearances),
+                    },
                 ))
             if last_updated is not None and appearances and last_updated < max(appearances):
                 issues.append(self._issue(
@@ -516,6 +523,13 @@ class MemoryQueryAgent(BaseAgent):
                     f"{name} last_updated={last_updated}，但 appearances 已到第 {max(appearances)} 章。",
                     [last_updated, max(appearances)],
                     "把 last_updated 更新到最新出场章节，保证章节上下文读取最新状态。",
+                    fix={
+                        "action": "set_field",
+                        "memory_file": "characters.json",
+                        "match": self._memory_match(character, ["character_id", "name"]),
+                        "field": "last_updated",
+                        "value": max(appearances),
+                    },
                 ))
             for target in (character.get("relationships") or {}).keys():
                 if target and target not in known_refs:
@@ -555,6 +569,13 @@ class MemoryQueryAgent(BaseAgent):
                     f"{title} 标记为 {status}，但没有 resolved_chapter。",
                     [set_chapter],
                     "补充 resolved_chapter 和解决说明，方便后续章节避免重复解谜。",
+                    fix={
+                        "action": "set_field",
+                        "memory_file": "suspenses.json",
+                        "match": self._memory_match(suspense, ["suspense_id", "title"]),
+                        "field": "resolved_chapter",
+                        "value": set_chapter,
+                    },
                 ))
             if status in active_statuses and resolved_chapter is not None:
                 issues.append(self._issue(
@@ -564,6 +585,13 @@ class MemoryQueryAgent(BaseAgent):
                     f"{title} 仍标记为 {status}，但已有 resolved_chapter={resolved_chapter}。",
                     [set_chapter, resolved_chapter],
                     "把状态改为 resolved，或移除误写的 resolved_chapter。",
+                    fix={
+                        "action": "set_field",
+                        "memory_file": "suspenses.json",
+                        "match": self._memory_match(suspense, ["suspense_id", "title"]),
+                        "field": "status",
+                        "value": "resolved",
+                    },
                 ))
         return issues
 
@@ -592,6 +620,11 @@ class MemoryQueryAgent(BaseAgent):
                     f"{title} 位于第 {chapter} 章，但前一条 {previous_title} 是第 {previous_chapter} 章。",
                     [chapter, previous_chapter],
                     "按章节重新排序 timeline.json，或修正事件章节。",
+                    fix={
+                        "action": "sort_by_chapter",
+                        "memory_file": "timeline.json",
+                        "field": "chapter",
+                    },
                 ))
             previous_chapter = chapter
             previous_title = title
@@ -641,6 +674,14 @@ class MemoryQueryAgent(BaseAgent):
                 if alias:
                     refs.add(str(alias))
         return refs
+
+    def _memory_match(self, item: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
+        match = {}
+        for key in keys:
+            value = item.get(key)
+            if value not in (None, ""):
+                match[key] = value
+        return match
 
     def _future_records(self, records: Any, chapter_number: int) -> List[Dict[str, Any]]:
         if not isinstance(records, list):
@@ -693,7 +734,8 @@ class MemoryQueryAgent(BaseAgent):
         title: str,
         description: str,
         conflict_chapters: List[Optional[int]],
-        suggestion: str
+        suggestion: str,
+        fix: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         clean_chapters = [
             chapter for chapter in conflict_chapters
@@ -714,7 +756,8 @@ class MemoryQueryAgent(BaseAgent):
             description=description,
             conflict_chapters=clean_chapters,
             conflict_details=description,
-            suggestion=suggestion
+            suggestion=suggestion,
+            fix=fix
         ).dict()
 
     def _issue_id(

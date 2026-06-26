@@ -290,6 +290,8 @@ export const memoryApi = {
     request(api.get(`/projects/${projectId}/memory/audits/${reportId}`)),
   resolveAuditIssue: (projectId: string, reportId: string, issueIndex: number, data?: any) =>
     request(api.post(`/projects/${projectId}/memory/audits/${reportId}/issues/${issueIndex}/resolution`, data || {})),
+  applyAuditIssueFix: (projectId: string, reportId: string, issueIndex: number, data?: any) =>
+    request(api.post(`/projects/${projectId}/memory/audits/${reportId}/issues/${issueIndex}/fix`, data || {})),
 }
 
 export const graphApi = {

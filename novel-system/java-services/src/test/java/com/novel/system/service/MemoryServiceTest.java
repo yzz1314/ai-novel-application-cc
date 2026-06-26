@@ -104,6 +104,78 @@ class MemoryServiceTest {
             .contains("\"actor\" : \"reviewer\"");
     }
 
+    @Test
+    void applyAuditIssueFixUpdatesMemoryAndMarksIssueResolved() throws Exception {
+        writeProjectFile("memory/characters.json", """
+            [
+              {
+                "character_id": "char_lin",
+                "name": "Lin Yuan",
+                "appearances": [1, 3],
+                "first_mentioned": 1,
+                "last_updated": 1
+              }
+            ]
+            """);
+        writeProjectFile("memory/audits/memory_audit_test.json", """
+            {
+              "project_id": "project_memory_versions",
+              "book_id": "default",
+              "issue_count": 1,
+              "issues": [
+                {
+                  "issue_id": "issue_last_updated",
+                  "issue_type": "character",
+                  "severity": "minor",
+                  "title": "last_updated stale",
+                  "description": "last_updated is behind appearances",
+                  "suggestion": "update last_updated",
+                  "fix": {
+                    "action": "set_field",
+                    "memory_file": "characters.json",
+                    "match": {
+                      "character_id": "char_lin"
+                    },
+                    "field": "last_updated",
+                    "value": 3
+                  }
+                }
+              ]
+            }
+            """);
+
+        Map<String, Object> response = memoryService.applyAuditIssueFix(
+            PROJECT_ID,
+            "memory_audit_test",
+            0,
+            Map.of("actor", "tester", "note", "apply deterministic fix")
+        );
+
+        assertThat(response)
+            .containsEntry("reportId", "memory_audit_test")
+            .containsKey("beforeVersionId")
+            .containsKey("eventPath");
+        assertThat(Files.readString(projectRoot().resolve("memory/characters.json"), StandardCharsets.UTF_8))
+            .contains("\"last_updated\" : 3");
+
+        String report = Files.readString(projectRoot().resolve("memory/audits/memory_audit_test.json"), StandardCharsets.UTF_8);
+        assertThat(report)
+            .contains("\"resolution_status\" : \"resolved\"")
+            .contains("\"fix_applied\" : true")
+            .contains("\"changedCount\" : 1");
+
+        String beforeVersionPath = String.valueOf(response.get("beforeVersionPath"));
+        assertThat(Files.readString(projectRoot().resolve(beforeVersionPath), StandardCharsets.UTF_8))
+            .contains("last_updated")
+            .contains("1")
+            .contains("\"reason\" : \"before_memory_audit_fix\"");
+
+        String eventPath = String.valueOf(response.get("eventPath"));
+        assertThat(Files.readString(projectRoot().resolve(eventPath), StandardCharsets.UTF_8))
+            .contains("\"event_type\" : \"memory_audit_fix\"")
+            .contains("\"actor\" : \"tester\"");
+    }
+
     private Path projectRoot() {
         return tempDir.resolve("projects").resolve(PROJECT_ID);
     }

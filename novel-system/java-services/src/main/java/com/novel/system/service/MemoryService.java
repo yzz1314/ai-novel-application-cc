@@ -403,6 +403,115 @@ public class MemoryService {
         return resolveReportIssue(projectId, "audit", reportId, issueIndex, request);
     }
 
+    public Map<String, Object> applyAuditIssueFix(
+            String projectId,
+            String reportId,
+            Integer issueIndex,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        validateId(reportId, "reportId");
+        if (issueIndex == null || issueIndex < 0) {
+            throw new IllegalArgumentException("非法issueIndex: " + issueIndex);
+        }
+
+        Path reportPath = reportFile(projectId, "audit", reportId);
+        if (!Files.exists(reportPath)) {
+            throw new ResourceNotFoundException("记忆审计报告不存在: " + reportId);
+        }
+
+        Map<String, Object> report = readJsonMap(reportPath);
+        List<Map<String, Object>> issues = normalizeIssues(report);
+        if (issueIndex >= issues.size()) {
+            throw new IllegalArgumentException("issueIndex超出范围: " + issueIndex);
+        }
+
+        Map<String, Object> issue = issues.get(issueIndex);
+        Map<String, Object> fix = asMap(issue.get("fix"));
+        if (fix.isEmpty()) {
+            throw new IllegalArgumentException("该记忆审计问题没有可自动应用的修复");
+        }
+
+        Map<String, Object> beforeVersion = createMemoryVersion(projectId, Map.of(
+            "reason", "before_memory_audit_fix",
+            "actor", stringValue(requestValue(request, "actor"), "system"),
+            "note", "Before applying memory audit fix " + reportId + "#" + issueIndex
+        ));
+
+        Map<String, Object> fixResult = applyMemoryFix(projectId, fix);
+        String now = LocalDateTime.now().toString();
+        String actor = stringValue(firstPresent(
+            requestValue(request, "actor"),
+            requestValue(request, "reviewer"),
+            requestValue(request, "user")
+        ), "human");
+
+        Map<String, Object> resolution = new LinkedHashMap<>();
+        resolution.put("status", "resolved");
+        resolution.put("action", "applied_fix");
+        resolution.put("note", stringValue(requestValue(request, "note"), ""));
+        resolution.put("actor", actor);
+        resolution.put("updated_at", now);
+        resolution.put("updatedAt", now);
+        resolution.put("resolved_at", now);
+        resolution.put("fix", fix);
+        resolution.put("fix_result", fixResult);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> history = issue.get("resolution_history") instanceof List<?> rawHistory
+            ? new ArrayList<>((List<Map<String, Object>>) rawHistory)
+            : new ArrayList<>();
+        Map<String, Object> historyItem = new LinkedHashMap<>(resolution);
+        historyItem.put("issue_index", issueIndex);
+        historyItem.put("issue_id", issue.get("issue_id"));
+        history.add(historyItem);
+
+        issue.put("resolution", resolution);
+        issue.put("resolution_status", "resolved");
+        issue.put("resolutionStatus", "resolved");
+        issue.put("resolution_history", history);
+        issue.put("resolved", true);
+        issue.put("fix_applied", true);
+        issue.put("fixApplied", true);
+        issue.put("fix_result", fixResult);
+        issue.put("fixResult", fixResult);
+        issue.put("fix_applied_at", now);
+        issue.put("fixAppliedAt", now);
+
+        Map<String, Object> summary = resolutionSummary(report);
+        report.put("resolution_summary", summary);
+        report.put("resolutionSummary", summary);
+        report.put("resolution_updated_at", now);
+        report.put("resolutionUpdatedAt", now);
+        writeJson(reportPath, report);
+
+        Path eventFile = saveMemoryFixEvent(
+            projectId,
+            reportId,
+            issueIndex,
+            issue,
+            fix,
+            fixResult,
+            beforeVersion,
+            actor,
+            stringValue(requestValue(request, "note"), "")
+        );
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("reportId", reportId);
+        response.put("issueIndex", issueIndex);
+        response.put("issue", issue);
+        response.put("fix", fix);
+        response.put("fixResult", fixResult);
+        response.put("resolution", resolution);
+        response.put("resolutionSummary", summary);
+        response.put("beforeVersionId", beforeVersion.get("id"));
+        response.put("beforeVersionPath", beforeVersion.get("path"));
+        response.put("eventPath", relative(projectId, eventFile));
+        response.put("reportPath", relative(projectId, reportPath));
+        return response;
+    }
+
     public Task auditMemory(String projectId, Map<String, Object> request) {
         projectService.getProject(projectId);
         Map<String, Object> parameters = new LinkedHashMap<>(request == null ? Map.of() : request);
@@ -752,6 +861,160 @@ public class MemoryService {
         return file;
     }
 
+    private Map<String, Object> applyMemoryFix(String projectId, Map<String, Object> fix) {
+        String action = stringValue(fix.get("action"), "");
+        String memoryFile = stringValue(fix.get("memory_file"), "");
+        if (!VERSIONED_MEMORY_FILES.contains(memoryFile) || !memoryFile.endsWith(".json")) {
+            throw new IllegalArgumentException("不支持自动修复的记忆文件: " + memoryFile);
+        }
+
+        Path file = memoryDir(projectId).resolve(memoryFile);
+        List<Map<String, Object>> records = new ArrayList<>(readJsonList(file));
+        if (records.isEmpty() && !Files.exists(file)) {
+            throw new ResourceNotFoundException("记忆文件不存在: " + memoryFile);
+        }
+
+        return switch (action) {
+            case "set_field" -> applySetFieldFix(file, records, fix);
+            case "sort_by_chapter" -> applySortByChapterFix(file, records, fix);
+            default -> throw new IllegalArgumentException("不支持的记忆自动修复动作: " + action);
+        };
+    }
+
+    private Map<String, Object> applySetFieldFix(Path file, List<Map<String, Object>> records, Map<String, Object> fix) {
+        Map<String, Object> match = asMap(fix.get("match"));
+        String field = stringValue(fix.get("field"), "");
+        if (field.isBlank()) {
+            throw new IllegalArgumentException("记忆自动修复缺少field");
+        }
+
+        List<Map<String, Object>> changed = new ArrayList<>();
+        for (Map<String, Object> record : records) {
+            if (!matchesMemoryRecord(record, match)) {
+                continue;
+            }
+            Object previous = record.get(field);
+            Object next = fix.get("value");
+            if (!valuesEqual(previous, next)) {
+                record.put(field, next);
+                Map<String, Object> change = new LinkedHashMap<>();
+                change.put("field", field);
+                change.put("previous", previous);
+                change.put("next", next);
+                change.put("match", match);
+                changed.add(change);
+            }
+        }
+
+        if (changed.isEmpty()) {
+            throw new IllegalArgumentException("未找到需要更新的记忆条目");
+        }
+
+        writeJsonList(file, records);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("action", "set_field");
+        result.put("memoryFile", file.getFileName().toString());
+        result.put("changedCount", changed.size());
+        result.put("changes", changed);
+        return result;
+    }
+
+    private Map<String, Object> applySortByChapterFix(Path file, List<Map<String, Object>> records, Map<String, Object> fix) {
+        String field = stringValue(fix.get("field"), "chapter");
+        List<Map<String, Object>> before = new ArrayList<>(records);
+        records.sort(Comparator
+            .comparing((Map<String, Object> item) -> numericSortValue(item.get(field)))
+            .thenComparing(item -> stringValue(firstPresent(item.get("event_id"), item.get("title")), "")));
+        if (before.equals(records)) {
+            throw new IllegalArgumentException("记忆条目已经按章节排序，无需修复");
+        }
+
+        writeJsonList(file, records);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("action", "sort_by_chapter");
+        result.put("memoryFile", file.getFileName().toString());
+        result.put("field", field);
+        result.put("changedCount", records.size());
+        result.put("firstChapter", records.isEmpty() ? null : records.get(0).get(field));
+        result.put("lastChapter", records.isEmpty() ? null : records.get(records.size() - 1).get(field));
+        return result;
+    }
+
+    private boolean matchesMemoryRecord(Map<String, Object> record, Map<String, Object> match) {
+        if (match.isEmpty()) {
+            return false;
+        }
+        for (Map.Entry<String, Object> entry : match.entrySet()) {
+            if (!valuesEqual(record.get(entry.getKey()), entry.getValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private int numericSortValue(Object value) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value));
+        } catch (Exception ignored) {
+            return Integer.MAX_VALUE;
+        }
+    }
+
+    private boolean valuesEqual(Object left, Object right) {
+        if (left == null || right == null) {
+            return left == right;
+        }
+        if (left instanceof Number || right instanceof Number) {
+            try {
+                return Double.compare(Double.parseDouble(String.valueOf(left)), Double.parseDouble(String.valueOf(right))) == 0;
+            } catch (NumberFormatException ignored) {
+                // Fall back to string comparison.
+            }
+        }
+        return String.valueOf(left).equals(String.valueOf(right));
+    }
+
+    private Path saveMemoryFixEvent(
+            String projectId,
+            String reportId,
+            Integer issueIndex,
+            Map<String, Object> issue,
+            Map<String, Object> fix,
+            Map<String, Object> fixResult,
+            Map<String, Object> beforeVersion,
+            String actor,
+            String note) {
+        Path dir = memoryDir(projectId).resolve("resolutions");
+        try {
+            Files.createDirectories(dir);
+        } catch (IOException e) {
+            throw new RuntimeException("创建记忆修复记录目录失败", e);
+        }
+
+        String timestamp = LocalDateTime.now().format(VERSION_TIMESTAMP);
+        String issueId = sanitizeFilePart(stringValue(issue.get("issue_id"), "issue_" + issueIndex));
+        Path file = dir.resolve("audit_fix_" + sanitizeFilePart(reportId) + "_" + issueId + "_" + timestamp + ".json");
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("project_id", projectId);
+        event.put("event_type", "memory_audit_fix");
+        event.put("report_id", reportId);
+        event.put("issue_index", issueIndex);
+        event.put("issue_id", issue.get("issue_id"));
+        event.put("issue_title", issue.get("title"));
+        event.put("actor", actor);
+        event.put("note", note);
+        event.put("before_version_id", beforeVersion.get("id"));
+        event.put("before_version_path", beforeVersion.get("path"));
+        event.put("fix", fix);
+        event.put("fix_result", fixResult);
+        event.put("created_at", LocalDateTime.now().toString());
+        writeJson(file, event);
+        return file;
+    }
+
     private Path reportFile(String projectId, String reportType, String reportId) {
         return switch (reportType) {
             case "continuity" -> memoryDir(projectId).resolve("continuity").resolve(reportId + ".json");
@@ -916,6 +1179,15 @@ public class MemoryService {
             objectMapper.writerWithDefaultPrettyPrinter().writeValue(file.toFile(), value);
         } catch (IOException e) {
             throw new RuntimeException("写入记忆报告失败: " + file.getFileName(), e);
+        }
+    }
+
+    private void writeJsonList(Path file, List<Map<String, Object>> value) {
+        try {
+            Files.createDirectories(file.getParent());
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(file.toFile(), value);
+        } catch (IOException e) {
+            throw new RuntimeException("写入记忆JSON失败: " + file.getFileName(), e);
         }
     }
 

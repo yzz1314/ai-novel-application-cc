@@ -238,6 +238,7 @@ class ContinuityIssue(BaseModel):
 
     # 建议
     suggestion: str = Field(..., description="修改建议")
+    fix: Optional[Dict[str, Any]] = Field(None, description="Machine-readable deterministic repair action")
 
 
 class ContinuityCheckResponse(BaseModel):

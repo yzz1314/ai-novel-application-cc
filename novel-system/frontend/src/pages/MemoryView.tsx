@@ -263,6 +263,24 @@ const MemoryView: React.FC = () => {
     }
   }
 
+  const handleApplyAuditFix = async (issueIndex: number) => {
+    if (!projectId || !auditDrawer?.id) return
+    const key = issueKey('audit', issueIndex)
+    try {
+      await memoryApi.applyAuditIssueFix(projectId, auditDrawer.id, issueIndex, {
+        actor: 'human',
+        note: resolutionNotes[key] || '',
+      })
+      const refreshed = await memoryApi.getAuditReport(projectId, auditDrawer.id)
+      setAuditDrawer(refreshed)
+      setResolutionNotes((prev) => ({ ...prev, [key]: '' }))
+      await loadMemories()
+      message.success('记忆修复已应用')
+    } catch (error) {
+      message.error('应用记忆修复失败')
+    }
+  }
+
   const currentDetail = memoryDetail[activeType]
   const currentJson = useMemo(() => {
     const list = currentDetail?.json || []
@@ -455,6 +473,19 @@ const MemoryView: React.FC = () => {
               <Button size="small" onClick={() => handleResolveIssue(reportType, index, 'open')}>
                 重开
               </Button>
+              {reportType === 'audit' && record?.fix && !record?.fixApplied && !record?.fix_applied && (
+                <Popconfirm
+                  title="应用这条自动修复？"
+                  description="应用前会自动创建记忆版本，便于回滚。"
+                  onConfirm={() => handleApplyAuditFix(index)}
+                  okText="应用"
+                  cancelText="取消"
+                >
+                  <Button size="small" type="primary">
+                    应用修复
+                  </Button>
+                </Popconfirm>
+              )}
             </Space>
           </Space>
         )

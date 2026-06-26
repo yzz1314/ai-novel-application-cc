@@ -132,6 +132,10 @@ public class ArtifactService {
                 "path", relative(projectId, file)
             ));
         }
+        appendArtifactAccessAudit(projectId, "preview", actor, reason, file, sensitive, Map.of(
+            "allowSensitive", allowSensitive,
+            "redacted", sensitive && !allowSensitive
+        ));
         if (isTextArtifact(file)) {
             String content = readText(file);
             long limit = sensitive && !allowSensitive ? SENSITIVE_PREVIEW_TEXT_LIMIT : PREVIEW_TEXT_LIMIT;
@@ -171,14 +175,21 @@ public class ArtifactService {
         if (!Files.isRegularFile(file)) {
             throw new ResourceNotFoundException("Artifact does not exist: " + pathValue);
         }
-        if (isSensitiveArtifact(projectId, file) && !allowSensitive) {
+        boolean sensitive = isSensitiveArtifact(projectId, file);
+        if (sensitive && !allowSensitive) {
+            appendArtifactAccessAudit(projectId, "download_denied", actor, reason, file, true, Map.of(
+                "policy", "sample_source_protected"
+            ));
             throw new IllegalArgumentException("敏感样本原文默认禁止直接下载，请显式授权后重试: " + pathValue);
         }
-        if (isSensitiveArtifact(projectId, file) && allowSensitive) {
+        if (sensitive && allowSensitive) {
             appendSensitiveAccessAudit(projectId, "sensitive_download", actor, reason, Map.of(
                 "path", relative(projectId, file)
             ));
         }
+        appendArtifactAccessAudit(projectId, "download", actor, reason, file, sensitive, Map.of(
+            "allowSensitive", allowSensitive
+        ));
         try {
             return new DownloadedArtifact(
                 file.getFileName().toString(),
@@ -371,6 +382,7 @@ public class ArtifactService {
             throw new IllegalArgumentException("只支持文本产物差异对比");
         }
         if ((leftSensitive || rightSensitive) && !allowSensitive) {
+            appendDiffAudit(projectId, "diff_denied", request, left, right, leftSensitive, rightSensitive, allowSensitive, null, null);
             throw new IllegalArgumentException("敏感样本原文默认禁止差异对比，请显式授权后重试");
         }
         if ((leftSensitive || rightSensitive) && allowSensitive) {
@@ -404,6 +416,7 @@ public class ArtifactService {
         response.put("removedLines", removed);
         response.put("changedLines", added + removed);
         response.put("diff", diff);
+        appendDiffAudit(projectId, "diff", request, left, right, leftSensitive, rightSensitive, allowSensitive, added, removed);
         return response;
     }
 
@@ -658,6 +671,52 @@ public class ArtifactService {
         Map<String, Object> audit = auditBase(projectId, action, actor, reason);
         audit.put("sensitive", true);
         audit.put("details", details == null ? Map.of() : details);
+        appendAudit(projectId, audit);
+    }
+
+    private void appendArtifactAccessAudit(
+            String projectId,
+            String action,
+            String actor,
+            String reason,
+            Path file,
+            boolean sensitive,
+            Map<String, Object> details) {
+        Map<String, Object> audit = auditBase(projectId, action, actor, reason);
+        audit.put("path", relative(projectId, file));
+        audit.put("sensitive", sensitive);
+        audit.put("details", details == null ? Map.of() : details);
+        appendAudit(projectId, audit);
+    }
+
+    private void appendDiffAudit(
+            String projectId,
+            String action,
+            Map<String, Object> request,
+            Path left,
+            Path right,
+            boolean leftSensitive,
+            boolean rightSensitive,
+            boolean allowSensitive,
+            Long added,
+            Long removed) {
+        Map<String, Object> audit = auditBase(
+            projectId,
+            action,
+            stringValue(request == null ? null : request.get("actor"), "human"),
+            stringValue(request == null ? null : request.get("reason"), "")
+        );
+        audit.put("leftPath", relative(projectId, left));
+        audit.put("rightPath", relative(projectId, right));
+        audit.put("sensitive", leftSensitive || rightSensitive);
+        audit.put("leftSensitive", leftSensitive);
+        audit.put("rightSensitive", rightSensitive);
+        audit.put("allowSensitive", allowSensitive);
+        if (added != null && removed != null) {
+            audit.put("addedLines", added);
+            audit.put("removedLines", removed);
+            audit.put("changedLines", added + removed);
+        }
         appendAudit(projectId, audit);
     }
 

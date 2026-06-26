@@ -96,7 +96,62 @@ class ArtifactServiceTest {
         assertThat(Files.readString(projectRoot().resolve(archivedPath))).isEqualTo("archived version");
     }
 
+    @Test
+    void previewDownloadAndDiffWriteAuditEvents() throws Exception {
+        writeProjectFile("analysis/left.md", "one\ntwo\n");
+        writeProjectFile("analysis/right.md", "one\nthree\n");
+
+        artifactService.getArtifact(PROJECT_ID, "analysis/left.md", false, "tester", "preview check");
+        artifactService.downloadArtifact(PROJECT_ID, "analysis/left.md", false, "tester", "download check");
+        artifactService.diffArtifacts(PROJECT_ID, Map.of(
+            "leftPath", "analysis/left.md",
+            "rightPath", "analysis/right.md",
+            "actor", "tester",
+            "reason", "diff check"
+        ));
+
+        String auditLog = auditLog();
+        assertThat(auditLog)
+            .contains("\"action\":\"preview\"")
+            .contains("\"action\":\"download\"")
+            .contains("\"action\":\"diff\"")
+            .contains("\"path\":\"analysis/left.md\"")
+            .contains("\"leftPath\":\"analysis/left.md\"")
+            .contains("\"rightPath\":\"analysis/right.md\"")
+            .contains("\"changedLines\":2");
+    }
+
+    @Test
+    void deniedSensitiveDownloadWritesAuditEvent() throws Exception {
+        writeProjectFile("samples/raw/sample.txt", "sensitive source");
+
+        assertThatThrownBy(() -> artifactService.downloadArtifact(
+            PROJECT_ID,
+            "samples/raw/sample.txt",
+            false,
+            "tester",
+            "denied check"
+        ))
+            .isInstanceOf(IllegalArgumentException.class);
+
+        assertThat(auditLog())
+            .contains("\"action\":\"download_denied\"")
+            .contains("\"path\":\"samples/raw/sample.txt\"")
+            .contains("\"policy\":\"sample_source_protected\"")
+            .contains("\"sensitive\":true");
+    }
+
     private Path projectRoot() {
         return tempDir.resolve("projects").resolve(PROJECT_ID);
+    }
+
+    private void writeProjectFile(String relativePath, String content) throws Exception {
+        Path file = projectRoot().resolve(relativePath);
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, content, StandardCharsets.UTF_8);
+    }
+
+    private String auditLog() throws Exception {
+        return Files.readString(projectRoot().resolve("artifacts/audit/artifact_events.jsonl"));
     }
 }

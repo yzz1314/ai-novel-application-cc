@@ -65,7 +65,6 @@ public class TaskExecutorService {
      * 异步执行任务
      */
     @Async
-    @Transactional
     public CompletableFuture<Task> executeTaskAsync(String taskId) {
         log.info("Starting async execution of task: {}", taskId);
 
@@ -94,6 +93,12 @@ public class TaskExecutorService {
             );
 
             // 更新任务结果
+            Task latestTask = taskRepository.findById(taskId).orElse(task);
+            if (latestTask.getStatus() == TaskStatus.CANCELLED) {
+                log.info("Task {} was cancelled while Python agent was running; preserving cancelled status", taskId);
+                return CompletableFuture.completedFuture(latestTask);
+            }
+
             task.setStatus(mapPythonStatus(response.get("status")));
             task.setOutputRefs(asJsonMap(response.get("output_refs")));
             task.setResult(asJsonMap(response.get("structured_output")));
@@ -110,6 +115,12 @@ public class TaskExecutorService {
 
         } catch (Exception e) {
             log.error("Task failed: {}", taskId, e);
+
+            Task latestTask = taskRepository.findById(taskId).orElse(task);
+            if (latestTask.getStatus() == TaskStatus.CANCELLED) {
+                log.info("Task {} failed after cancellation; preserving cancelled status", taskId);
+                return CompletableFuture.completedFuture(latestTask);
+            }
 
             task.setStatus(TaskStatus.FAILED);
             task.setFinishedAt(LocalDateTime.now());

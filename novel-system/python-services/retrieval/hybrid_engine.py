@@ -52,13 +52,14 @@ class HashVectorIndex:
         results.sort(key=lambda item: item["score"], reverse=True)
         return results[:top_k]
 
-    def persist(self, output_dir: Path):
+    def persist(self, output_dir: Path, cache_status: Optional[Dict[str, Any]] = None):
         output_dir.mkdir(parents=True, exist_ok=True)
         summary = {
             "updated_at": datetime.now().isoformat(),
             "engine": "hash_vector",
             "dimensions": self.dimensions,
             "document_count": len(self.documents),
+            "cache_status": cache_status or {},
             "documents": [
                 {
                     "doc_id": doc.doc_id,
@@ -157,8 +158,8 @@ class HybridRetrievalEngine:
             },
         }
 
-    def persist_indexes(self):
-        self.vector.persist(self.project_root / "indexes" / "vector")
+    def persist_indexes(self, cache_status: Optional[Dict[str, Any]] = None):
+        self.vector.persist(self.project_root / "indexes" / "vector", cache_status=cache_status)
 
     def _graph_results(self, query: str, top_k: int) -> List[Dict[str, Any]]:
         query_tokens = set(self.keyword._tokenize(query))

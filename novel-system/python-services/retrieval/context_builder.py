@@ -7,6 +7,7 @@ architecture, while leaving a clean place to add LanceDB/vector/rerank later.
 import json
 import math
 import re
+import hashlib
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -143,9 +144,10 @@ class ContextBuilder:
         graph_context = self._graph_context(query)
         memory_context = self._memory_context()
         retrieval_plan = self._default_plan()
+        cache_status = self._cache_status(documents)
         from .hybrid_engine import HybridRetrievalEngine
         hybrid_engine = HybridRetrievalEngine(self.project_root, documents, graph_context)
-        hybrid_engine.persist_indexes()
+        hybrid_engine.persist_indexes(cache_status=cache_status)
         hybrid_retrieval = hybrid_engine.retrieve(query, retrieval_plan, top_k=top_k)
         keyword_results = hybrid_retrieval.get("runs", {}).get("keyword", [])[:top_k]
         budget_config = self._budget_config()
@@ -161,6 +163,7 @@ class ContextBuilder:
             "chapter_number": chapter_number,
             "query": query,
             "built_at": datetime.now().isoformat(),
+            "cache_status": cache_status,
             "sources": {
                 "documents_indexed": len(documents),
                 "keyword_results": len(keyword_results),
@@ -187,7 +190,7 @@ class ContextBuilder:
 
         context_pack["prompt_section"] = self.format_prompt_section(context_pack)
         context_pack["path"] = str(self._save_context_pack(context_pack))
-        self._save_index_summary(documents)
+        self._save_index_summary(documents, cache_status=cache_status)
         self._save_hybrid_summary(context_pack)
         return context_pack
 
@@ -417,14 +420,56 @@ class ContextBuilder:
             json.dump(context_pack, f, ensure_ascii=False, indent=2, default=str)
         return path
 
-    def _save_index_summary(self, documents: List[RetrievalDocument]):
+    def cache_status(self, documents: Optional[List[RetrievalDocument]] = None) -> Dict[str, Any]:
+        return self._cache_status(documents or self._load_documents())
+
+    def _cache_status(self, documents: List[RetrievalDocument]) -> Dict[str, Any]:
+        fingerprint = self._index_fingerprint(documents)
+        previous = self._read_json(self.project_root / "indexes" / "bm25" / "index_summary.json")
+        previous_cache = previous.get("cache_status") if isinstance(previous.get("cache_status"), dict) else {}
+        previous_fingerprint = previous_cache.get("index_fingerprint") or previous.get("index_fingerprint")
+        changed = bool(previous_fingerprint and previous_fingerprint != fingerprint)
+        status = "stale" if changed else ("fresh" if previous_fingerprint else "new")
+        return {
+            "index_version": "local-hybrid-v1",
+            "index_fingerprint": fingerprint,
+            "previous_index_fingerprint": previous_fingerprint,
+            "cache_status": status,
+            "cache_invalidated": changed,
+            "computed_at": datetime.now().isoformat(),
+            "document_count": len(documents),
+            "source_counts": dict(Counter(doc.source_type for doc in documents)),
+        }
+
+    def _index_fingerprint(self, documents: List[RetrievalDocument]) -> str:
+        digest = hashlib.sha256()
+        for doc in sorted(documents, key=lambda item: (item.doc_id, item.path)):
+            digest.update(doc.doc_id.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(doc.source_type.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(doc.path.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(doc.title.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(len(doc.text)).encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(hashlib.sha256(doc.text.encode("utf-8")).hexdigest().encode("ascii"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    def _save_index_summary(self, documents: List[RetrievalDocument], cache_status: Optional[Dict[str, Any]] = None):
         index_dir = self.project_root / "indexes" / "bm25"
         index_dir.mkdir(parents=True, exist_ok=True)
+        cache_status = cache_status or self._cache_status(documents)
         summary = {
             "project_id": self.project_id,
             "updated_at": datetime.now().isoformat(),
             "document_count": len(documents),
             "source_counts": dict(Counter(doc.source_type for doc in documents)),
+            "index_version": cache_status.get("index_version"),
+            "index_fingerprint": cache_status.get("index_fingerprint"),
+            "cache_status": cache_status,
             "documents": [
                 {
                     "doc_id": doc.doc_id,
@@ -447,6 +492,7 @@ class ContextBuilder:
             "project_id": self.project_id,
             "updated_at": datetime.now().isoformat(),
             "latest_context_pack": context_pack.get("path"),
+            "cache_status": context_pack.get("cache_status", {}),
             "plan": retrieval.get("plan", {}),
             "stats": retrieval.get("stats", {}),
             "quality_evaluation": retrieval.get("quality_evaluation") or context_pack.get("quality_evaluation", {}),

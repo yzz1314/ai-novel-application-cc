@@ -31,17 +31,19 @@ class RetrievalIndexAgent(BaseAgent):
             top_k = int(request.parameters.get("top_k", 12))
 
             documents = builder._load_documents()
+            cache_status = builder.cache_status(documents)
             graph_context = builder._graph_context(query)
             plan = builder._default_plan()
             engine = HybridRetrievalEngine(builder.project_root, documents, graph_context)
-            engine.persist_indexes()
+            engine.persist_indexes(cache_status=cache_status)
             retrieval = engine.retrieve(query, plan, top_k=top_k)
-            builder._save_index_summary(documents)
+            builder._save_index_summary(documents, cache_status=cache_status)
             citation_budget = builder.preview_citation_budget(retrieval.get("results", []))
 
             report = {
                 "project_id": request.project_id,
                 "built_at": datetime.now().isoformat(),
+                "cache_status": cache_status,
                 "query": query,
                 "top_k": top_k,
                 "document_count": len(documents),
@@ -84,6 +86,7 @@ class RetrievalIndexAgent(BaseAgent):
                     "document_count": report["document_count"],
                     "source_counts": report["source_counts"],
                     "stats": report["stats"],
+                    "cache_status": report["cache_status"],
                     "quality_evaluation": report["quality_evaluation"],
                     "citation_budget": report["citation_budget"],
                     "report_path": self._relative(builder.project_root, report_path),
@@ -132,6 +135,7 @@ class RetrievalIndexAgent(BaseAgent):
                 "updated_at": report["built_at"],
                 "latest_context_pack": None,
                 "latest_rebuild_report": report["artifacts"]["report"],
+                "cache_status": report.get("cache_status", {}),
                 "plan": report["plan"],
                 "stats": report["stats"],
                 "quality_evaluation": report.get("quality_evaluation", {}),

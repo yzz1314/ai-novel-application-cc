@@ -13,11 +13,12 @@ import {
   Descriptions,
   Tag,
   Collapse,
+  Popconfirm,
   message,
   Alert,
   Progress,
 } from 'antd';
-import { BookOutlined, UserOutlined, GlobalOutlined, FileTextOutlined, PlusOutlined, EditOutlined, CheckCircleOutlined, ToolOutlined } from '@ant-design/icons';
+import { BookOutlined, UserOutlined, GlobalOutlined, FileTextOutlined, PlusOutlined, EditOutlined, CheckCircleOutlined, ToolOutlined, LockOutlined, UnlockOutlined, HistoryOutlined } from '@ant-design/icons';
 import { useParams } from 'react-router-dom';
 import { bookApi, outlineApi, taskApi } from '../services/api';
 
@@ -70,6 +71,9 @@ const OutlineEditor: React.FC = () => {
   const [editNote, setEditNote] = useState('');
   const [outlineReviews, setOutlineReviews] = useState<any[]>([]);
   const [reviewing, setReviewing] = useState(false);
+  const [soulVersions, setSoulVersions] = useState<any[]>([]);
+  const [soulVersionOpen, setSoulVersionOpen] = useState(false);
+  const [soulGovernanceLoading, setSoulGovernanceLoading] = useState(false);
   const [form] = Form.useForm();
 
   useEffect(() => {
@@ -203,6 +207,59 @@ const OutlineEditor: React.FC = () => {
     }
   };
 
+  const refreshProjectSoul = async () => {
+    if (!projectId || !outline) return;
+    const bookId = selectedBookId || outline.bookId || 'default';
+    const soul = await outlineApi.getSoul(projectId, bookId);
+    setOutline((current: any) => current ? {
+      ...current,
+      projectSoul: soul.content,
+      projectSoulPath: soul.path,
+      projectSoulGovernance: soul.governance,
+    } : current);
+  };
+
+  const runSoulGovernance = async (action: 'lock' | 'unlock' | 'approve') => {
+    if (!projectId || !outline) return;
+    const bookId = selectedBookId || outline.bookId || 'default';
+    try {
+      setSoulGovernanceLoading(true);
+      const payload = { actor: 'human', reviewer: 'human', note: `OutlineEditor ${action}`, lock: action === 'approve' };
+      if (action === 'lock') {
+        await outlineApi.lockSoul(projectId, bookId, payload);
+        message.success('Project Soul已锁定');
+      } else if (action === 'unlock') {
+        await outlineApi.unlockSoul(projectId, bookId, payload);
+        message.success('Project Soul已解锁');
+      } else {
+        await outlineApi.approveSoul(projectId, bookId, payload);
+        message.success('Project Soul已批准并锁定');
+      }
+      await refreshProjectSoul();
+    } catch (error) {
+      message.error('更新Project Soul治理状态失败');
+    } finally {
+      setSoulGovernanceLoading(false);
+    }
+  };
+
+  const openSoulVersions = async () => {
+    if (!projectId || !outline) return;
+    try {
+      setSoulGovernanceLoading(true);
+      const bookId = selectedBookId || outline.bookId || 'default';
+      const versions = await outlineApi.getSoulVersions(projectId, bookId);
+      setSoulVersions(versions || []);
+      setSoulVersionOpen(true);
+    } catch (error) {
+      message.error('加载Project Soul版本失败');
+    } finally {
+      setSoulGovernanceLoading(false);
+    }
+  };
+
+  const soulGovernance = outline?.projectSoulGovernance || outline?.governance || {};
+
   const characterColumns = [
     {
       key: 'soul',
@@ -214,7 +271,45 @@ const OutlineEditor: React.FC = () => {
       ),
       children: outline?.projectSoul ? (
         <Card>
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <Space wrap>
+              <Tag color={soulGovernance.locked ? 'red' : 'green'}>
+                {soulGovernance.locked ? '已锁定' : '可编辑'}
+              </Tag>
+              <Tag color={soulGovernance.approvalStatus === 'approved' ? 'success' : 'warning'}>
+                {soulGovernance.approvalStatus || 'pending_review'}
+              </Tag>
+              {soulGovernance.updatedAt && <Tag>{soulGovernance.updatedAt}</Tag>}
+            </Space>
+            <Space wrap>
+              {soulGovernance.locked ? (
+                <Popconfirm
+                  title="解锁Project Soul？"
+                  description="解锁后可在大纲编辑弹窗中修改Project Soul。"
+                  okText="解锁"
+                  cancelText="取消"
+                  onConfirm={() => runSoulGovernance('unlock')}
+                >
+                  <Button icon={<UnlockOutlined />} loading={soulGovernanceLoading}>
+                    解锁
+                  </Button>
+                </Popconfirm>
+              ) : (
+                <Button icon={<LockOutlined />} loading={soulGovernanceLoading} onClick={() => runSoulGovernance('lock')}>
+                  锁定
+                </Button>
+              )}
+              <Button icon={<CheckCircleOutlined />} loading={soulGovernanceLoading} onClick={() => runSoulGovernance('approve')}>
+                批准并锁定
+              </Button>
+              <Button icon={<HistoryOutlined />} loading={soulGovernanceLoading} onClick={openSoulVersions}>
+                版本
+              </Button>
+            </Space>
+          </Space>
+          <div style={{ marginTop: 16 }}>
           <ParagraphText content={outline.projectSoul} />
+          </div>
         </Card>
       ) : (
         <Card>
@@ -639,7 +734,8 @@ const OutlineEditor: React.FC = () => {
             value={projectSoulText}
             onChange={(event) => setProjectSoulText(event.target.value)}
             rows={7}
-            placeholder="Project Soul"
+            disabled={!!soulGovernance.locked}
+            placeholder={soulGovernance.locked ? 'Project Soul已锁定，请先解锁' : 'Project Soul'}
           />
           <TextArea
             value={editNote}
@@ -655,6 +751,27 @@ const OutlineEditor: React.FC = () => {
             placeholder="完整大纲 JSON"
           />
         </Space>
+      </Modal>
+
+      <Modal
+        title="Project Soul历史版本"
+        open={soulVersionOpen}
+        footer={null}
+        width={760}
+        onCancel={() => setSoulVersionOpen(false)}
+      >
+        <Table
+          dataSource={soulVersions}
+          rowKey="id"
+          pagination={{ pageSize: 6 }}
+          columns={[
+            { title: '版本ID', dataIndex: 'id', key: 'id', ellipsis: true },
+            { title: '路径', dataIndex: 'path', key: 'path', ellipsis: true },
+            { title: '归档时间', dataIndex: 'archivedAt', key: 'archivedAt', width: 190 },
+            { title: '大小', dataIndex: 'sizeBytes', key: 'sizeBytes', width: 100 },
+          ]}
+          locale={{ emptyText: '暂无Project Soul历史版本' }}
+        />
       </Modal>
     </div>
   );

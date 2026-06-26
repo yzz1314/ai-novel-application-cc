@@ -80,6 +80,10 @@ public class BookArtifactService {
             outline.put("projectSoulPath", projectRoot(projectId).relativize(soulFile).toString().replace("\\", "/"));
             outline.put("projectSoul", readText(soulFile));
         }
+        outline.put(
+            "projectSoulGovernance",
+            readSoulGovernance(projectId, stringValue(outline.get("bookId"), bookId))
+        );
 
         Object volumesObject = outline.get("volumes");
         if (volumesObject instanceof List<?> volumes) {
@@ -98,17 +102,91 @@ public class BookArtifactService {
 
     public Map<String, Object> getProjectSoul(String projectId, String bookId) {
         projectService.getProject(projectId);
-        resolveBookId(projectId, bookId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
         Path soulFile = projectRoot(projectId).resolve("novel").resolve("soul").resolve("project_soul.md");
         if (!Files.exists(soulFile)) {
             throw new ResourceNotFoundException("Project Soul不存在");
         }
 
         Map<String, Object> response = new LinkedHashMap<>();
+        response.put("bookId", resolvedBookId);
         response.put("path", projectRoot(projectId).relativize(soulFile).toString().replace("\\", "/"));
         response.put("content", readText(soulFile));
         response.put("updatedAt", modifiedAt(soulFile));
+        response.put("governance", readSoulGovernance(projectId, resolvedBookId));
         return response;
+    }
+
+    public List<Map<String, Object>> listProjectSoulVersions(String projectId, String bookId) {
+        projectService.getProject(projectId);
+        resolveBookId(projectId, bookId);
+        Path versionsDir = projectRoot(projectId).resolve("novel").resolve("soul").resolve("versions");
+        if (!Files.exists(versionsDir)) {
+            return List.of();
+        }
+
+        try (var stream = Files.list(versionsDir)) {
+            return stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().matches("project_soul_.*\\.md"))
+                .sorted(Comparator.comparing(this::modifiedAt).reversed())
+                .map(path -> {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("id", stripSuffix(path.getFileName().toString(), ".md"));
+                    item.put("path", relative(projectId, path));
+                    item.put("sizeBytes", fileSize(path));
+                    item.put("archivedAt", modifiedAt(path));
+                    return item;
+                })
+                .toList();
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to read Project Soul versions", e);
+        }
+    }
+
+    public Map<String, Object> updateProjectSoulGovernance(
+            String projectId,
+            String bookId,
+            String action,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        Map<String, Object> governance = readSoulGovernance(projectId, resolvedBookId);
+        String actor = stringValue(valueOf(options, "actor", "reviewer"), "human");
+        String note = stringValue(valueOf(options, "note", "reason"), "");
+        String now = LocalDateTime.now().toString();
+
+        switch (action) {
+            case "lock" -> {
+                governance.put("locked", true);
+                governance.put("lockedBy", actor);
+                governance.put("lockedAt", now);
+                governance.put("lockNote", note);
+            }
+            case "unlock" -> {
+                governance.put("locked", false);
+                governance.put("unlockedBy", actor);
+                governance.put("unlockedAt", now);
+                governance.put("unlockNote", note);
+            }
+            case "approve" -> {
+                governance.put("approvalStatus", "approved");
+                governance.put("approvedBy", actor);
+                governance.put("approvedAt", now);
+                governance.put("approvalNote", note);
+                if (booleanOption(options, "lock", true)) {
+                    governance.put("locked", true);
+                    governance.put("lockedBy", actor);
+                    governance.put("lockedAt", now);
+                    governance.put("lockNote", note);
+                }
+            }
+            default -> throw new IllegalArgumentException("Unsupported Project Soul governance action: " + action);
+        }
+        governance.put("bookId", resolvedBookId);
+        governance.put("updatedAt", now);
+        writeJson(soulGovernanceFile(projectId), decamelizeMap(governance));
+        return getProjectSoul(projectId, resolvedBookId);
     }
 
     public Map<String, Object> updateOutline(
@@ -158,6 +236,11 @@ public class BookArtifactService {
         Path soulPath = projectRoot(projectId).resolve("novel").resolve("soul").resolve("project_soul.md");
         Path soulSnapshotPath = null;
         if (projectSoulValue != null) {
+            Map<String, Object> governance = readSoulGovernance(projectId, resolvedBookId);
+            if (booleanValue(governance.get("locked"), false)
+                    && !booleanOption(options, "overrideSoulLock", false)) {
+                throw new IllegalArgumentException("Project Soul is locked; unlock it before editing.");
+            }
             if (Files.exists(soulPath) && booleanOption(options, "createVersionSnapshot", true)) {
                 soulSnapshotPath = archiveTextSnapshot(
                     projectId,
@@ -168,6 +251,13 @@ public class BookArtifactService {
                 );
             }
             writeText(soulPath, String.valueOf(projectSoulValue));
+            governance.put("approvalStatus", "pending_review");
+            governance.put("lastEditedBy", editor);
+            governance.put("lastEditedAt", editedAt);
+            governance.put("lastEditNote", editNote);
+            governance.put("updatedAt", editedAt);
+            governance.put("bookId", resolvedBookId);
+            writeJson(soulGovernanceFile(projectId), decamelizeMap(governance));
         }
 
         writeJson(outlineFile, normalizedOutline);
@@ -1307,6 +1397,24 @@ public class BookArtifactService {
         }
     }
 
+    private Map<String, Object> readSoulGovernance(String projectId, String bookId) {
+        Path metaFile = soulGovernanceFile(projectId);
+        Map<String, Object> governance = Files.exists(metaFile)
+            ? camelizeMap(readJson(metaFile))
+            : new LinkedHashMap<>();
+        governance.putIfAbsent("bookId", bookId);
+        governance.putIfAbsent("locked", false);
+        governance.putIfAbsent("approvalStatus", "pending_review");
+        governance.put("path", relative(projectId, metaFile));
+        governance.put("exists", Files.exists(metaFile));
+        governance.put("updatedAt", Files.exists(metaFile) ? modifiedAt(metaFile) : "");
+        return governance;
+    }
+
+    private Path soulGovernanceFile(String projectId) {
+        return projectRoot(projectId).resolve("novel").resolve("soul").resolve("project_soul_meta.json");
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> parseOutlinePayload(Map<String, Object> options) {
         Object outlineValue = valueOf(options, "outline", "outline");
@@ -1381,6 +1489,11 @@ public class BookArtifactService {
         return (Map<String, Object>) camelize(map);
     }
 
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> decamelizeMap(Map<String, Object> map) {
+        return (Map<String, Object>) decamelize(map);
+    }
+
     private String toCamelCase(String key) {
         StringBuilder result = new StringBuilder();
         boolean upperNext = false;
@@ -1420,6 +1533,14 @@ public class BookArtifactService {
         }
     }
 
+    private long fileSize(Path path) {
+        try {
+            return Files.size(path);
+        } catch (IOException e) {
+            return 0L;
+        }
+    }
+
     private String stripSuffix(String value, String suffix) {
         return value.endsWith(suffix) ? value.substring(0, value.length() - suffix.length()) : value;
     }
@@ -1444,6 +1565,16 @@ public class BookArtifactService {
         if (value == null) {
             value = options.get(toSnakeCase(key));
         }
+        if (value == null) {
+            return fallback;
+        }
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        return Boolean.parseBoolean(value.toString());
+    }
+
+    private boolean booleanValue(Object value, boolean fallback) {
         if (value == null) {
             return fallback;
         }

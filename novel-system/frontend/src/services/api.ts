@@ -126,6 +126,16 @@ export const outlineApi = {
     request(api.post(`/projects/${projectId}/outline/review`, data || {})),
   getReviews: (projectId: string, bookId: string) =>
     request<any[]>(api.get(`/projects/${projectId}/books/${bookId}/outline/reviews`)),
+  getSoul: (projectId: string, bookId: string) =>
+    request(api.get(`/projects/${projectId}/books/${bookId}/soul`)),
+  getSoulVersions: (projectId: string, bookId: string) =>
+    request<any[]>(api.get(`/projects/${projectId}/books/${bookId}/soul/versions`)),
+  lockSoul: (projectId: string, bookId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/books/${bookId}/soul/lock`, data || {})),
+  unlockSoul: (projectId: string, bookId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/books/${bookId}/soul/unlock`, data || {})),
+  approveSoul: (projectId: string, bookId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/books/${bookId}/soul/approve`, data || {})),
 }
 
 export const chapterApi = {

@@ -80,6 +80,37 @@ public class BookController {
         return ResponseEntity.ok(bookArtifactService.getProjectSoul(projectId, bookId));
     }
 
+    @GetMapping("/{bookId}/soul/versions")
+    public ResponseEntity<List<Map<String, Object>>> listProjectSoulVersions(
+            @PathVariable String projectId,
+            @PathVariable String bookId) {
+        return ResponseEntity.ok(bookArtifactService.listProjectSoulVersions(projectId, bookId));
+    }
+
+    @PostMapping("/{bookId}/soul/lock")
+    public ResponseEntity<Map<String, Object>> lockProjectSoul(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.updateProjectSoulGovernance(projectId, bookId, "lock", request));
+    }
+
+    @PostMapping("/{bookId}/soul/unlock")
+    public ResponseEntity<Map<String, Object>> unlockProjectSoul(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.updateProjectSoulGovernance(projectId, bookId, "unlock", request));
+    }
+
+    @PostMapping("/{bookId}/soul/approve")
+    public ResponseEntity<Map<String, Object>> approveProjectSoul(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.updateProjectSoulGovernance(projectId, bookId, "approve", request));
+    }
+
     @GetMapping("/{bookId}/chapters")
     public ResponseEntity<List<Map<String, Object>>> listChapters(
             @PathVariable String projectId,

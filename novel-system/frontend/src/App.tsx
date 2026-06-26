@@ -13,6 +13,7 @@ import GraphView from './pages/GraphView'
 import ModelProfiles from './pages/ModelProfiles'
 import RetrievalView from './pages/RetrievalView'
 import ArtifactView from './pages/ArtifactView'
+import TaskCenter from './pages/TaskCenter'
 import './App.css'
 
 function App() {
@@ -24,6 +25,7 @@ function App() {
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="dashboard" element={<Dashboard />} />
             <Route path="projects" element={<ProjectList />} />
+            <Route path="tasks" element={<TaskCenter />} />
             <Route path="models" element={<ModelProfiles />} />
             <Route path="projects/:projectId" element={<ProjectDetail />} />
             <Route path="projects/:projectId/samples" element={<SampleManagement />} />

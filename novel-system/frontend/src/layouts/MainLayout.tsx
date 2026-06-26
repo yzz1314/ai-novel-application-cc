@@ -5,6 +5,7 @@ import {
   ApiOutlined,
   DashboardOutlined,
   ProjectOutlined,
+  ScheduleOutlined,
 } from '@ant-design/icons';
 
 const { Header, Sider, Content } = Layout;
@@ -24,6 +25,11 @@ const MainLayout: React.FC = () => {
       key: '/projects',
       icon: <ProjectOutlined />,
       label: '项目管理',
+    },
+    {
+      key: '/tasks',
+      icon: <ScheduleOutlined />,
+      label: '任务中心',
     },
     {
       key: '/models',

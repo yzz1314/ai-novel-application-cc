@@ -6,6 +6,8 @@ import com.novel.system.repository.TaskRepository;
 import com.novel.system.exception.ResourceNotFoundException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -280,6 +282,21 @@ public class TaskExecutorService {
      */
     public List<Task> listTasksByProject(String projectId) {
         return taskRepository.findByProjectId(projectId);
+    }
+
+    public List<Task> listTasks(String projectId, TaskStatus status, int limit) {
+        int boundedLimit = Math.max(1, Math.min(limit, 200));
+        Pageable pageable = PageRequest.of(0, boundedLimit);
+        if (projectId != null && !projectId.isBlank() && status != null) {
+            return taskRepository.findByProjectIdAndStatusOrderByCreatedAtDesc(projectId, status, pageable);
+        }
+        if (projectId != null && !projectId.isBlank()) {
+            return taskRepository.findByProjectIdOrderByCreatedAtDesc(projectId, pageable);
+        }
+        if (status != null) {
+            return taskRepository.findByStatusOrderByCreatedAtDesc(status, pageable);
+        }
+        return taskRepository.findAllByOrderByCreatedAtDesc(pageable);
     }
 
     /**

@@ -64,7 +64,8 @@ export const taskApi = {
     request(api.post(`/projects/${projectId}/tasks/execute`, data)),
   getStatus: (projectId: string, taskId: string) =>
     request(api.get(`/tasks/${taskId}`, { params: { projectId } })),
-  getList: (projectId: string) => request<any[]>(api.get('/tasks', { params: { projectId } })),
+  getList: (projectId?: string, params?: any) =>
+    request<any[]>(api.get('/tasks', { params: { ...(params || {}), ...(projectId ? { projectId } : {}) } })),
   retry: (taskId: string) => request(api.post(`/tasks/${taskId}/retry`)),
   resume: (taskId: string, data?: any) => request(api.post(`/tasks/${taskId}/resume`, data || {})),
   cancel: (taskId: string) => request(api.post(`/tasks/${taskId}/cancel`)),

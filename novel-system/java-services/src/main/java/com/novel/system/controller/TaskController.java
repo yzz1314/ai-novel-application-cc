@@ -2,6 +2,7 @@ package com.novel.system.controller;
 
 import com.novel.system.dto.response.TaskResponse;
 import com.novel.system.entity.Task;
+import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.service.TaskExecutorService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -32,15 +33,16 @@ public class TaskController {
     @GetMapping
     public ResponseEntity<List<TaskResponse>> listTasks(
             @RequestParam(required = false) String projectId,
-            @RequestParam(defaultValue = "false") boolean recent) {
+            @RequestParam(required = false) String status,
+            @RequestParam(defaultValue = "false") boolean recent,
+            @RequestParam(defaultValue = "100") int limit) {
 
         List<Task> tasks;
         if (projectId != null && recent) {
             tasks = taskExecutorService.listRecentTasks(projectId);
-        } else if (projectId != null) {
-            tasks = taskExecutorService.listTasksByProject(projectId);
         } else {
-            throw new IllegalArgumentException("projectId参数是必需的");
+            TaskStatus taskStatus = parseStatus(status);
+            tasks = taskExecutorService.listTasks(projectId, taskStatus, limit);
         }
 
         List<TaskResponse> responses = tasks.stream()
@@ -48,6 +50,17 @@ public class TaskController {
             .collect(Collectors.toList());
 
         return ResponseEntity.ok(responses);
+    }
+
+    private TaskStatus parseStatus(String status) {
+        if (status == null || status.isBlank()) {
+            return null;
+        }
+        try {
+            return TaskStatus.valueOf(status.toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Unsupported task status: " + status);
+        }
     }
 
     /**

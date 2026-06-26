@@ -15,13 +15,17 @@ import {
   Typography,
 } from 'antd'
 import {
+  BarChartOutlined,
+  CheckCircleOutlined,
   ArrowRightOutlined,
   ClockCircleOutlined,
   EditOutlined,
   FileTextOutlined,
+  PauseCircleOutlined,
   ProjectOutlined,
   ReloadOutlined,
   RocketOutlined,
+  WarningOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { dashboardApi } from '../services/api'
@@ -35,6 +39,21 @@ const statusColor = (status?: string) => {
   if (status === 'PARTIAL') return 'blue'
   if (status === 'ARCHIVED' || status === 'CANCELLED') return 'default'
   return 'warning'
+}
+
+const healthColor = (status?: string) => {
+  if (status === 'HEALTHY') return 'success'
+  if (status === 'BUSY') return 'processing'
+  if (status === 'WAITING_APPROVAL') return 'warning'
+  if (status === 'ATTENTION' || status === 'DEGRADED') return 'error'
+  return 'default'
+}
+
+const healthAlertType = (status?: string) => {
+  if (status === 'HEALTHY' || status === 'BUSY') return 'success'
+  if (status === 'WAITING_APPROVAL') return 'info'
+  if (status === 'ATTENTION' || status === 'DEGRADED') return 'warning'
+  return 'info'
 }
 
 const taskPercent = (task: any) => {
@@ -52,6 +71,13 @@ const taskPercent = (task: any) => {
 
 const taskProgressLabel = (task: any) => task.progress?.label || `${taskPercent(task)}%`
 
+const actionPath = (target?: string) => {
+  if (target === 'tasks') return '/tasks'
+  if (target === 'projects') return '/projects'
+  if (target === 'python-service') return '/tasks'
+  return '/projects'
+}
+
 const Dashboard: React.FC = () => {
   const navigate = useNavigate()
   const [loading, setLoading] = useState(false)
@@ -67,9 +93,13 @@ const Dashboard: React.FC = () => {
   const recentTasks = dashboard?.recentTasks || []
   const workflowSummary = dashboard?.workflowSummary || []
   const serviceStatus = dashboard?.serviceStatus || {}
+  const healthSummary = dashboard?.healthSummary || {}
+  const blockedProjects = dashboard?.blockedProjects || []
+  const nextActions = dashboard?.nextActions || []
 
   const activeTasks = Number(taskSummary.PENDING || 0) + Number(taskSummary.RUNNING || 0)
   const failedTasks = Number(taskSummary.FAILED || 0)
+  const waitingApprovals = Number(healthSummary.waitingApprovals || 0)
 
   const serviceRows = useMemo(() => {
     return Object.entries(serviceStatus).map(([key, value]: [string, any]) => ({
@@ -169,6 +199,53 @@ const Dashboard: React.FC = () => {
     },
   ]
 
+  const blockedProjectColumns = [
+    {
+      title: '项目',
+      dataIndex: 'project',
+      key: 'project',
+      render: (project: any) => (
+        <Button type="link" style={{ padding: 0 }} onClick={() => navigate(`/projects/${project.id}`)}>
+          {project.name || project.id}
+        </Button>
+      ),
+    },
+    {
+      title: '阻塞项',
+      dataIndex: 'blocker',
+      key: 'blocker',
+      width: 150,
+      render: (blocker: string) => {
+        const label = blocker === 'FAILED_TASK'
+          ? '失败任务'
+          : blocker === 'WAITING_APPROVAL' ? '等待审批' : '部分完成'
+        return <Tag color={statusColor(blocker === 'FAILED_TASK' ? 'FAILED' : 'PARTIAL')}>{label}</Tag>
+      },
+    },
+    {
+      title: '任务计数',
+      key: 'counts',
+      width: 190,
+      render: (_: any, record: any) => (
+        <Space wrap>
+          <Tag color={record.failedTasks ? 'error' : 'default'}>失败 {record.failedTasks || 0}</Tag>
+          <Tag color={record.partialTasks ? 'blue' : 'default'}>部分 {record.partialTasks || 0}</Tag>
+          <Tag color={record.waitingApprovals ? 'warning' : 'default'}>审批 {record.waitingApprovals || 0}</Tag>
+        </Space>
+      ),
+    },
+    {
+      title: '最近任务',
+      key: 'latestTask',
+      render: (_: any, record: any) => record.latestTask ? (
+        <Space direction="vertical" size={0}>
+          <Text>{record.latestTask.taskType || record.latestTask.agentName}</Text>
+          <Text type="secondary">{record.latestTask.id}</Text>
+        </Space>
+      ) : '-',
+    },
+  ]
+
   const taskColumns = [
     {
       title: '任务',
@@ -231,35 +308,82 @@ const Dashboard: React.FC = () => {
         />
       ) : null}
 
-      <Row gutter={16}>
-        <Col span={6}>
+      {dashboard ? (
+        <Alert
+          type={healthAlertType(healthSummary.status)}
+          showIcon
+          message={
+            <Space wrap>
+              <Text strong>生产线状态</Text>
+              <Tag color={healthColor(healthSummary.status)}>{healthSummary.status || 'UNKNOWN'}</Tag>
+              <Text>{healthSummary.message || '暂无状态摘要'}</Text>
+            </Space>
+          }
+        />
+      ) : null}
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} sm={12} lg={6}>
           <Card loading={loading}>
             <Statistic title="项目总数" value={stats.totalProjects || 0} prefix={<ProjectOutlined />} />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={24} sm={12} lg={6}>
           <Card loading={loading}>
             <Statistic title="样本总数" value={stats.totalSamples || 0} prefix={<FileTextOutlined />} />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={24} sm={12} lg={6}>
           <Card loading={loading}>
             <Statistic title="章节产物" value={stats.totalChapters || 0} prefix={<EditOutlined />} />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={24} sm={12} lg={6}>
           <Card loading={loading}>
             <Statistic title="运行/等待任务" value={activeTasks} prefix={<RocketOutlined />} />
           </Card>
         </Col>
       </Row>
 
-      <Row gutter={16}>
-        <Col span={16}>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={8}>
+          <Card loading={loading}>
+            <Statistic
+              title="任务成功率"
+              value={healthSummary.successRate || 0}
+              suffix="%"
+              prefix={<CheckCircleOutlined />}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} md={8}>
+          <Card loading={loading}>
+            <Statistic
+              title="等待审批"
+              value={waitingApprovals}
+              prefix={<PauseCircleOutlined />}
+              valueStyle={{ color: waitingApprovals ? '#faad14' : undefined }}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} md={8}>
+          <Card loading={loading}>
+            <Statistic
+              title="失败任务"
+              value={failedTasks}
+              prefix={<WarningOutlined />}
+              valueStyle={{ color: failedTasks ? '#cf1322' : undefined }}
+            />
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={16}>
           <Card title="快速操作" style={{ marginBottom: 16 }}>
-            <Row gutter={16}>
+            <Row gutter={[16, 16]}>
               {quickActions.map((action) => (
-                <Col span={8} key={action.title}>
+                <Col xs={24} md={8} key={action.title}>
                   <Card hoverable style={{ textAlign: 'center', height: 170 }} onClick={action.action}>
                     <div style={{ marginBottom: 16 }}>{action.icon}</div>
                     <Title level={5}>{action.title}</Title>
@@ -270,6 +394,31 @@ const Dashboard: React.FC = () => {
                 </Col>
               ))}
             </Row>
+          </Card>
+
+          <Card title="下一步动作" style={{ marginBottom: 16 }}>
+            {nextActions.length ? (
+              <List
+                dataSource={nextActions}
+                renderItem={(action: any) => (
+                  <List.Item
+                    actions={[
+                      <Button type="link" onClick={() => navigate(actionPath(action.target))}>
+                        进入
+                      </Button>,
+                    ]}
+                  >
+                    <List.Item.Meta
+                      avatar={<BarChartOutlined style={{ color: '#1677ff' }} />}
+                      title={action.title}
+                      description={action.description}
+                    />
+                  </List.Item>
+                )}
+              />
+            ) : (
+              <Empty description="暂无建议动作" />
+            )}
           </Card>
 
           <Card title="项目生产线">
@@ -285,7 +434,7 @@ const Dashboard: React.FC = () => {
           </Card>
         </Col>
 
-        <Col span={8}>
+        <Col xs={24} lg={8}>
           <Card
             title="最近项目"
             extra={<Button type="link" onClick={() => navigate('/projects')}>查看全部</Button>}
@@ -314,7 +463,7 @@ const Dashboard: React.FC = () => {
             )}
           </Card>
 
-          <Card title="服务状态" loading={loading}>
+          <Card title="服务状态" loading={loading} style={{ marginBottom: 16 }}>
             {serviceRows.length ? (
               <List
                 dataSource={serviceRows}
@@ -329,8 +478,29 @@ const Dashboard: React.FC = () => {
               <Empty description="暂无服务状态" />
             )}
           </Card>
+
+          <Card title="任务分布" loading={loading}>
+            <Space wrap>
+              {['PENDING', 'RUNNING', 'PARTIAL', 'SUCCESS', 'FAILED', 'CANCELLED'].map((status) => (
+                <Tag key={status} color={statusColor(status)}>
+                  {status} {taskSummary[status] || 0}
+                </Tag>
+              ))}
+            </Space>
+          </Card>
         </Col>
       </Row>
+
+      <Card title="阻塞项目">
+        <Table
+          columns={blockedProjectColumns}
+          dataSource={blockedProjects}
+          rowKey={(record: any) => record.project?.id}
+          loading={loading}
+          pagination={false}
+          locale={{ emptyText: <Empty description="暂无阻塞项目" /> }}
+        />
+      </Card>
 
       <Card
         title="最近任务"

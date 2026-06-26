@@ -96,6 +96,12 @@ public class TaskExecutorService {
 
         try {
             // 更新状态为运行中
+            if (task.getStatus() == TaskStatus.CANCELLED) {
+                log.info("Task {} was cancelled before async execution started; skipping Python agent call", taskId);
+                appendTaskEvent(task, "start_skipped_cancelled", Map.of("reason", "cancelled_before_start"));
+                return CompletableFuture.completedFuture(task);
+            }
+
             task.setStatus(TaskStatus.RUNNING);
             task.setStartedAt(LocalDateTime.now());
             taskRepository.save(task);
@@ -472,17 +478,36 @@ public class TaskExecutorService {
     public Task cancelTask(String taskId) {
         Task task = getTask(taskId);
         boolean wasRunning = task.getStatus() == TaskStatus.RUNNING;
+        boolean pythonCancelNotified = false;
+        String pythonCancelError = null;
 
         if (wasRunning) {
             // 通知Python服务取消任务
-            pythonClientService.cancelTask(taskId);
+            try {
+                pythonClientService.cancelTask(taskId);
+                pythonCancelNotified = true;
+            } catch (RuntimeException e) {
+                pythonCancelError = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+                log.warn(
+                    "Failed to notify Python service about cancellation for task {}; preserving local cancellation: {}",
+                    taskId,
+                    pythonCancelError
+                );
+                log.debug("Python cancellation notification failed for task {}", taskId, e);
+            }
         }
 
         task.setStatus(TaskStatus.CANCELLED);
         task.setFinishedAt(LocalDateTime.now());
 
         Task saved = taskRepository.save(task);
-        appendTaskEvent(saved, "cancelled", Map.of("wasRunning", wasRunning));
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("wasRunning", wasRunning);
+        details.put("pythonCancelNotified", pythonCancelNotified);
+        if (pythonCancelError != null) {
+            details.put("pythonCancelError", pythonCancelError);
+        }
+        appendTaskEvent(saved, "cancelled", details);
         return saved;
     }
 

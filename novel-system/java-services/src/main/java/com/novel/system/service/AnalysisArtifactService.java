@@ -115,14 +115,20 @@ public class AnalysisArtifactService {
     }
 
     public Task checkSampleCoverage(String projectId, String sampleId) {
+        return checkSampleCoverage(projectId, sampleId, Map.of());
+    }
+
+    public Task checkSampleCoverage(String projectId, String sampleId, Map<String, Object> request) {
         getProjectSample(projectId, sampleId);
+        Map<String, Object> parameters = new LinkedHashMap<>(request == null ? Map.of() : request);
+        parameters.put("sample_id", sampleId);
         Map<String, Object> refs = Map.of("sample_id", sampleId);
         Task task = taskExecutorService.createTask(
             projectId,
             "coverage_check",
             "coverage_check",
             refs,
-            refs
+            parameters
         );
         taskExecutorService.executeTaskAsync(task.getId());
         return task;

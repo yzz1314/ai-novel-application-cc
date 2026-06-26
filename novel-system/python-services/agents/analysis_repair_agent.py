@@ -5,6 +5,7 @@ stays in ``coverage_check``; this agent removes failed artifacts and reuses the
 idempotent ``FullTextAnalysisAgent`` retry path.
 """
 import json
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Set
@@ -48,7 +49,7 @@ class AnalysisRepairAgent(BaseAgent):
             analysis_response = None
             if repair_targets:
                 analysis_response = await self.analysis_agent.run(AgentRequest(
-                    task_id=f"{request.task_id}_full_text_analysis",
+                    task_id=self._child_task_id(request.task_id),
                     project_id=project_id,
                     task_type="full_text_analysis",
                     input_refs={"sample_id": sample_id},
@@ -275,3 +276,8 @@ class AnalysisRepairAgent(BaseAgent):
         self.metrics["llm_calls"] += int(metrics.get("llm_calls") or 0)
         self.metrics["input_tokens"] += int(metrics.get("input_tokens") or 0)
         self.metrics["output_tokens"] += int(metrics.get("output_tokens") or 0)
+
+    def _child_task_id(self, task_id: str) -> str:
+        digest = hashlib.sha1(task_id.encode("utf-8")).hexdigest()[:10]
+        prefix = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in task_id)[:28]
+        return f"{prefix}_fta_{digest}"

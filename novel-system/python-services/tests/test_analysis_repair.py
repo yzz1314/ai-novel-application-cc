@@ -8,6 +8,7 @@ import pytest
 sys.modules.setdefault("litellm", types.SimpleNamespace(acompletion=None))
 
 from agents.analysis_repair_agent import AnalysisRepairAgent
+from agents.coverage_check_agent import CoverageCheckAgent
 from config import settings
 from schemas.agent_request import AgentRequest
 
@@ -152,3 +153,56 @@ async def test_analysis_repair_honors_target_chunk_ids(tmp_path):
     assert report["requested_chunk_ids"] == ["chunk_1"]
     assert report["repair_targets"] == ["chunk_1"]
     assert report["remaining_missing_chunks"] == ["chunk_2"]
+
+
+@pytest.mark.asyncio
+async def test_coverage_check_writes_repair_queue_and_can_auto_repair(tmp_path):
+    project_id = "proj_coverage_queue"
+    sample_id = "sample_coverage_queue"
+    write_sample_with_missing_and_failed_analysis(tmp_path, project_id, sample_id)
+
+    original_base_path = settings.PROJECT_BASE_PATH
+    original_mock = settings.MOCK_LLM
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    settings.MOCK_LLM = True
+    try:
+        queued = await CoverageCheckAgent().run(AgentRequest(
+            task_id="task_coverage_queue",
+            project_id=project_id,
+            task_type="coverage_check",
+            input_refs={"sample_id": sample_id},
+            parameters={"sample_id": sample_id},
+        ))
+        project_root = tmp_path / "projects" / project_id
+        queue = json.loads((project_root / "analysis" / "repairs" / f"{sample_id}_repair_queue.json").read_text(encoding="utf-8"))
+        repaired = await CoverageCheckAgent().run(AgentRequest(
+            task_id="task_coverage_auto_repair",
+            project_id=project_id,
+            task_type="coverage_check",
+            input_refs={"sample_id": sample_id},
+            parameters={"sample_id": sample_id, "auto_repair": True},
+        ))
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+        settings.MOCK_LLM = original_mock
+
+    assert queued.status == "partial"
+    assert queued.structured_output["repair_queue_count"] == 2
+    assert queued.structured_output["auto_repair"] is None
+
+    assert queue["status"] == "ready"
+    assert queue["chunk_ids"] == ["chunk_1", "chunk_2"]
+    assert queue["failed_count"] == 1
+    assert queue["missing_count"] == 1
+    assert queue["recommended_task"] == "analysis_repair"
+
+    assert repaired.status == "success"
+    assert repaired.structured_output["repair_queue_count"] == 0
+    assert repaired.structured_output["auto_repair"]["status"] == "success"
+    assert repaired.structured_output["auto_repair"]["target_chunk_ids"] == ["chunk_1", "chunk_2"]
+    assert repaired.structured_output["auto_repair"]["repaired_count"] == 2
+
+    coverage = json.loads((project_root / "analysis" / "coverage" / f"{sample_id}_coverage.json").read_text(encoding="utf-8"))
+    assert coverage["auto_repair"]["status"] == "success"
+    assert coverage["repair_queue"]["chunk_ids"] == []
+    assert coverage["analysis_coverage"]["is_complete"] is True

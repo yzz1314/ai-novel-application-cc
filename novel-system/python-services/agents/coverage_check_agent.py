@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Dict, List, Set
 
 from agents.base import BaseAgent
+from agents.analysis_repair_agent import AnalysisRepairAgent
 from schemas.agent_request import AgentRequest
 from schemas.agent_response import AgentResponse
 from text_processing import CoverageValidator
@@ -41,6 +42,8 @@ class CoverageCheckAgent(BaseAgent):
                 chunks
             )
             analysis_report = self._build_analysis_report(project_id, sample_id, chunks)
+            repair_queue = self._build_repair_queue(project_id, sample_id, analysis_report)
+            repair_plan_path = self._save_repair_queue(project_id, sample_id, repair_queue)
 
             thresholds = {
                 "text_coverage_ratio": float(request.parameters.get("text_coverage_ratio", 0.999)),
@@ -61,11 +64,54 @@ class CoverageCheckAgent(BaseAgent):
                 "thresholds": thresholds,
                 "text_coverage": chunk_coverage,
                 "analysis_coverage": analysis_report,
+                "repair_queue": repair_queue,
+                "repair_queue_path": self._relative(project_id, repair_plan_path),
                 "manifest_path": f"samples/manifests/{sample_id}_manifest.json",
                 "chunks_path": f"samples/chunks/{sample_id}/",
                 "analysis_path": f"analysis/per_chunk/{sample_id}/",
             }
             report_path = self._save_report(project_id, sample_id, report)
+            auto_repair_result = None
+            if self._truthy(request.parameters.get("auto_repair")) and repair_queue["total_count"] > 0:
+                repair_agent = AnalysisRepairAgent()
+                auto_repair_response = await repair_agent.run(AgentRequest(
+                    task_id=f"{request.task_id}_analysis_repair",
+                    project_id=project_id,
+                    task_type="analysis_repair",
+                    input_refs={"sample_id": sample_id},
+                    model_profile_id=request.model_profile_id,
+                    skill_ids=request.skill_ids,
+                    parameters={
+                        "sample_id": sample_id,
+                        "chunk_ids": repair_queue["chunk_ids"],
+                    },
+                ))
+                auto_repair_result = {
+                    "status": auto_repair_response.status,
+                    "target_chunk_ids": repair_queue["chunk_ids"],
+                    "target_count": auto_repair_response.structured_output.get("target_count"),
+                    "repaired_count": auto_repair_response.structured_output.get("repaired_count"),
+                    "remaining_missing_count": auto_repair_response.structured_output.get("remaining_missing_count"),
+                    "remaining_failed_count": auto_repair_response.structured_output.get("remaining_failed_count"),
+                    "report_path": auto_repair_response.structured_output.get("report_path"),
+                    "errors": auto_repair_response.errors,
+                    "warnings": auto_repair_response.warnings,
+                }
+                chunks = self._read_chunks(project_id, sample_id)
+                analysis_report = self._build_analysis_report(project_id, sample_id, chunks)
+                repair_queue = self._build_repair_queue(project_id, sample_id, analysis_report)
+                repair_plan_path = self._save_repair_queue(project_id, sample_id, repair_queue)
+                passed = (
+                    chunk_coverage["coverage_ratio"] >= thresholds["text_coverage_ratio"]
+                    and analysis_report["coverage_ratio"] >= thresholds["analysis_coverage_ratio"]
+                    and analysis_report["failed_chunk_count"] == 0
+                )
+                report["status"] = "passed" if passed else "needs_attention"
+                report["analysis_coverage"] = analysis_report
+                report["repair_queue"] = repair_queue
+                report["repair_queue_path"] = self._relative(project_id, repair_plan_path)
+                report["auto_repair"] = auto_repair_result
+                report_path = self._save_report(project_id, sample_id, report)
 
             warnings = []
             if not passed:
@@ -86,6 +132,9 @@ class CoverageCheckAgent(BaseAgent):
                     "missing_range_count": len(chunk_coverage.get("missing_ranges", [])),
                     "missing_analysis_count": analysis_report["missing_analysis_count"],
                     "failed_chunk_count": analysis_report["failed_chunk_count"],
+                    "repair_queue_count": repair_queue["total_count"],
+                    "repair_queue_path": self._relative(project_id, repair_plan_path),
+                    "auto_repair": auto_repair_result,
                     "report_path": self._relative(project_id, report_path),
                 },
                 warnings=warnings
@@ -101,6 +150,55 @@ class CoverageCheckAgent(BaseAgent):
                     "retryable": True
                 }]
             )
+
+    def _build_repair_queue(self, project_id: str, sample_id: str, analysis_report: Dict) -> Dict:
+        missing_items = [
+            {
+                "chunk_id": chunk_id,
+                "reason": "missing_analysis",
+                "priority": "high",
+            }
+            for chunk_id in analysis_report.get("missing_analysis_chunks", [])
+        ]
+        failed_items = [
+            {
+                "chunk_id": str(item.get("chunk_id")),
+                "reason": "failed_analysis",
+                "priority": "critical",
+                "error": item.get("error"),
+                "path": item.get("path"),
+            }
+            for item in analysis_report.get("failed_chunks", [])
+            if item.get("chunk_id") is not None
+        ]
+        items = sorted(failed_items + missing_items, key=lambda item: (item["priority"] != "critical", item["chunk_id"]))
+        return {
+            "project_id": project_id,
+            "sample_id": sample_id,
+            "created_at": datetime.now().isoformat(),
+            "status": "ready" if items else "empty",
+            "total_count": len(items),
+            "missing_count": len(missing_items),
+            "failed_count": len(failed_items),
+            "chunk_ids": [item["chunk_id"] for item in items],
+            "items": items,
+            "recommended_task": "analysis_repair" if items else None,
+            "recommended_parameters": {
+                "sample_id": sample_id,
+                "chunk_ids": [item["chunk_id"] for item in items],
+            } if items else {},
+        }
+
+    def _save_repair_queue(self, project_id: str, sample_id: str, repair_queue: Dict) -> Path:
+        repair_dir = self._project_root(project_id) / "analysis" / "repairs"
+        repair_dir.mkdir(parents=True, exist_ok=True)
+        path = repair_dir / f"{sample_id}_repair_queue.json"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(repair_queue, f, ensure_ascii=False, indent=2)
+        return path
+
+    def _truthy(self, value) -> bool:
+        return value is True or str(value).lower() in {"true", "1", "yes", "y"}
 
     def _build_analysis_report(self, project_id: str, sample_id: str, chunks: List[Dict]) -> Dict:
         chunk_ids = [str(chunk.get("id")) for chunk in chunks if chunk.get("id") is not None]

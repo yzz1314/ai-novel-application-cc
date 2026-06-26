@@ -116,8 +116,9 @@ public class AnalysisController {
     @PostMapping("/samples/{sampleId}/coverage/check")
     public ResponseEntity<TaskResponse> checkSampleCoverage(
             @PathVariable String projectId,
-            @PathVariable String sampleId) {
-        Task task = analysisArtifactService.checkSampleCoverage(projectId, sampleId);
+            @PathVariable String sampleId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        Task task = analysisArtifactService.checkSampleCoverage(projectId, sampleId, request);
         return ResponseEntity.ok(TaskResponse.from(task));
     }
 

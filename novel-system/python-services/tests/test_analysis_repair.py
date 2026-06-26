@@ -107,3 +107,48 @@ async def test_analysis_repair_retries_missing_and_failed_chunks(tmp_path):
     )
     assert coverage["status"] == "passed"
     assert coverage["analysis_coverage"]["is_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_analysis_repair_honors_target_chunk_ids(tmp_path):
+    project_id = "proj_analysis_repair_targeted"
+    sample_id = "sample_repair_targeted"
+    write_sample_with_missing_and_failed_analysis(tmp_path, project_id, sample_id)
+
+    original_base_path = settings.PROJECT_BASE_PATH
+    original_mock = settings.MOCK_LLM
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    settings.MOCK_LLM = True
+    try:
+        agent = AnalysisRepairAgent()
+        response = await agent.run(AgentRequest(
+            task_id="task_analysis_repair_targeted",
+            project_id=project_id,
+            task_type="analysis_repair",
+            input_refs={"sample_id": sample_id},
+            parameters={
+                "sample_id": sample_id,
+                "chunk_ids": ["chunk_1"],
+            },
+        ))
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+        settings.MOCK_LLM = original_mock
+
+    assert response.status == "partial"
+    assert response.structured_output["target_count"] == 1
+    assert response.structured_output["repaired_count"] == 1
+    assert response.structured_output["remaining_missing_count"] == 1
+    assert response.structured_output["remaining_failed_count"] == 0
+
+    project_root = tmp_path / "projects" / project_id
+    analysis_dir = project_root / "analysis" / "per_chunk" / sample_id
+    assert (analysis_dir / "chunk_1_analysis.json").exists()
+    assert not (analysis_dir / "chunk_2_analysis.json").exists()
+
+    report_path = project_root / response.structured_output["report_path"]
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["status"] == "needs_attention"
+    assert report["requested_chunk_ids"] == ["chunk_1"]
+    assert report["repair_targets"] == ["chunk_1"]
+    assert report["remaining_missing_chunks"] == ["chunk_2"]

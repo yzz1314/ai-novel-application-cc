@@ -97,18 +97,30 @@ const ArtifactView: React.FC = () => {
     }
   }
 
-  const openArtifact = async (record: any) => {
+  const openArtifact = async (record: any, allowSensitive = false) => {
     if (!projectId) return
     if (!record.previewable) {
       message.info('该文件不支持文本预览，可直接下载')
       return
     }
     try {
-      const detail = await artifactApi.view(projectId, record.path)
+      const detail = await artifactApi.view(projectId, record.path, allowSensitive ? { allowSensitive: true } : undefined)
       setDrawer(detail)
     } catch (error) {
       message.error('打开产物失败')
     }
+  }
+
+  const authorizeFullPreview = () => {
+    if (!drawer) return
+    Modal.confirm({
+      title: '查看敏感样本完整内容？',
+      content: '完整预览会显式授权读取样本原文或切片内容。请确认本次操作符合项目数据治理要求。',
+      okText: '授权查看',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: () => openArtifact(drawer, true),
+    })
   }
 
   const startDownload = async (record: any, allowSensitive = false) => {
@@ -411,6 +423,11 @@ const ArtifactView: React.FC = () => {
             </Descriptions>
             {drawer.truncated && <Tag color="warning">内容已截断显示</Tag>}
             {drawer.redacted && <Tag color="red">敏感内容已保护，仅显示短预览</Tag>}
+            {drawer.redacted && (
+              <Button danger type="primary" onClick={authorizeFullPreview}>
+                授权查看完整内容
+              </Button>
+            )}
             <Paragraph style={{ whiteSpace: 'pre-wrap', maxHeight: 560, overflow: 'auto' }}>
               {drawer.content || '无可预览文本'}
             </Paragraph>

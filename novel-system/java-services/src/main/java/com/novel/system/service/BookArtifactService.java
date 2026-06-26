@@ -84,6 +84,10 @@ public class BookArtifactService {
             "projectSoulGovernance",
             readSoulGovernance(projectId, stringValue(outline.get("bookId"), bookId))
         );
+        outline.put(
+            "outlineGovernance",
+            readOutlineGovernance(projectId, stringValue(outline.get("bookId"), bookId))
+        );
 
         Object volumesObject = outline.get("volumes");
         if (volumesObject instanceof List<?> volumes) {
@@ -256,6 +260,57 @@ public class BookArtifactService {
         return getProjectSoul(projectId, resolvedBookId);
     }
 
+    public Map<String, Object> updateOutlineGovernance(
+            String projectId,
+            String bookId,
+            String action,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        Map<String, Object> governance = readOutlineGovernance(projectId, resolvedBookId);
+        String actor = stringValue(valueOf(options, "actor", "reviewer"), "human");
+        String note = stringValue(valueOf(options, "note", "reason"), "");
+        String now = LocalDateTime.now().toString();
+
+        switch (action) {
+            case "lock" -> {
+                governance.put("locked", true);
+                governance.put("lockedBy", actor);
+                governance.put("lockedAt", now);
+                governance.put("lockNote", note);
+            }
+            case "unlock" -> {
+                governance.put("locked", false);
+                governance.put("unlockedBy", actor);
+                governance.put("unlockedAt", now);
+                governance.put("unlockNote", note);
+            }
+            case "approve" -> {
+                governance.put("approvalStatus", "approved");
+                governance.put("approvedBy", actor);
+                governance.put("approvedAt", now);
+                governance.put("approvalNote", note);
+                if (booleanOption(options, "lock", true)) {
+                    governance.put("locked", true);
+                    governance.put("lockedBy", actor);
+                    governance.put("lockedAt", now);
+                    governance.put("lockNote", note);
+                }
+            }
+            default -> throw new IllegalArgumentException("Unsupported outline governance action: " + action);
+        }
+        governance.put("bookId", resolvedBookId);
+        governance.put("updatedAt", now);
+        writeJson(outlineGovernanceFile(projectId, resolvedBookId), decamelizeMap(governance));
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("bookId", resolvedBookId);
+        response.put("governance", readOutlineGovernance(projectId, resolvedBookId));
+        response.put("outline", getOutline(projectId, resolvedBookId));
+        return response;
+    }
+
     public Map<String, Object> updateOutline(
             String projectId,
             String bookId,
@@ -265,6 +320,11 @@ public class BookArtifactService {
         Path outlineFile = resolveOutlineFile(projectId, resolvedBookId);
         Map<String, Object> before = readJson(outlineFile);
         Map<String, Object> options = request == null ? Map.of() : request;
+        Map<String, Object> outlineGovernance = readOutlineGovernance(projectId, resolvedBookId);
+        if (booleanValue(outlineGovernance.get("locked"), false)
+                && !booleanOption(options, "overrideOutlineLock", false)) {
+            throw new IllegalArgumentException("Outline is locked; unlock it before editing.");
+        }
 
         Map<String, Object> updatedOutline = parseOutlinePayload(options);
         if (updatedOutline.isEmpty()) {
@@ -328,6 +388,14 @@ public class BookArtifactService {
         }
 
         writeJson(outlineFile, normalizedOutline);
+        outlineGovernance.put("approvalStatus", "pending_review");
+        outlineGovernance.put("lastEditedBy", editor);
+        outlineGovernance.put("lastEditedAt", editedAt);
+        outlineGovernance.put("lastEditNote", editNote);
+        outlineGovernance.put("bookId", resolvedBookId);
+        outlineGovernance.put("updatedAt", editedAt);
+        writeJson(outlineGovernanceFile(projectId, resolvedBookId), decamelizeMap(outlineGovernance));
+
         Path reportPath = writeOutlineEditReport(
             projectId,
             resolvedBookId,
@@ -1494,6 +1562,24 @@ public class BookArtifactService {
         return projectRoot(projectId).resolve("novel").resolve("soul").resolve("project_soul_meta.json");
     }
 
+    private Map<String, Object> readOutlineGovernance(String projectId, String bookId) {
+        Path metaFile = outlineGovernanceFile(projectId, bookId);
+        Map<String, Object> governance = Files.exists(metaFile)
+            ? camelizeMap(readJson(metaFile))
+            : new LinkedHashMap<>();
+        governance.putIfAbsent("bookId", bookId);
+        governance.putIfAbsent("locked", false);
+        governance.putIfAbsent("approvalStatus", "pending_review");
+        governance.put("path", relative(projectId, metaFile));
+        governance.put("exists", Files.exists(metaFile));
+        governance.put("updatedAt", Files.exists(metaFile) ? modifiedAt(metaFile) : "");
+        return governance;
+    }
+
+    private Path outlineGovernanceFile(String projectId, String bookId) {
+        return projectRoot(projectId).resolve("novel").resolve("outline").resolve(bookId + "_outline_meta.json");
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> parseOutlinePayload(Map<String, Object> options) {
         Object outlineValue = valueOf(options, "outline", "outline");
@@ -1516,6 +1602,8 @@ public class BookArtifactService {
         outline.remove("edit_note");
         outline.remove("createVersionSnapshot");
         outline.remove("create_version_snapshot");
+        outline.remove("overrideOutlineLock");
+        outline.remove("override_outline_lock");
         return outline;
     }
 
@@ -1523,6 +1611,8 @@ public class BookArtifactService {
         outline.remove("outline_path");
         outline.remove("project_soul");
         outline.remove("project_soul_path");
+        outline.remove("project_soul_governance");
+        outline.remove("outline_governance");
         outline.remove("chapter_count");
         removeNestedKey(outline, "chapter_count");
     }

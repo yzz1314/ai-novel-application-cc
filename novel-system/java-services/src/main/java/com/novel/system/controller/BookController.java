@@ -66,6 +66,30 @@ public class BookController {
         return ResponseEntity.ok(bookArtifactService.updateOutline(projectId, bookId, request));
     }
 
+    @PostMapping("/{bookId}/outline/lock")
+    public ResponseEntity<Map<String, Object>> lockOutline(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.updateOutlineGovernance(projectId, bookId, "lock", request));
+    }
+
+    @PostMapping("/{bookId}/outline/unlock")
+    public ResponseEntity<Map<String, Object>> unlockOutline(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.updateOutlineGovernance(projectId, bookId, "unlock", request));
+    }
+
+    @PostMapping("/{bookId}/outline/approve")
+    public ResponseEntity<Map<String, Object>> approveOutline(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.updateOutlineGovernance(projectId, bookId, "approve", request));
+    }
+
     @GetMapping("/{bookId}/outline/reviews")
     public ResponseEntity<List<Map<String, Object>>> listOutlineReviews(
             @PathVariable String projectId,

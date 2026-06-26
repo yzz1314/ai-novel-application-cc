@@ -12,10 +12,12 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -130,6 +132,91 @@ class BookArtifactServiceTest {
             .hasMessageContaining("locked");
 
         assertThat(Files.readString(projectRoot().resolve("novel/soul/project_soul.md"))).isEqualTo("locked current soul");
+    }
+
+    @Test
+    void outlineGovernanceApprovesLocksAndProtectsOutlineEdits() throws Exception {
+        writeProjectFile("novel/outline/book_1_outline.json", """
+            {
+              "project_id": "project_soul_restore",
+              "book_id": "book_1",
+              "book_title": "Original Outline",
+              "genre": "玄幻",
+              "target_word_count": 100000,
+              "total_volumes": 1,
+              "total_chapters": 1,
+              "volumes": []
+            }
+            """);
+        when(outlineArtifactService.syncOutlineFromWorkspace(eq(PROJECT_ID), eq(BOOK_ID)))
+            .thenReturn(Map.of("status", "synced"));
+
+        Map<String, Object> approved = bookArtifactService.updateOutlineGovernance(
+            PROJECT_ID,
+            BOOK_ID,
+            "approve",
+            Map.of("actor", "tester", "note", "ready", "lock", true)
+        );
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> governance = (Map<String, Object>) approved.get("governance");
+        assertThat(governance)
+            .containsEntry("approvalStatus", "approved")
+            .containsEntry("locked", true)
+            .containsEntry("approvedBy", "tester");
+
+        assertThatThrownBy(() -> bookArtifactService.updateOutline(
+            PROJECT_ID,
+            BOOK_ID,
+            Map.of(
+                "outline",
+                Map.of(
+                    "bookTitle", "Blocked Outline",
+                    "genre", "玄幻",
+                    "targetWordCount", 100000,
+                    "totalVolumes", 1,
+                    "totalChapters", 1,
+                    "volumes", List.of()
+                )
+            )
+        ))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("Outline is locked");
+
+        bookArtifactService.updateOutlineGovernance(PROJECT_ID, BOOK_ID, "unlock", Map.of("actor", "tester"));
+        Map<String, Object> response = bookArtifactService.updateOutline(
+            PROJECT_ID,
+            BOOK_ID,
+            Map.of(
+                "editor", "tester",
+                "editNote", "outline edit after unlock",
+                "outline",
+                Map.of(
+                    "bookTitle", "Unlocked Outline",
+                    "genre", "玄幻",
+                    "targetWordCount", 100000,
+                    "totalVolumes", 1,
+                    "totalChapters", 1,
+                    "volumes", List.of()
+                )
+            )
+        );
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outline = (Map<String, Object>) response.get("outline");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outlineGovernance = (Map<String, Object>) outline.get("outlineGovernance");
+        assertThat(outline)
+            .containsEntry("bookTitle", "Unlocked Outline");
+        assertThat(outlineGovernance)
+            .containsEntry("approvalStatus", "pending_review")
+            .containsEntry("locked", false)
+            .containsEntry("lastEditedBy", "tester");
+
+        String meta = Files.readString(projectRoot().resolve("novel/outline/book_1_outline_meta.json"));
+        assertThat(meta)
+            .contains("\"approval_status\" : \"pending_review\"")
+            .contains("\"last_edited_by\" : \"tester\"");
     }
 
     private Path projectRoot() {

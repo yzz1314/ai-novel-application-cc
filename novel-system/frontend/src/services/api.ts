@@ -130,6 +130,12 @@ export const outlineApi = {
     request(api.get(`/projects/${projectId}/books/${bookId}/outline`)),
   update: (projectId: string, bookId: string, data: any) =>
     request(api.patch(`/projects/${projectId}/books/${bookId}/outline`, data || {})),
+  lock: (projectId: string, bookId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/books/${bookId}/outline/lock`, data || {})),
+  unlock: (projectId: string, bookId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/books/${bookId}/outline/unlock`, data || {})),
+  approve: (projectId: string, bookId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/books/${bookId}/outline/approve`, data || {})),
   review: (projectId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/outline/review`, data || {})),
   getReviews: (projectId: string, bookId: string) =>

@@ -76,6 +76,7 @@ const OutlineEditor: React.FC = () => {
   const [soulVersionOpen, setSoulVersionOpen] = useState(false);
   const [soulVersionPreview, setSoulVersionPreview] = useState<any>(null);
   const [soulGovernanceLoading, setSoulGovernanceLoading] = useState(false);
+  const [outlineGovernanceLoading, setOutlineGovernanceLoading] = useState(false);
   const [form] = Form.useForm();
 
   useEffect(() => {
@@ -221,6 +222,35 @@ const OutlineEditor: React.FC = () => {
     } : current);
   };
 
+  const runOutlineGovernance = async (action: 'lock' | 'unlock' | 'approve') => {
+    if (!projectId || !outline) return;
+    const bookId = selectedBookId || outline.bookId || 'default';
+    try {
+      setOutlineGovernanceLoading(true);
+      const payload = { actor: 'human', reviewer: 'human', note: `OutlineEditor ${action}`, lock: action === 'approve' };
+      let result: any;
+      if (action === 'lock') {
+        result = await outlineApi.lock(projectId, bookId, payload);
+        message.success('大纲已锁定');
+      } else if (action === 'unlock') {
+        result = await outlineApi.unlock(projectId, bookId, payload);
+        message.success('大纲已解锁');
+      } else {
+        result = await outlineApi.approve(projectId, bookId, payload);
+        message.success('大纲已批准并锁定');
+      }
+      if (result?.outline) {
+        setOutline(result.outline);
+      } else {
+        await loadOutline();
+      }
+    } catch (error) {
+      message.error('更新大纲治理状态失败');
+    } finally {
+      setOutlineGovernanceLoading(false);
+    }
+  };
+
   const runSoulGovernance = async (action: 'lock' | 'unlock' | 'approve') => {
     if (!projectId || !outline) return;
     const bookId = selectedBookId || outline.bookId || 'default';
@@ -297,6 +327,7 @@ const OutlineEditor: React.FC = () => {
   };
 
   const soulGovernance = outline?.projectSoulGovernance || outline?.governance || {};
+  const outlineGovernance = outline?.outlineGovernance || {};
 
   const openChapterWorkspace = (volumeNumber?: number, chapter?: Partial<Chapter>) => {
     if (!projectId || !outline) return;
@@ -477,24 +508,61 @@ const OutlineEditor: React.FC = () => {
         </span>
       ),
       children: outline ? (
-        <Card>
-          <Descriptions column={2} bordered>
-            <Descriptions.Item label="书名">{outline.bookTitle}</Descriptions.Item>
-            <Descriptions.Item label="类型">{outline.genre}</Descriptions.Item>
-            <Descriptions.Item label="目标字数" span={2}>
-              {(outline.targetWordCount / 10000).toFixed(0)}万字
-            </Descriptions.Item>
-            <Descriptions.Item label="核心概念" span={2}>
-              {outline.coreConcept}
-            </Descriptions.Item>
-            <Descriptions.Item label="世界观" span={2}>
-              {outline.worldView}
-            </Descriptions.Item>
-            <Descriptions.Item label="主要冲突" span={2}>
-              {outline.mainConflict}
-            </Descriptions.Item>
-          </Descriptions>
-        </Card>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Card>
+            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+              <Space wrap>
+                <Tag color={outlineGovernance.locked ? 'red' : 'green'}>
+                  {outlineGovernance.locked ? '大纲已锁定' : '大纲可编辑'}
+                </Tag>
+                <Tag color={outlineGovernance.approvalStatus === 'approved' ? 'success' : 'warning'}>
+                  {outlineGovernance.approvalStatus || 'pending_review'}
+                </Tag>
+                {outlineGovernance.updatedAt && <Tag>{outlineGovernance.updatedAt}</Tag>}
+              </Space>
+              <Space wrap>
+                {outlineGovernance.locked ? (
+                  <Popconfirm
+                    title="解锁大纲？"
+                    description="解锁后可继续编辑完整大纲 JSON。"
+                    okText="解锁"
+                    cancelText="取消"
+                    onConfirm={() => runOutlineGovernance('unlock')}
+                  >
+                    <Button icon={<UnlockOutlined />} loading={outlineGovernanceLoading}>
+                      解锁大纲
+                    </Button>
+                  </Popconfirm>
+                ) : (
+                  <Button icon={<LockOutlined />} loading={outlineGovernanceLoading} onClick={() => runOutlineGovernance('lock')}>
+                    锁定大纲
+                  </Button>
+                )}
+                <Button icon={<CheckCircleOutlined />} loading={outlineGovernanceLoading} onClick={() => runOutlineGovernance('approve')}>
+                  批准并锁定大纲
+                </Button>
+              </Space>
+            </Space>
+          </Card>
+          <Card>
+            <Descriptions column={2} bordered>
+              <Descriptions.Item label="书名">{outline.bookTitle}</Descriptions.Item>
+              <Descriptions.Item label="类型">{outline.genre}</Descriptions.Item>
+              <Descriptions.Item label="目标字数" span={2}>
+                {(outline.targetWordCount / 10000).toFixed(0)}万字
+              </Descriptions.Item>
+              <Descriptions.Item label="核心概念" span={2}>
+                {outline.coreConcept}
+              </Descriptions.Item>
+              <Descriptions.Item label="世界观" span={2}>
+                {outline.worldView}
+              </Descriptions.Item>
+              <Descriptions.Item label="主要冲突" span={2}>
+                {outline.mainConflict}
+              </Descriptions.Item>
+            </Descriptions>
+          </Card>
+        </Space>
       ) : (
         <Card>
           <p>暂无大纲，请先生成</p>
@@ -657,7 +725,7 @@ const OutlineEditor: React.FC = () => {
             </Button>
             <Button
               icon={<EditOutlined />}
-              disabled={!outline}
+              disabled={!outline || !!outlineGovernance.locked}
               onClick={openEditModal}
             >
               编辑大纲
@@ -804,7 +872,8 @@ const OutlineEditor: React.FC = () => {
             onChange={(event) => setOutlineJson(event.target.value)}
             rows={24}
             style={{ fontFamily: 'monospace' }}
-            placeholder="完整大纲 JSON"
+            disabled={!!outlineGovernance.locked}
+            placeholder={outlineGovernance.locked ? '大纲已锁定，请先解锁' : '完整大纲 JSON'}
           />
         </Space>
       </Modal>

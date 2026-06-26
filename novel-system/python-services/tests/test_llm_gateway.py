@@ -142,3 +142,63 @@ async def test_llm_gateway_rate_limit_interval(monkeypatch):
     client = LLMClient(model_config={"model": "mock-local", "mock": True})
     config = {"model": "mock-local", "min_interval_ms": 20}
     assert client._min_interval_seconds(config) == 0.02
+
+
+@pytest.mark.asyncio
+async def test_llm_gateway_resolves_runtime_secret_reference(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True)
+    secret_ref = "secret://model-profiles/secret_profile/mainModel/apiKey"
+    (config_dir / "model_profiles.json").write_text(
+        json.dumps({
+            "defaultProfileId": "secret_profile",
+            "secrets": "runtime-ref",
+            "secretsFile": "config/model_profile_secrets.json",
+            "profiles": [
+                {
+                    "profileId": "secret_profile",
+                    "mainModel": {
+                        "provider": "custom",
+                        "model": "secret-model",
+                        "endpoint": "https://example.invalid/v1",
+                        "apiKeyRef": secret_ref,
+                        "mock": False,
+                    },
+                }
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (config_dir / "model_profile_secrets.json").write_text(
+        json.dumps({
+            "version": "1.0.0",
+            "secrets": {
+                secret_ref: "runtime-secret-key",
+            },
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    call_kwargs = {}
+
+    async def fake_acompletion(**kwargs):
+        call_kwargs.update(kwargs)
+        return FakeResponse(content="secret ok")
+
+    monkeypatch.setattr(llm_client_module, "acompletion", fake_acompletion)
+    original_base_path = settings.PROJECT_BASE_PATH
+    original_mock = settings.MOCK_LLM
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    settings.MOCK_LLM = False
+    try:
+        client = LLMClient()
+        async with client.profile_context("secret_profile", "chapter_writing"):
+            response = await client.generate("secret ref smoke")
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+        settings.MOCK_LLM = original_mock
+
+    assert response["content"] == "secret ok"
+    assert call_kwargs["model"] == "secret-model"
+    assert call_kwargs["api_key"] == "runtime-secret-key"
+    assert "runtime-secret-key" not in (config_dir / "model_profiles.json").read_text(encoding="utf-8")

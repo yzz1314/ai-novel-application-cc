@@ -23,6 +23,7 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -52,7 +53,7 @@ class ModelProfileServiceTest {
         when(modelProfileRepository.findById(any())).thenAnswer(invocation -> Optional.ofNullable(profiles.get(invocation.getArgument(0))));
         when(modelProfileRepository.findAll()).thenAnswer(invocation -> orderedProfiles());
         when(modelProfileRepository.findAllByOrderByCreatedAtAsc()).thenAnswer(invocation -> orderedProfiles());
-        when(modelProfileRepository.findByDefaultProfileTrue()).thenAnswer(invocation ->
+        lenient().when(modelProfileRepository.findByDefaultProfileTrue()).thenAnswer(invocation ->
             profiles.values().stream()
                 .filter(profile -> Boolean.TRUE.equals(profile.getDefaultProfile()))
                 .findFirst()
@@ -72,7 +73,7 @@ class ModelProfileServiceTest {
             profiles.clear();
             return null;
         }).when(modelProfileRepository).deleteAll();
-        org.mockito.Mockito.doAnswer(invocation -> {
+        lenient().doAnswer(invocation -> {
             ModelProfile profile = invocation.getArgument(0);
             profiles.remove(profile.getProfileId());
             return null;
@@ -116,8 +117,43 @@ class ModelProfileServiceTest {
         assertThat(profiles.get("alpha").getProfileName()).isEqualTo("Alpha");
         assertThat(profiles.get("alpha").getMainModel().get("apiKey").toString()).startsWith("enc:v1:");
         assertThat(profiles.get("alpha").getDefaultProfile()).isTrue();
-        assertThat(Files.exists(tempDir.resolve("config").resolve("model_profiles.json"))).isTrue();
+        Path runtimeConfig = tempDir.resolve("config").resolve("model_profiles.json");
+        Path runtimeSecrets = tempDir.resolve("config").resolve("model_profile_secrets.json");
+        assertThat(Files.exists(runtimeConfig)).isTrue();
+        assertThat(Files.exists(runtimeSecrets)).isTrue();
+        String runtimeConfigText = Files.readString(runtimeConfig);
+        assertThat(runtimeConfigText)
+            .doesNotContain("secret-alpha")
+            .contains("apiKeyRef")
+            .contains("secret://model-profiles/alpha/mainModel/apiKey/");
+        assertThat(Files.readString(runtimeSecrets))
+            .contains("secret://model-profiles/alpha/mainModel/apiKey/")
+            .contains("secret-alpha");
         assertThat(modelProfileService.listVersions()).hasSizeGreaterThanOrEqualTo(3);
+    }
+
+    @Test
+    void restoresModelProfilesFromRuntimeSecretReferences() throws Exception {
+        modelProfileService.createProfile(profileRequest("alpha", "Alpha", "secret-alpha", true));
+        modelProfileService.updateProfile("alpha", Map.of(
+            "profileName", "Alpha Changed",
+            "mainModel", modelConfig("mock", "mock-changed", "secret-new")
+        ));
+
+        String versionId = modelProfileService.listVersions().stream()
+            .map(version -> version.get("versionId").toString())
+            .filter(id -> profileList(modelProfileService.getVersion(id)).stream()
+                .anyMatch(profile -> "alpha".equals(profile.get("profileId")) && "Alpha".equals(profile.get("profileName"))))
+            .findFirst()
+            .orElseThrow();
+        modelProfileService.restoreVersion(versionId, Map.of("actor", "test"));
+
+        assertThat(profiles.get("alpha").getProfileName()).isEqualTo("Alpha");
+        assertThat(profiles.get("alpha").getMainModel().get("apiKey").toString()).startsWith("enc:v1:");
+
+        Map<String, Object> restoredDetail = modelProfileService.getProfile("alpha");
+        Map<String, Object> mainModel = modelMap(restoredDetail, "mainModel");
+        assertThat(mainModel.get("hasApiKey")).isEqualTo(true);
     }
 
     private void writeLegacyStore(Map<String, Object> profile, String defaultProfileId) throws Exception {

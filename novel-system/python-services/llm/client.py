@@ -45,6 +45,7 @@ class LLMClient:
         self.logger = get_logger("LLMClient")
         self.model_config = model_config or self._get_default_config()
         self.profile_store_path = Path(settings.PROJECT_BASE_PATH) / "config" / "model_profiles.json"
+        self.profile_secrets_path = Path(settings.PROJECT_BASE_PATH) / "config" / "model_profile_secrets.json"
         self.response_cache: Dict[str, Dict[str, Any]] = {}
         self.rate_limit_state: Dict[str, float] = {}
         self.rate_limit_lock = asyncio.Lock()
@@ -262,7 +263,7 @@ class LLMClient:
             "max_tokens": model.get("max_tokens", model.get("maxTokens", self.model_config.get("max_tokens", 4000))),
             "top_p": model.get("top_p", model.get("topP")),
             "timeout": model.get("timeout"),
-            "api_key": model.get("api_key", model.get("apiKey") or self._provider_api_key(provider)),
+            "api_key": self._model_api_key(model, provider),
             "api_base": model.get("api_base", model.get("endpoint") or self._provider_api_base(provider)),
             "mock": bool(model.get("mock") or provider == "mock"),
             "cache_enabled": model.get("cache_enabled", model.get("cacheEnabled", True)),
@@ -274,6 +275,36 @@ class LLMClient:
             "extra_params": model.get("extra_params", model.get("extraParams", {})),
         }
         return {key: value for key, value in normalized.items() if value not in ("", None)}
+
+    def _model_api_key(self, model: Dict[str, Any], provider: str) -> Optional[str]:
+        api_key = model.get("api_key", model.get("apiKey"))
+        if api_key:
+            return api_key
+        api_key_ref = model.get("api_key_ref", model.get("apiKeyRef"))
+        if api_key_ref:
+            resolved = self._secret_ref_value(str(api_key_ref))
+            if resolved:
+                return resolved
+        return self._provider_api_key(provider)
+
+    def _secret_ref_value(self, ref: str) -> Optional[str]:
+        if not ref:
+            return None
+        if not self.profile_secrets_path.exists():
+            self.logger.warning(f"Model profile secret reference could not be resolved; secrets file is missing: {ref}")
+            return None
+        try:
+            with self.profile_secrets_path.open("r", encoding="utf-8") as file:
+                store = json.load(file)
+        except Exception as exc:
+            self.logger.warning(f"Failed to read model profile secrets: {exc}")
+            return None
+        secrets = store.get("secrets", store)
+        value = secrets.get(ref) if isinstance(secrets, dict) else None
+        if value in ("", None):
+            self.logger.warning(f"Model profile secret reference not found: {ref}")
+            return None
+        return str(value)
 
     def _normalize_fallback_models(self, value: Any, profile_id: str) -> List[Dict[str, Any]]:
         fallbacks: List[Dict[str, Any]] = []

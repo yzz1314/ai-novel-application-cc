@@ -42,6 +42,7 @@ public class ModelProfileService {
     private static final Pattern SAFE_VERSION_ID = Pattern.compile("^model_profiles_\\d{17}$");
     private static final DateTimeFormatter SNAPSHOT_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
     private static final String STORE_FILENAME = "model_profiles.json";
+    private static final String RUNTIME_SECRETS_FILENAME = "model_profile_secrets.json";
     private static final String SNAPSHOT_PREFIX = "model_profiles_";
     private static final String JSON_SUFFIX = ".json";
     private static final List<String> MODEL_KEYS = List.of(
@@ -347,10 +348,44 @@ public class ModelProfileService {
                 snapshot = nextSnapshotFile(file.getParent());
                 Files.copy(file, snapshot);
             }
-            objectMapper.writerWithDefaultPrettyPrinter().writeValue(file.toFile(), exportStore());
+            Map<String, Object> runtimeSecrets = new LinkedHashMap<>();
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(file.toFile(), exportStore(runtimeSecrets));
+            writeRuntimeSecrets(runtimeSecrets);
             return snapshot;
         } catch (IOException e) {
             throw new RuntimeException("写入模型配置兼容文件失败", e);
+        }
+    }
+
+    private void writeRuntimeSecrets(Map<String, Object> runtimeSecrets) throws IOException {
+        Path secretsFile = runtimeSecretsFile();
+        Files.createDirectories(secretsFile.getParent());
+        Map<String, Object> mergedSecrets = readRuntimeSecrets(secretsFile);
+        mergedSecrets.putAll(runtimeSecrets);
+        Map<String, Object> store = new LinkedHashMap<>();
+        store.put("version", "1.0.0");
+        store.put("storage", "runtime-secrets");
+        store.put("secrets", mergedSecrets);
+        store.put("updatedAt", LocalDateTime.now().toString());
+        objectMapper.writerWithDefaultPrettyPrinter().writeValue(secretsFile.toFile(), store);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> readRuntimeSecrets(Path secretsFile) {
+        if (!Files.exists(secretsFile)) {
+            return new LinkedHashMap<>();
+        }
+        try {
+            Map<String, Object> store = objectMapper.readValue(secretsFile.toFile(), new TypeReference<>() {});
+            Object secrets = store.getOrDefault("secrets", store);
+            if (secrets instanceof Map<?, ?> map) {
+                Map<String, Object> result = new LinkedHashMap<>();
+                map.forEach((key, value) -> result.put(String.valueOf(key), value));
+                return result;
+            }
+            return new LinkedHashMap<>();
+        } catch (IOException e) {
+            throw new RuntimeException("读取模型运行时密钥文件失败", e);
         }
     }
 
@@ -437,7 +472,7 @@ public class ModelProfileService {
         return value != null && value.endsWith(suffix) ? value.substring(0, value.length() - suffix.length()) : value;
     }
 
-    private Map<String, Object> exportStore() {
+    private Map<String, Object> exportStore(Map<String, Object> runtimeSecrets) {
         List<ModelProfile> profiles = modelProfileRepository.findAllByOrderByCreatedAtAsc();
         String defaultProfileId = profiles.stream()
             .filter(profile -> Boolean.TRUE.equals(profile.getDefaultProfile()))
@@ -447,9 +482,10 @@ public class ModelProfileService {
         Map<String, Object> store = new LinkedHashMap<>();
         store.put("version", "2.0.0");
         store.put("storage", "database");
-        store.put("secrets", "runtime-export");
+        store.put("secrets", "runtime-ref");
+        store.put("secretsFile", "config/" + RUNTIME_SECRETS_FILENAME);
         store.put("defaultProfileId", defaultProfileId);
-        store.put("profiles", profiles.stream().map(profile -> toRuntimeExportMap(profile)).toList());
+        store.put("profiles", profiles.stream().map(profile -> toRuntimeExportMap(profile, runtimeSecrets)).toList());
         store.put("updatedAt", LocalDateTime.now().toString());
         return store;
     }
@@ -530,6 +566,11 @@ public class ModelProfileService {
                 if (!incoming.isBlank()) {
                     model.put("apiKey", encryptIfNeeded(incoming));
                 }
+            } else if ("apiKeyRef".equals(key) || "api_key_ref".equals(key)) {
+                String secret = runtimeSecret(asString(value, ""));
+                if (!secret.isBlank()) {
+                    model.put("apiKey", encryptIfNeeded(secret));
+                }
             } else {
                 model.put(key, value);
             }
@@ -585,34 +626,47 @@ public class ModelProfileService {
         return map;
     }
 
-    private Map<String, Object> toRuntimeExportMap(ModelProfile profile) {
+    private Map<String, Object> toRuntimeExportMap(ModelProfile profile, Map<String, Object> runtimeSecrets) {
         Map<String, Object> map = toMap(profile, true);
         for (String key : MODEL_KEYS) {
-            map.put(key, decryptModelSecret(asMap(map.get(key))));
+            map.put(key, exportModelWithSecretRef(profile.getProfileId(), key, asMap(map.get(key)), runtimeSecrets));
         }
-        map.put("fallbackModels", decryptModelSecretList(map.get("fallbackModels")));
+        map.put("fallbackModels", exportFallbackModelsWithSecretRefs(profile.getProfileId(), map.get("fallbackModels"), runtimeSecrets));
         map.put("storage", "database-runtime-export");
         return map;
     }
 
-    private List<Map<String, Object>> decryptModelSecretList(Object value) {
+    private List<Map<String, Object>> exportFallbackModelsWithSecretRefs(
+            String profileId,
+            Object value,
+            Map<String, Object> runtimeSecrets) {
         List<Map<String, Object>> models = new ArrayList<>();
         if (value instanceof List<?> list) {
+            int index = 0;
             for (Object item : list) {
-                models.add(decryptModelSecret(asMap(item)));
+                models.add(exportModelWithSecretRef(profileId, "fallbackModels." + index, asMap(item), runtimeSecrets));
+                index++;
             }
         }
         return models;
     }
 
-    private Map<String, Object> decryptModelSecret(Map<String, Object> model) {
+    private Map<String, Object> exportModelWithSecretRef(
+            String profileId,
+            String modelKey,
+            Map<String, Object> model,
+            Map<String, Object> runtimeSecrets) {
         if (model == null || model.isEmpty()) {
             return model;
         }
         Map<String, Object> exported = new LinkedHashMap<>(model);
         String apiKey = asString(exported.get("apiKey"), asString(exported.get("api_key"), ""));
         if (!apiKey.isBlank()) {
-            exported.put("apiKey", decryptIfNeeded(apiKey));
+            String secret = decryptIfNeeded(apiKey);
+            String ref = "secret://model-profiles/" + profileId + "/" + modelKey + "/apiKey/" + secretFingerprint(secret);
+            runtimeSecrets.put(ref, secret);
+            exported.remove("apiKey");
+            exported.put("apiKeyRef", ref);
         }
         exported.remove("api_key");
         return exported;
@@ -647,11 +701,15 @@ public class ModelProfileService {
         }
         Map<String, Object> sanitized = new LinkedHashMap<>(model);
         String apiKey = asString(sanitized.get("apiKey"), asString(sanitized.get("api_key"), ""));
+        String apiKeyRef = asString(sanitized.get("apiKeyRef"), asString(sanitized.get("api_key_ref"), ""));
         sanitized.remove("api_key");
+        sanitized.remove("api_key_ref");
         if (!includeSecrets) {
+            boolean hasApiKey = !apiKey.isBlank() || !apiKeyRef.isBlank();
             sanitized.put("apiKey", apiKey.isBlank() ? "" : maskSecret(apiKey));
-            sanitized.put("hasApiKey", !apiKey.isBlank());
+            sanitized.put("hasApiKey", hasApiKey);
             sanitized.put("apiKeyEncrypted", isEncrypted(apiKey));
+            sanitized.put("apiKeyExternalized", !apiKeyRef.isBlank());
         }
         return sanitized;
     }
@@ -737,6 +795,18 @@ public class ModelProfileService {
         return Paths.get(basePath, "config", STORE_FILENAME).normalize();
     }
 
+    private Path runtimeSecretsFile() {
+        return Paths.get(basePath, "config", RUNTIME_SECRETS_FILENAME).normalize();
+    }
+
+    private String runtimeSecret(String ref) {
+        if (ref == null || ref.isBlank()) {
+            return "";
+        }
+        Object value = readRuntimeSecrets(runtimeSecretsFile()).get(ref);
+        return value == null ? "" : String.valueOf(value);
+    }
+
     private String encryptIfNeeded(String secret) {
         if (secret.isBlank() || isEncrypted(secret)) {
             return secret;
@@ -786,6 +856,16 @@ public class ModelProfileService {
             return digest.digest(encryptionKey.getBytes(StandardCharsets.UTF_8));
         } catch (Exception e) {
             throw new RuntimeException("模型配置加密密钥初始化失败", e);
+        }
+    }
+
+    private String secretFingerprint(String secret) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hashed = digest.digest(secret.getBytes(StandardCharsets.UTF_8));
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(hashed).substring(0, 16);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to generate model secret fingerprint", e);
         }
     }
 

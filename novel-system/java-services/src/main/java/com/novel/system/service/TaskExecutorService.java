@@ -14,9 +14,13 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -28,6 +32,9 @@ import java.util.concurrent.CompletableFuture;
 @Service
 @RequiredArgsConstructor
 public class TaskExecutorService {
+
+    private static final int MAX_TASK_EVENTS = 200;
+    private static final String TASK_EVENT_LOG = "logs/task_events.jsonl";
 
     private final TaskRepository taskRepository;
     private final PythonClientService pythonClientService;
@@ -69,7 +76,12 @@ public class TaskExecutorService {
         task.setParameters(resolvedParameters);
         task.setStatus(TaskStatus.PENDING);
 
-        return taskRepository.save(task);
+        Task saved = taskRepository.save(task);
+        appendTaskEvent(saved, "created", Map.of(
+            "inputRefs", inputRefs != null ? inputRefs : Map.of(),
+            "parameters", resolvedParameters
+        ));
+        return saved;
     }
 
     /**
@@ -87,6 +99,7 @@ public class TaskExecutorService {
             task.setStatus(TaskStatus.RUNNING);
             task.setStartedAt(LocalDateTime.now());
             taskRepository.save(task);
+            appendTaskEvent(task, "started", Map.of());
 
             // 构建请求
             Map<String, Object> request = pythonClientService.buildAgentRequest(
@@ -107,6 +120,7 @@ public class TaskExecutorService {
             Task latestTask = taskRepository.findById(taskId).orElse(task);
             if (latestTask.getStatus() == TaskStatus.CANCELLED) {
                 log.info("Task {} was cancelled while Python agent was running; preserving cancelled status", taskId);
+                appendTaskEvent(latestTask, "cancel_preserved", Map.of("reason", "cancelled_while_agent_running"));
                 return CompletableFuture.completedFuture(latestTask);
             }
 
@@ -120,6 +134,11 @@ public class TaskExecutorService {
             task.setFinishedAt(LocalDateTime.now());
 
             taskRepository.save(task);
+            appendTaskEvent(task, "finished", Map.of(
+                "pythonStatus", response.get("status") != null ? response.get("status") : "",
+                "checkpointRef", task.getCheckpointRef() != null ? task.getCheckpointRef() : "",
+                "progress", getTaskProgress(task)
+            ));
             handleSuccessfulTaskSideEffects(task);
 
             log.info("Task completed successfully: {}", taskId);
@@ -130,6 +149,7 @@ public class TaskExecutorService {
             Task latestTask = taskRepository.findById(taskId).orElse(task);
             if (latestTask.getStatus() == TaskStatus.CANCELLED) {
                 log.info("Task {} failed after cancellation; preserving cancelled status", taskId);
+                appendTaskEvent(latestTask, "cancel_preserved", Map.of("reason", "agent_failed_after_cancellation"));
                 return CompletableFuture.completedFuture(latestTask);
             }
 
@@ -139,17 +159,22 @@ public class TaskExecutorService {
             // 保存错误信息
             Map<String, Object> errors = Map.of(
                 "error_type", e.getClass().getSimpleName(),
-                "error_message", e.getMessage()
+                "error_message", e.getMessage() != null ? e.getMessage() : ""
             );
             task.setErrors(errors);
 
             taskRepository.save(task);
+            appendTaskEvent(task, "failed", Map.of(
+                "errorType", e.getClass().getSimpleName(),
+                "errorMessage", e.getMessage() != null ? e.getMessage() : ""
+            ));
 
             // 检查是否需要重试
             if (task.getRetryCount() < task.getMaxRetries() && isRetryable(e)) {
                 task.setRetryCount(task.getRetryCount() + 1);
                 task.setStatus(TaskStatus.PENDING);
                 taskRepository.save(task);
+                appendTaskEvent(task, "auto_retry_scheduled", Map.of("retryCount", task.getRetryCount()));
 
                 log.info("Retrying task: {} (attempt {})", taskId, task.getRetryCount());
                 return executeTaskAsync(taskId);
@@ -161,10 +186,11 @@ public class TaskExecutorService {
 
     private boolean isRetryable(Exception e) {
         // 网络错误、超时、速率限制等可重试
+        String message = e.getMessage() != null ? e.getMessage().toLowerCase() : "";
         return e instanceof java.net.SocketTimeoutException ||
                e instanceof java.net.ConnectException ||
-               e.getMessage().contains("rate limit") ||
-               e.getMessage().contains("timeout");
+               message.contains("rate limit") ||
+               message.contains("timeout");
     }
 
     private void handleSuccessfulTaskSideEffects(Task task) {
@@ -445,8 +471,9 @@ public class TaskExecutorService {
     @Transactional
     public Task cancelTask(String taskId) {
         Task task = getTask(taskId);
+        boolean wasRunning = task.getStatus() == TaskStatus.RUNNING;
 
-        if (task.getStatus() == TaskStatus.RUNNING) {
+        if (wasRunning) {
             // 通知Python服务取消任务
             pythonClientService.cancelTask(taskId);
         }
@@ -454,7 +481,9 @@ public class TaskExecutorService {
         task.setStatus(TaskStatus.CANCELLED);
         task.setFinishedAt(LocalDateTime.now());
 
-        return taskRepository.save(task);
+        Task saved = taskRepository.save(task);
+        appendTaskEvent(saved, "cancelled", Map.of("wasRunning", wasRunning));
+        return saved;
     }
 
     @Transactional
@@ -470,6 +499,7 @@ public class TaskExecutorService {
         task.setStartedAt(null);
         task.setFinishedAt(null);
         taskRepository.save(task);
+        appendTaskEvent(task, "manual_retry_requested", Map.of("retryCount", task.getRetryCount()));
         executeTaskAsync(task.getId());
         return task;
     }
@@ -502,6 +532,14 @@ public class TaskExecutorService {
         );
         resumedTask.setCheckpointRef(checkpointRef);
         resumedTask = taskRepository.save(resumedTask);
+        appendTaskEvent(sourceTask, "resume_requested", Map.of(
+            "resumedTaskId", resumedTask.getId(),
+            "checkpointRef", checkpointRef
+        ));
+        appendTaskEvent(resumedTask, "resumed_from_checkpoint", Map.of(
+            "sourceTaskId", sourceTask.getId(),
+            "checkpointRef", checkpointRef
+        ));
         executeTaskAsync(resumedTask.getId());
         return resumedTask;
     }
@@ -527,7 +565,87 @@ public class TaskExecutorService {
         logs.put("createdAt", task.getCreatedAt());
         logs.put("startedAt", task.getStartedAt());
         logs.put("finishedAt", task.getFinishedAt());
+        logs.put("eventLogPath", taskEventLogRef(task));
+        logs.put("projectEventLogPath", TASK_EVENT_LOG);
+        logs.put("events", readTaskEvents(task));
         return logs;
+    }
+
+    private void appendTaskEvent(Task task, String eventType, Map<String, Object> details) {
+        if (task == null || task.getId() == null || task.getProjectId() == null || task.getProjectId().isBlank()) {
+            return;
+        }
+
+        try {
+            Map<String, Object> event = new LinkedHashMap<>();
+            event.put("timestamp", LocalDateTime.now().toString());
+            event.put("eventType", eventType);
+            event.put("taskId", task.getId());
+            event.put("projectId", task.getProjectId());
+            event.put("taskType", task.getTaskType());
+            event.put("agentName", task.getAgentName());
+            event.put("status", task.getStatus() != null ? task.getStatus().name() : null);
+            event.put("retryCount", task.getRetryCount());
+            event.put("checkpointRef", task.getCheckpointRef());
+            event.put("details", details != null ? details : Map.of());
+
+            String line = objectMapper.writeValueAsString(event) + System.lineSeparator();
+            writeEventLine(taskEventPath(task), line);
+            writeEventLine(projectEventPath(task), line);
+        } catch (Exception e) {
+            log.warn("Failed to append task event for task {}: {}", task.getId(), e.getMessage(), e);
+        }
+    }
+
+    private List<Map<String, Object>> readTaskEvents(Task task) {
+        Path path = taskEventPath(task);
+        if (!Files.exists(path)) {
+            return List.of();
+        }
+
+        try {
+            List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
+            int fromIndex = Math.max(0, lines.size() - MAX_TASK_EVENTS);
+            List<Map<String, Object>> events = new ArrayList<>();
+            for (String line : lines.subList(fromIndex, lines.size())) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) {
+                    continue;
+                }
+                try {
+                    events.add(objectMapper.readValue(trimmed, new TypeReference<>() {}));
+                } catch (Exception e) {
+                    log.debug("Skipping malformed task event line for task {}: {}", task.getId(), e.getMessage());
+                }
+            }
+            return events;
+        } catch (IOException e) {
+            log.warn("Failed to read task events for task {}: {}", task.getId(), e.getMessage(), e);
+            return List.of();
+        }
+    }
+
+    private void writeEventLine(Path path, String line) throws IOException {
+        Files.createDirectories(path.getParent());
+        Files.writeString(
+            path,
+            line,
+            StandardCharsets.UTF_8,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.APPEND
+        );
+    }
+
+    private String taskEventLogRef(Task task) {
+        return "logs/tasks/" + task.getId() + ".jsonl";
+    }
+
+    private Path taskEventPath(Task task) {
+        return projectRoot(task.getProjectId()).resolve(taskEventLogRef(task));
+    }
+
+    private Path projectEventPath(Task task) {
+        return projectRoot(task.getProjectId()).resolve(TASK_EVENT_LOG);
     }
 
     public Map<String, Object> getTaskProgress(Task task) {

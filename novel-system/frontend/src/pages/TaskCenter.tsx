@@ -46,6 +46,15 @@ const statusColor = (status?: string) => {
   return 'default'
 }
 
+const eventColor = (eventType?: string) => {
+  if (eventType === 'created' || eventType === 'started') return 'processing'
+  if (eventType === 'finished') return 'success'
+  if (eventType === 'failed') return 'error'
+  if (eventType === 'cancelled' || eventType === 'cancel_preserved') return 'default'
+  if (eventType?.includes('retry') || eventType?.includes('resume')) return 'blue'
+  return 'default'
+}
+
 const taskPercent = (task: any) => {
   if (task.status === 'SUCCESS') return 100
   const backendPercent = Number(task.progress?.percent)
@@ -64,6 +73,11 @@ const taskPercent = (task: any) => {
 }
 
 const taskProgressLabel = (task: any) => task.progress?.label || `${taskPercent(task)}%`
+
+const eventDetailsText = (details: any) => {
+  if (!details || Object.keys(details).length === 0) return '-'
+  return JSON.stringify(details)
+}
 
 const TaskCenter: React.FC = () => {
   const navigate = useNavigate()
@@ -244,6 +258,42 @@ const TaskCenter: React.FC = () => {
     },
   ]
 
+  const eventColumns = [
+    {
+      title: '时间',
+      dataIndex: 'timestamp',
+      key: 'timestamp',
+      width: 180,
+      render: (value: string) => value || '-',
+    },
+    {
+      title: '事件',
+      dataIndex: 'eventType',
+      key: 'eventType',
+      width: 170,
+      render: (value: string) => <Tag color={eventColor(value)}>{value || '-'}</Tag>,
+    },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      key: 'status',
+      width: 120,
+      render: (value: string) => <Tag color={statusColor(value)}>{value || '-'}</Tag>,
+    },
+    {
+      title: '详情',
+      dataIndex: 'details',
+      key: 'details',
+      render: (value: any) => (
+        <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+          {eventDetailsText(value)}
+        </Paragraph>
+      ),
+    },
+  ]
+
+  const drawerEvents = Array.isArray(taskDrawer?.events) ? taskDrawer.events : []
+
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Space style={{ width: '100%', justifyContent: 'space-between' }}>
@@ -354,6 +404,22 @@ const TaskCenter: React.FC = () => {
                 </Space>
               </Card>
             ) : null}
+
+            <Card
+              title="事件日志"
+              size="small"
+              extra={<Text type="secondary">{taskDrawer.eventLogPath || '-'}</Text>}
+            >
+              <Table
+                columns={eventColumns}
+                dataSource={drawerEvents}
+                rowKey={(_, index) => `${taskDrawer.taskId}-event-${index}`}
+                size="small"
+                pagination={false}
+                scroll={{ x: 760 }}
+                locale={{ emptyText: <Empty description="暂无事件日志" /> }}
+              />
+            </Card>
 
             <Card title="诊断 JSON" size="small">
               <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>

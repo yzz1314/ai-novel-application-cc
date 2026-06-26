@@ -104,7 +104,11 @@ const ArtifactView: React.FC = () => {
       return
     }
     try {
-      const detail = await artifactApi.view(projectId, record.path, allowSensitive ? { allowSensitive: true } : undefined)
+      const detail = await artifactApi.view(projectId, record.path, allowSensitive ? {
+        allowSensitive: true,
+        actor: 'human',
+        reason: 'ArtifactView敏感完整预览授权',
+      } : undefined)
       setDrawer(detail)
     } catch (error) {
       message.error('打开产物失败')
@@ -126,7 +130,11 @@ const ArtifactView: React.FC = () => {
   const startDownload = async (record: any, allowSensitive = false) => {
     if (!projectId) return
     try {
-      const blob = await artifactApi.download(projectId, record.path, allowSensitive ? { allowSensitive: true } : undefined)
+      const blob = await artifactApi.download(projectId, record.path, allowSensitive ? {
+        allowSensitive: true,
+        actor: 'human',
+        reason: 'ArtifactView敏感下载授权',
+      } : undefined)
       const url = window.URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
@@ -232,6 +240,8 @@ const ArtifactView: React.FC = () => {
         leftPath: selectedItems[0].path,
         rightPath: selectedItems[1].path,
         allowSensitive,
+        actor: 'human',
+        reason: allowSensitive ? 'ArtifactView敏感差异对比授权' : 'ArtifactView差异对比',
       })
       setDiffDrawer(result)
     } catch (error) {

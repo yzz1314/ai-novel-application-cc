@@ -40,16 +40,20 @@ public class ArtifactController {
     public ResponseEntity<Map<String, Object>> getArtifact(
             @PathVariable String projectId,
             @RequestParam("path") String path,
-            @RequestParam(defaultValue = "false") boolean allowSensitive) {
-        return ResponseEntity.ok(artifactService.getArtifact(projectId, path, allowSensitive));
+            @RequestParam(defaultValue = "false") boolean allowSensitive,
+            @RequestParam(required = false) String actor,
+            @RequestParam(required = false) String reason) {
+        return ResponseEntity.ok(artifactService.getArtifact(projectId, path, allowSensitive, actor, reason));
     }
 
     @GetMapping("/download")
     public ResponseEntity<?> downloadArtifact(
             @PathVariable String projectId,
             @RequestParam("path") String path,
-            @RequestParam(defaultValue = "false") boolean allowSensitive) {
-        ArtifactService.DownloadedArtifact artifact = artifactService.downloadArtifact(projectId, path, allowSensitive);
+            @RequestParam(defaultValue = "false") boolean allowSensitive,
+            @RequestParam(required = false) String actor,
+            @RequestParam(required = false) String reason) {
+        ArtifactService.DownloadedArtifact artifact = artifactService.downloadArtifact(projectId, path, allowSensitive, actor, reason);
         return downloaded(artifact);
     }
 

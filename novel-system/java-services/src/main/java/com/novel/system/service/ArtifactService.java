@@ -108,6 +108,15 @@ public class ArtifactService {
     }
 
     public Map<String, Object> getArtifact(String projectId, String pathValue, boolean allowSensitive) {
+        return getArtifact(projectId, pathValue, allowSensitive, "human", "");
+    }
+
+    public Map<String, Object> getArtifact(
+            String projectId,
+            String pathValue,
+            boolean allowSensitive,
+            String actor,
+            String reason) {
         projectService.getProject(projectId);
         Path file = resolveProjectPath(projectId, pathValue);
         if (!Files.isRegularFile(file)) {
@@ -118,6 +127,11 @@ public class ArtifactService {
         boolean sensitive = isSensitiveArtifact(projectId, file);
         response.put("sensitive", sensitive);
         response.put("sensitivePolicy", sensitive ? "sample_source_protected" : "none");
+        if (sensitive && allowSensitive) {
+            appendSensitiveAccessAudit(projectId, "sensitive_preview", actor, reason, Map.of(
+                "path", relative(projectId, file)
+            ));
+        }
         if (isTextArtifact(file)) {
             String content = readText(file);
             long limit = sensitive && !allowSensitive ? SENSITIVE_PREVIEW_TEXT_LIMIT : PREVIEW_TEXT_LIMIT;
@@ -143,6 +157,15 @@ public class ArtifactService {
     }
 
     public DownloadedArtifact downloadArtifact(String projectId, String pathValue, boolean allowSensitive) {
+        return downloadArtifact(projectId, pathValue, allowSensitive, "human", "");
+    }
+
+    public DownloadedArtifact downloadArtifact(
+            String projectId,
+            String pathValue,
+            boolean allowSensitive,
+            String actor,
+            String reason) {
         projectService.getProject(projectId);
         Path file = resolveProjectPath(projectId, pathValue);
         if (!Files.isRegularFile(file)) {
@@ -150,6 +173,11 @@ public class ArtifactService {
         }
         if (isSensitiveArtifact(projectId, file) && !allowSensitive) {
             throw new IllegalArgumentException("敏感样本原文默认禁止直接下载，请显式授权后重试: " + pathValue);
+        }
+        if (isSensitiveArtifact(projectId, file) && allowSensitive) {
+            appendSensitiveAccessAudit(projectId, "sensitive_download", actor, reason, Map.of(
+                "path", relative(projectId, file)
+            ));
         }
         try {
             return new DownloadedArtifact(
@@ -284,14 +312,30 @@ public class ArtifactService {
         }
         Path left = resolveProjectPath(projectId, leftPath);
         Path right = resolveProjectPath(projectId, rightPath);
+        boolean leftSensitive = isSensitiveArtifact(projectId, left);
+        boolean rightSensitive = isSensitiveArtifact(projectId, right);
         if (!Files.isRegularFile(left) || !Files.isRegularFile(right)) {
             throw new ResourceNotFoundException("Diff artifact does not exist");
         }
         if (!isTextArtifact(left) || !isTextArtifact(right)) {
             throw new IllegalArgumentException("只支持文本产物差异对比");
         }
-        if ((isSensitiveArtifact(projectId, left) || isSensitiveArtifact(projectId, right)) && !allowSensitive) {
+        if ((leftSensitive || rightSensitive) && !allowSensitive) {
             throw new IllegalArgumentException("敏感样本原文默认禁止差异对比，请显式授权后重试");
+        }
+        if ((leftSensitive || rightSensitive) && allowSensitive) {
+            appendSensitiveAccessAudit(
+                projectId,
+                "sensitive_diff",
+                stringValue(request == null ? null : request.get("actor"), "human"),
+                stringValue(request == null ? null : request.get("reason"), ""),
+                Map.of(
+                    "leftPath", relative(projectId, left),
+                    "rightPath", relative(projectId, right),
+                    "leftSensitive", leftSensitive,
+                    "rightSensitive", rightSensitive
+                )
+            );
         }
 
         List<String> leftLines = limitedLines(readText(left));
@@ -521,6 +565,18 @@ public class ArtifactService {
         item.put("reason", reason == null ? "" : reason);
         item.put("createdAt", LocalDateTime.now().toString());
         return item;
+    }
+
+    private void appendSensitiveAccessAudit(
+            String projectId,
+            String action,
+            String actor,
+            String reason,
+            Map<String, Object> details) {
+        Map<String, Object> audit = auditBase(projectId, action, actor, reason);
+        audit.put("sensitive", true);
+        audit.put("details", details == null ? Map.of() : details);
+        appendAudit(projectId, audit);
     }
 
     private void appendAudit(String projectId, Map<String, Object> event) {

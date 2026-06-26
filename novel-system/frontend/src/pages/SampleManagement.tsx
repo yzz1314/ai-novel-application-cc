@@ -24,6 +24,7 @@ import {
 } from 'antd'
 import {
   DeleteOutlined,
+  DownloadOutlined,
   EyeOutlined,
   FileDoneOutlined,
   FileSearchOutlined,
@@ -116,6 +117,8 @@ const SampleManagement: React.FC = () => {
   const [bookReport, setBookReport] = useState<any>(null)
   const [coverageReport, setCoverageReport] = useState<any>(null)
   const [reportDrawer, setReportDrawer] = useState<any>(null)
+  const [chunkDrawer, setChunkDrawer] = useState<any>(null)
+  const [chunkLoading, setChunkLoading] = useState(false)
   const [taskDrawer, setTaskDrawer] = useState<any>(null)
   const [form] = Form.useForm()
   const [fileList, setFileList] = useState<any[]>([])
@@ -377,6 +380,48 @@ const SampleManagement: React.FC = () => {
       })
     } catch (error) {
       message.warning('暂无跨书归纳报告')
+    }
+  }
+
+  const downloadText = (fileName: string, content: string) => {
+    const blob = new Blob([content || ''], { type: 'text/plain;charset=utf-8' })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = fileName
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+  }
+
+  const downloadJson = (fileName: string, data: any) => {
+    downloadText(fileName, JSON.stringify(data || {}, null, 2))
+  }
+
+  const reportFileName = (report: any, fallback: string) => {
+    const path = report?.path || ''
+    const fromPath = path.split('/').filter(Boolean).pop()
+    return fromPath || fallback
+  }
+
+  const openChunkDetail = async (chunk: any) => {
+    if (!projectId || !selectedSample) return
+    const sampleId = selectedSample.sampleId || selectedSample.id
+    try {
+      setChunkLoading(true)
+      const [chunkDetail, analysisDetail] = await Promise.all([
+        analysisApi.getChunk(projectId, sampleId, chunk.id),
+        analysisApi.getChunkAnalysis(projectId, sampleId, chunk.id).catch(() => null),
+      ])
+      setChunkDrawer({
+        chunk: chunkDetail,
+        analysis: analysisDetail,
+      })
+    } catch (error) {
+      message.error('加载分块详情失败')
+    } finally {
+      setChunkLoading(false)
     }
   }
 
@@ -827,7 +872,13 @@ const SampleManagement: React.FC = () => {
                   <List
                     dataSource={chunks}
                     renderItem={(chunk) => (
-                      <List.Item>
+                      <List.Item
+                        actions={[
+                          <Button type="link" icon={<EyeOutlined />} onClick={() => openChunkDetail(chunk)}>
+                            详情
+                          </Button>,
+                        ]}
+                      >
                         <List.Item.Meta
                           title={`${chunk.id} ${chunk.chapterRange || ''}`}
                           description={chunk.preview}
@@ -844,7 +895,15 @@ const SampleManagement: React.FC = () => {
                 label: '单书报告',
                 children: bookReport?.content ? (
                   <Space direction="vertical" style={{ width: '100%' }}>
-                    <Text type="secondary">{bookReport.path}</Text>
+                    <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                      <Text type="secondary">{bookReport.path}</Text>
+                      <Button
+                        icon={<DownloadOutlined />}
+                        onClick={() => downloadText(reportFileName(bookReport, `${selectedSample?.id || 'sample'}_report.md`), bookReport.content)}
+                      >
+                        下载报告
+                      </Button>
+                    </Space>
                     <Paragraph style={{ whiteSpace: 'pre-wrap' }}>{bookReport.content}</Paragraph>
                   </Space>
                 ) : (
@@ -861,6 +920,14 @@ const SampleManagement: React.FC = () => {
         width={920}
         open={!!reportDrawer}
         onClose={() => setReportDrawer(null)}
+        extra={reportDrawer?.content ? (
+          <Button
+            icon={<DownloadOutlined />}
+            onClick={() => downloadText(reportFileName(reportDrawer, 'analysis_report.md'), reportDrawer.content)}
+          >
+            下载
+          </Button>
+        ) : null}
       >
         {reportDrawer?.path && <Text type="secondary">{reportDrawer.path}</Text>}
         {reportDrawer?.techniqueSummary && (
@@ -870,6 +937,74 @@ const SampleManagement: React.FC = () => {
           </>
         )}
         <Paragraph style={{ whiteSpace: 'pre-wrap' }}>{reportDrawer?.content}</Paragraph>
+      </Drawer>
+
+      <Drawer
+        title={chunkDrawer?.chunk?.id || '分块详情'}
+        width={980}
+        open={!!chunkDrawer}
+        loading={chunkLoading}
+        onClose={() => setChunkDrawer(null)}
+        extra={chunkDrawer ? (
+          <Space>
+            <Button
+              icon={<DownloadOutlined />}
+              onClick={() => downloadJson(`${chunkDrawer.chunk?.id || 'chunk'}_detail.json`, chunkDrawer)}
+            >
+              导出JSON
+            </Button>
+          </Space>
+        ) : null}
+      >
+        {chunkDrawer ? (
+          <Tabs
+            items={[
+              {
+                key: 'chunk',
+                label: '原文分块',
+                children: (
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Descriptions bordered column={2}>
+                      <Descriptions.Item label="Chunk ID">{chunkDrawer.chunk?.id}</Descriptions.Item>
+                      <Descriptions.Item label="路径">{chunkDrawer.chunk?.path}</Descriptions.Item>
+                      <Descriptions.Item label="章节范围">{chunkDrawer.chunk?.chapterRange || '-'}</Descriptions.Item>
+                      <Descriptions.Item label="更新时间">{chunkDrawer.chunk?.updatedAt || '-'}</Descriptions.Item>
+                    </Descriptions>
+                    <Paragraph style={{ whiteSpace: 'pre-wrap' }}>
+                      {chunkDrawer.chunk?.content || chunkDrawer.chunk?.text || chunkDrawer.chunk?.preview || ''}
+                    </Paragraph>
+                  </Space>
+                ),
+              },
+              {
+                key: 'analysis',
+                label: '分析结果',
+                children: chunkDrawer.analysis ? (
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Descriptions bordered column={2}>
+                      <Descriptions.Item label="路径">{chunkDrawer.analysis.path}</Descriptions.Item>
+                      <Descriptions.Item label="更新时间">{chunkDrawer.analysis.updatedAt || '-'}</Descriptions.Item>
+                    </Descriptions>
+                    <pre style={{ whiteSpace: 'pre-wrap' }}>
+                      {JSON.stringify(chunkDrawer.analysis.analysis || chunkDrawer.analysis, null, 2)}
+                    </pre>
+                  </Space>
+                ) : (
+                  <Empty description="暂无该分块分析结果" />
+                ),
+              },
+              {
+                key: 'raw',
+                label: '完整JSON',
+                children: (
+                  <pre style={{ whiteSpace: 'pre-wrap' }}>
+                    {JSON.stringify(chunkDrawer, null, 2)}
+                  </pre>
+                ),
+              },
+            ]}
+          />
+        ) : null}
       </Drawer>
 
       <Drawer

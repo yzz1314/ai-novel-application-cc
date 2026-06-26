@@ -294,15 +294,27 @@ export const artifactApi = {
   getOverview: (projectId: string) => request(api.get(`/projects/${projectId}/artifacts`)),
   list: (projectId: string, params?: any) =>
     request(api.get(`/projects/${projectId}/artifacts/list`, { params })),
-  view: (projectId: string, path: string) =>
-    request(api.get(`/projects/${projectId}/artifacts/view`, { params: { path } })),
-  download: (projectId: string, path: string) =>
+  view: (projectId: string, path: string, params?: any) =>
+    request(api.get(`/projects/${projectId}/artifacts/view`, { params: { path, ...(params || {}) } })),
+  download: (projectId: string, path: string, params?: any) =>
     request<Blob>(
       api.get(`/projects/${projectId}/artifacts/download`, {
-        params: { path },
+        params: { path, ...(params || {}) },
         responseType: 'blob',
       })
     ),
+  bulkDownload: (projectId: string, data: any) =>
+    request<Blob>(
+      api.post(`/projects/${projectId}/artifacts/bulk-download`, data || {}, {
+        responseType: 'blob',
+      })
+    ),
+  archive: (projectId: string, data: any) =>
+    request(api.post(`/projects/${projectId}/artifacts/archive`, data || {})),
+  diff: (projectId: string, data: any) =>
+    request(api.post(`/projects/${projectId}/artifacts/diff`, data || {})),
+  audit: (projectId: string, params?: any) =>
+    request(api.get(`/projects/${projectId}/artifacts/audit`, { params })),
 }
 
 export const analysisApi = {

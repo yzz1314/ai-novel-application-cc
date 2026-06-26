@@ -7,6 +7,7 @@ import {
   Drawer,
   Empty,
   Input,
+  Modal,
   Row,
   Select,
   Space,
@@ -17,9 +18,12 @@ import {
   message,
 } from 'antd'
 import {
+  DeleteOutlined,
+  DiffOutlined,
   DownloadOutlined,
   EyeOutlined,
   FolderOpenOutlined,
+  HistoryOutlined,
   ReloadOutlined,
 } from '@ant-design/icons'
 import { useParams } from 'react-router-dom'
@@ -47,6 +51,11 @@ const ArtifactView: React.FC = () => {
   const [category, setCategory] = useState<string>('all')
   const [query, setQuery] = useState('')
   const [drawer, setDrawer] = useState<any>(null)
+  const [auditDrawer, setAuditDrawer] = useState<any[]>([])
+  const [auditOpen, setAuditOpen] = useState(false)
+  const [diffDrawer, setDiffDrawer] = useState<any>(null)
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
+  const [actionLoading, setActionLoading] = useState(false)
 
   useEffect(() => {
     loadData()
@@ -60,6 +69,10 @@ const ArtifactView: React.FC = () => {
   const totalBytes = useMemo(
     () => categories.reduce((sum: number, item: any) => sum + (item.bytes || 0), 0),
     [categories]
+  )
+  const selectedItems = useMemo(
+    () => items.filter((item) => selectedRowKeys.includes(item.path)),
+    [items, selectedRowKeys]
   )
 
   const loadData = async (nextQuery = query) => {
@@ -76,6 +89,7 @@ const ArtifactView: React.FC = () => {
       ])
       setOverview(overviewData)
       setItems(listData?.items || [])
+      setSelectedRowKeys([])
     } catch (error) {
       message.error('加载产物失败')
     } finally {
@@ -113,13 +127,101 @@ const ArtifactView: React.FC = () => {
     }
   }
 
+  const downloadSelected = async () => {
+    if (!projectId || selectedItems.length === 0) return
+    try {
+      setActionLoading(true)
+      const blob = await artifactApi.bulkDownload(projectId, {
+        paths: selectedItems.map((item) => item.path),
+        actor: 'human',
+        reason: 'ArtifactView批量导出',
+      })
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `artifacts_${Date.now()}.zip`
+      link.click()
+      window.URL.revokeObjectURL(url)
+      message.success('批量导出已开始，敏感样本原文会自动跳过')
+    } catch (error) {
+      message.error('批量导出失败')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const archiveArtifact = (record: any) => {
+    if (!projectId) return
+    Modal.confirm({
+      title: '归档这个产物？',
+      content: '归档会把文件移动到 artifacts/archive，并写入审计日志；不会物理删除。',
+      okText: '归档',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        try {
+          setActionLoading(true)
+          await artifactApi.archive(projectId, {
+            path: record.path,
+            actor: 'human',
+            reason: 'ArtifactView归档',
+          })
+          message.success('产物已归档')
+          await loadData()
+        } catch (error) {
+          message.error('归档产物失败')
+        } finally {
+          setActionLoading(false)
+        }
+      },
+    })
+  }
+
+  const openDiff = async () => {
+    if (!projectId || selectedItems.length !== 2) {
+      message.warning('请选择两个文本产物进行对比')
+      return
+    }
+    try {
+      setActionLoading(true)
+      const result = await artifactApi.diff(projectId, {
+        leftPath: selectedItems[0].path,
+        rightPath: selectedItems[1].path,
+      })
+      setDiffDrawer(result)
+    } catch (error) {
+      message.error('产物差异对比失败')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const openAudit = async () => {
+    if (!projectId) return
+    try {
+      setActionLoading(true)
+      const result = await artifactApi.audit(projectId, { limit: 100 })
+      setAuditDrawer(result?.items || [])
+      setAuditOpen(true)
+    } catch (error) {
+      message.error('加载审计日志失败')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   const columns = [
     {
       title: '类型',
       dataIndex: 'category',
       key: 'category',
       width: 100,
-      render: (value: string) => <Tag color={categoryColors[value] || 'default'}>{value}</Tag>,
+      render: (value: string, record: any) => (
+        <Space size={4}>
+          <Tag color={categoryColors[value] || 'default'}>{value}</Tag>
+          {record.sensitive && <Tag color="red">敏感</Tag>}
+        </Space>
+      ),
     },
     { title: '文件', dataIndex: 'name', key: 'name', width: 220 },
     { title: '路径', dataIndex: 'path', key: 'path' },
@@ -135,14 +237,17 @@ const ArtifactView: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      width: 140,
+      width: 220,
       render: (_: any, record: any) => (
-        <Space>
+        <Space wrap>
           <Button type="link" icon={<EyeOutlined />} onClick={() => openArtifact(record)}>
             预览
           </Button>
           <Button type="link" icon={<DownloadOutlined />} onClick={() => downloadArtifact(record)}>
             下载
+          </Button>
+          <Button type="link" danger icon={<DeleteOutlined />} onClick={() => archiveArtifact(record)}>
+            归档
           </Button>
         </Space>
       ),
@@ -201,6 +306,25 @@ const ArtifactView: React.FC = () => {
             onChange={(event) => setQuery(event.target.value)}
             onSearch={(value) => loadData(value)}
           />
+          <Button
+            icon={<DownloadOutlined />}
+            onClick={downloadSelected}
+            disabled={selectedItems.length === 0}
+            loading={actionLoading}
+          >
+            批量导出
+          </Button>
+          <Button
+            icon={<DiffOutlined />}
+            onClick={openDiff}
+            disabled={selectedItems.length !== 2}
+            loading={actionLoading}
+          >
+            对比
+          </Button>
+          <Button icon={<HistoryOutlined />} onClick={openAudit} loading={actionLoading}>
+            审计
+          </Button>
         </Space>
         {items.length ? (
           <Table
@@ -208,6 +332,10 @@ const ArtifactView: React.FC = () => {
             dataSource={items}
             rowKey="path"
             loading={loading}
+            rowSelection={{
+              selectedRowKeys,
+              onChange: setSelectedRowKeys,
+            }}
             pagination={{ pageSize: 12 }}
           />
         ) : (
@@ -230,11 +358,66 @@ const ArtifactView: React.FC = () => {
               <Descriptions.Item label="更新时间" span={2}>{drawer.updatedAt}</Descriptions.Item>
             </Descriptions>
             {drawer.truncated && <Tag color="warning">内容已截断显示</Tag>}
+            {drawer.redacted && <Tag color="red">敏感内容已保护，仅显示短预览</Tag>}
             <Paragraph style={{ whiteSpace: 'pre-wrap', maxHeight: 560, overflow: 'auto' }}>
               {drawer.content || '无可预览文本'}
             </Paragraph>
           </Space>
         ) : null}
+      </Drawer>
+
+      <Drawer
+        title="产物差异对比"
+        open={!!diffDrawer}
+        width={960}
+        onClose={() => setDiffDrawer(null)}
+      >
+        {diffDrawer ? (
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <Descriptions bordered size="small" column={2}>
+              <Descriptions.Item label="左侧" span={2}>{diffDrawer.left?.path}</Descriptions.Item>
+              <Descriptions.Item label="右侧" span={2}>{diffDrawer.right?.path}</Descriptions.Item>
+              <Descriptions.Item label="新增行">{diffDrawer.addedLines}</Descriptions.Item>
+              <Descriptions.Item label="删除行">{diffDrawer.removedLines}</Descriptions.Item>
+            </Descriptions>
+            <div style={{ maxHeight: 620, overflow: 'auto', fontFamily: 'monospace', fontSize: 12 }}>
+              {(diffDrawer.diff || []).map((line: any, index: number) => {
+                const color = line.type === 'added' ? '#f6ffed' : line.type === 'removed' ? '#fff1f0' : '#fff'
+                const prefix = line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '
+                return (
+                  <div key={index} style={{ background: color, whiteSpace: 'pre-wrap', padding: '2px 8px' }}>
+                    <Text type="secondary" style={{ marginRight: 8 }}>
+                      {String(line.leftLine || '').padStart(4, ' ')} {String(line.rightLine || '').padStart(4, ' ')}
+                    </Text>
+                    {prefix} {line.text}
+                  </div>
+                )
+              })}
+            </div>
+          </Space>
+        ) : null}
+      </Drawer>
+
+      <Drawer
+        title="产物审计"
+        open={auditOpen}
+        width={820}
+        onClose={() => setAuditOpen(false)}
+      >
+        <Table
+          rowKey="eventId"
+          dataSource={auditDrawer}
+          size="small"
+          pagination={{ pageSize: 12 }}
+          columns={[
+            { title: '时间', dataIndex: 'createdAt', key: 'createdAt', width: 180 },
+            { title: '动作', dataIndex: 'action', key: 'action', width: 120, render: (value: string) => <Tag>{value}</Tag> },
+            { title: '操作者', dataIndex: 'actor', key: 'actor', width: 100 },
+            { title: '来源路径', dataIndex: 'sourcePath', key: 'sourcePath', ellipsis: true },
+            { title: '说明', dataIndex: 'reason', key: 'reason', ellipsis: true },
+          ]}
+          locale={{ emptyText: '暂无审计记录' }}
+        />
       </Drawer>
     </Space>
   )

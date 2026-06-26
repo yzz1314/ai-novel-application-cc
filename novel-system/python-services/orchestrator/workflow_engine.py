@@ -88,7 +88,7 @@ class WorkflowEngine:
 
                 if node_type == "human_confirmation":
                     confirmation = self._consume_human_confirmation(node_id, request)
-                    if not confirmation.get("approved"):
+                    if not confirmation.get("submitted"):
                         state["status"] = "waiting_for_human"
                         state["waiting_for_human"] = {
                             "node_id": node_id,
@@ -106,6 +106,30 @@ class WorkflowEngine:
                             warnings=[{
                                 "code": "WORKFLOW_WAITING_FOR_HUMAN",
                                 "message": f"Workflow paused at human confirmation node: {node_id}",
+                                "retryable": False,
+                            }],
+                        )
+
+                    if not confirmation.get("approved"):
+                        state["status"] = "cancelled"
+                        state["waiting_for_human"] = None
+                        state["node_results"][node_id] = {
+                            "node_id": node_id,
+                            "type": "human_confirmation",
+                            "status": "cancelled",
+                            "decision": confirmation,
+                        }
+                        checkpoint_ref = self._save_running_checkpoint(request, workflow_id, state)
+                        return self._response(
+                            request,
+                            started_at,
+                            "cancelled",
+                            output_refs + [checkpoint_ref],
+                            state,
+                            checkpoint_ref,
+                            warnings=[{
+                                "code": "WORKFLOW_HUMAN_REJECTED",
+                                "message": f"Workflow cancelled by human confirmation node: {node_id}",
                                 "retryable": False,
                             }],
                         )
@@ -504,23 +528,39 @@ class WorkflowEngine:
         return current
 
     def _consume_human_confirmation(self, node_id: str, request: AgentRequest) -> Dict[str, Any]:
-        resume_input = request.parameters.get("resume_input") or request.config.get("resume_input") or {}
+        missing = object()
+        if "resume_input" in request.parameters:
+            resume_input = request.parameters.get("resume_input")
+        elif "resume_input" in request.config:
+            resume_input = request.config.get("resume_input")
+        else:
+            return {"submitted": False, "approved": False}
+
+        value: Any = missing
         confirmations = resume_input.get("human_confirmations") if isinstance(resume_input, dict) else None
         if isinstance(confirmations, dict) and node_id in confirmations:
             value = confirmations[node_id]
         elif isinstance(resume_input, dict) and node_id in resume_input:
             value = resume_input[node_id]
-        else:
+        elif isinstance(resume_input, dict) and any(key in resume_input for key in ("approved", "continue", "decision")):
+            value = resume_input
+        elif isinstance(resume_input, bool):
             value = resume_input
 
+        if value is missing:
+            return {"submitted": False, "approved": False}
+
         if isinstance(value, bool):
-            return {"approved": value}
+            return {"submitted": True, "approved": value}
         if isinstance(value, dict):
-            approved = value.get("approved", value.get("continue", False))
+            approved = value.get("approved", value.get("continue"))
+            if approved is None and "decision" in value:
+                approved = str(value.get("decision")).lower() in {"approve", "approved", "yes", "true", "continue"}
             result = dict(value)
+            result["submitted"] = True
             result["approved"] = bool(approved)
             return result
-        return {"approved": False}
+        return {"submitted": False, "approved": False}
 
     def _response(
         self,

@@ -161,6 +161,7 @@ const GraphView: React.FC = () => {
   }
 
   const handleExport = async (format: string) => {
+    if (!projectId) return
     try {
       const blob = await graphApi.export(projectId, bookId || 'default', format)
       const url = window.URL.createObjectURL(blob)

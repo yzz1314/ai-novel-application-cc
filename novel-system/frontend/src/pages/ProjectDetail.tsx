@@ -30,6 +30,7 @@ import {
 import {
   BookOutlined,
   CheckCircleOutlined,
+  CloseCircleOutlined,
   DatabaseOutlined,
   EditOutlined,
   EyeOutlined,
@@ -68,16 +69,20 @@ const ProjectDetail: React.FC = () => {
   const [skillVersionLoading, setSkillVersionLoading] = useState(false);
   const [skillVersions, setSkillVersions] = useState<any[]>([]);
   const [versionSkill, setVersionSkill] = useState<any>(null);
+  const [approvalTask, setApprovalTask] = useState<any>(null);
+  const [approvalDecision, setApprovalDecision] = useState<'approve' | 'reject'>('approve');
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false);
   const [skillForm] = Form.useForm();
+  const [approvalForm] = Form.useForm();
 
   useEffect(() => {
     loadProjectData();
   }, [projectId]);
 
-  const loadProjectData = async () => {
+  const loadProjectData = async (silent = false) => {
     if (!projectId) return;
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const [projectData, sampleData, taskData, skillData, bookData, conflictData] = await Promise.all([
         projectApi.getDetail(projectId),
         sampleApi.getList(projectId).catch(() => []),
@@ -102,7 +107,7 @@ const ProjectDetail: React.FC = () => {
     } catch (error) {
       message.error('加载项目详情失败');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -159,8 +164,28 @@ const ProjectDetail: React.FC = () => {
   const recentTasks = [...tasks]
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
     .slice(0, 8);
+  const waitingApprovalTasks = tasks.filter((task) => isWaitingForHuman(task));
+  const hasRunningTasks = tasks.some((task) => ['PENDING', 'RUNNING'].includes(task.status));
+
+  useEffect(() => {
+    if (!projectId || !hasRunningTasks) return;
+    const timer = window.setInterval(() => loadProjectData(true), 3000);
+    return () => window.clearInterval(timer);
+  }, [projectId, hasRunningTasks]);
 
   const conflictCount = skillConflicts?.conflictCount || 0;
+
+  function isWaitingForHuman(task: any) {
+    return task?.status === 'PARTIAL' && !!task?.result?.waiting_for_human?.node_id;
+  }
+
+  const taskStatusColor = (status?: string) => {
+    if (status === 'SUCCESS') return 'success';
+    if (status === 'FAILED') return 'error';
+    if (status === 'PARTIAL') return 'warning';
+    if (status === 'CANCELLED') return 'default';
+    return 'processing';
+  };
 
   const qualityColor = (status?: string) => {
     if (status === 'passed') return 'success';
@@ -258,11 +283,54 @@ const ProjectDetail: React.FC = () => {
       dataIndex: 'status',
       key: 'status',
       render: (status: string) => {
-        const color = status === 'SUCCESS' ? 'success' : status === 'FAILED' ? 'error' : 'processing';
-        return <Tag color={color}>{status}</Tag>;
+        return <Tag color={taskStatusColor(status)}>{status}</Tag>;
+      },
+    },
+    {
+      title: '当前节点',
+      key: 'waitingForHuman',
+      render: (_: any, record: any) => {
+        const waiting = record.result?.waiting_for_human;
+        if (!waiting) {
+          return <Text type="secondary">{record.result?.workflow_name || '-'}</Text>;
+        }
+        return (
+          <Space direction="vertical" size={0}>
+            <Text strong>{waiting.node_id}</Text>
+            <Text type="secondary">{waiting.prompt}</Text>
+          </Space>
+        );
       },
     },
     { title: '创建时间', dataIndex: 'createdAt', key: 'createdAt' },
+    {
+      title: '操作',
+      key: 'action',
+      width: 180,
+      render: (_: any, record: any) => (
+        isWaitingForHuman(record) ? (
+          <Space size="small">
+            <Button
+              type="link"
+              icon={<CheckCircleOutlined />}
+              onClick={() => openApprovalModal(record, 'approve')}
+            >
+              批准
+            </Button>
+            <Button
+              type="link"
+              danger
+              icon={<CloseCircleOutlined />}
+              onClick={() => openApprovalModal(record, 'reject')}
+            >
+              驳回
+            </Button>
+          </Space>
+        ) : (
+          <Text type="secondary">-</Text>
+        )
+      ),
+    },
   ];
 
   const loadSkillContent = async (skillName: string) => {
@@ -442,12 +510,99 @@ const ProjectDetail: React.FC = () => {
     }
   };
 
+  const openApprovalModal = (task: any, decision: 'approve' | 'reject') => {
+    const waiting = task?.result?.waiting_for_human;
+    if (!waiting?.node_id) {
+      message.warning('这个任务没有等待人工确认的节点');
+      return;
+    }
+    setApprovalTask(task);
+    setApprovalDecision(decision);
+    approvalForm.setFieldsValue({
+      reviewer: 'human',
+      note: '',
+    });
+  };
+
+  const submitWorkflowApproval = async () => {
+    if (!approvalTask) return;
+    const waiting = approvalTask.result?.waiting_for_human;
+    if (!waiting?.node_id) {
+      message.warning('这个任务没有等待人工确认的节点');
+      return;
+    }
+
+    try {
+      const values = await approvalForm.validateFields();
+      setApprovalSubmitting(true);
+      await taskApi.resume(approvalTask.id, {
+        human_confirmations: {
+          [waiting.node_id]: {
+            approved: approvalDecision === 'approve',
+            reviewer: values.reviewer || 'human',
+            note: values.note || '',
+            decided_at: new Date().toISOString(),
+          },
+        },
+      });
+      message.success(approvalDecision === 'approve' ? '已批准，工作流恢复执行' : '已驳回，工作流将取消');
+      setApprovalTask(null);
+      await loadProjectData();
+    } catch (error) {
+      message.error('提交工作流审批失败');
+    } finally {
+      setApprovalSubmitting(false);
+    }
+  };
+
   const tabItems = [
     {
       key: 'overview',
       label: '概览',
       children: (
         <Space direction="vertical" size="large" style={{ width: '100%' }}>
+          {waitingApprovalTasks.length > 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              message={`有 ${waitingApprovalTasks.length} 个工作流等待人工确认`}
+              description={
+                <List
+                  size="small"
+                  dataSource={waitingApprovalTasks.slice(0, 3)}
+                  renderItem={(task: any) => (
+                    <List.Item
+                      actions={[
+                        <Button
+                          key="approve"
+                          size="small"
+                          type="primary"
+                          icon={<CheckCircleOutlined />}
+                          onClick={() => openApprovalModal(task, 'approve')}
+                        >
+                          批准
+                        </Button>,
+                        <Button
+                          key="reject"
+                          size="small"
+                          danger
+                          icon={<CloseCircleOutlined />}
+                          onClick={() => openApprovalModal(task, 'reject')}
+                        >
+                          驳回
+                        </Button>,
+                      ]}
+                    >
+                      <List.Item.Meta
+                        title={`${task.agentName || task.taskType} / ${task.result?.waiting_for_human?.node_id}`}
+                        description={task.result?.waiting_for_human?.prompt || '等待人工确认'}
+                      />
+                    </List.Item>
+                  )}
+                />
+              }
+            />
+          )}
           <Row gutter={16}>
             <Col span={6}><Card><Statistic title="样本" value={samples.length} /></Card></Col>
             <Col span={6}><Card><Statistic title="已分析" value={analyzedSamples} /></Card></Col>
@@ -589,7 +744,7 @@ const ProjectDetail: React.FC = () => {
                 <Title level={3} style={{ marginBottom: 0 }}>{project?.name || projectId}</Title>
                 <Text type="secondary">{project?.description || '暂无描述'}</Text>
               </div>
-              <Button icon={<ReloadOutlined />} onClick={loadProjectData}>刷新</Button>
+              <Button icon={<ReloadOutlined />} onClick={() => loadProjectData()}>刷新</Button>
             </Space>
             <Steps current={currentStep} items={workflowSteps as any} />
           </Space>
@@ -690,6 +845,44 @@ const ProjectDetail: React.FC = () => {
           ]}
           locale={{ emptyText: '暂无历史版本' }}
         />
+      </Modal>
+
+      <Modal
+        title={approvalDecision === 'approve' ? '批准工作流继续执行' : '驳回并取消工作流'}
+        open={!!approvalTask}
+        confirmLoading={approvalSubmitting}
+        okText={approvalDecision === 'approve' ? '批准并恢复' : '确认驳回'}
+        okButtonProps={{ danger: approvalDecision === 'reject' }}
+        cancelText="取消"
+        onOk={submitWorkflowApproval}
+        onCancel={() => setApprovalTask(null)}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Alert
+            type={approvalDecision === 'approve' ? 'info' : 'warning'}
+            showIcon
+            message={approvalTask?.result?.waiting_for_human?.prompt || '等待人工确认'}
+            description={
+              <Space direction="vertical" size={0}>
+                <Text>任务：{approvalTask?.id}</Text>
+                <Text>节点：{approvalTask?.result?.waiting_for_human?.node_id}</Text>
+                {approvalTask?.checkpointRef && <Text>Checkpoint：{approvalTask.checkpointRef}</Text>}
+              </Space>
+            }
+          />
+          <Form form={approvalForm} layout="vertical">
+            <Form.Item
+              name="reviewer"
+              label="审批人"
+              rules={[{ required: true, message: '请输入审批人' }]}
+            >
+              <Input placeholder="human" />
+            </Form.Item>
+            <Form.Item name="note" label="审批意见">
+              <TextArea rows={4} placeholder="记录本次批准或驳回原因" />
+            </Form.Item>
+          </Form>
+        </Space>
       </Modal>
     </Spin>
   );

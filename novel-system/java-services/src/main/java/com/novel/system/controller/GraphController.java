@@ -54,6 +54,16 @@ public class GraphController {
         return ResponseEntity.ok(graphArtifactService.queryGraph(projectId, "default", request == null ? Map.of() : request));
     }
 
+    @GetMapping("/api/projects/{projectId}/graph/query-cache")
+    public ResponseEntity<Map<String, Object>> listProjectGraphQueryCaches(@PathVariable String projectId) {
+        return ResponseEntity.ok(graphArtifactService.listQueryCaches(projectId, "default"));
+    }
+
+    @PostMapping("/api/projects/{projectId}/graph/query-cache/clear")
+    public ResponseEntity<Map<String, Object>> clearProjectGraphQueryCaches(@PathVariable String projectId) {
+        return ResponseEntity.ok(graphArtifactService.clearQueryCaches(projectId, "default"));
+    }
+
     @PostMapping("/api/projects/{projectId}/graph/rebuild")
     public ResponseEntity<TaskResponse> rebuildProjectGraph(
             @PathVariable String projectId,
@@ -82,6 +92,20 @@ public class GraphController {
             @PathVariable String bookId,
             @RequestBody(required = false) Map<String, Object> request) {
         return ResponseEntity.ok(graphArtifactService.queryGraph(projectId, bookId, request == null ? Map.of() : request));
+    }
+
+    @GetMapping("/api/projects/{projectId}/books/{bookId}/graph/query-cache")
+    public ResponseEntity<Map<String, Object>> listBookGraphQueryCaches(
+            @PathVariable String projectId,
+            @PathVariable String bookId) {
+        return ResponseEntity.ok(graphArtifactService.listQueryCaches(projectId, bookId));
+    }
+
+    @PostMapping("/api/projects/{projectId}/books/{bookId}/graph/query-cache/clear")
+    public ResponseEntity<Map<String, Object>> clearBookGraphQueryCaches(
+            @PathVariable String projectId,
+            @PathVariable String bookId) {
+        return ResponseEntity.ok(graphArtifactService.clearQueryCaches(projectId, bookId));
     }
 
     @PostMapping("/api/projects/{projectId}/books/{bookId}/graph/rebuild")

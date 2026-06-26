@@ -15,6 +15,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayDeque;
@@ -27,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -35,7 +38,6 @@ import java.util.stream.Collectors;
 public class GraphArtifactService {
 
     private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9_-]+$");
-
     private final ProjectService projectService;
     private final TaskExecutorService taskExecutorService;
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -56,7 +58,13 @@ public class GraphArtifactService {
     }
 
     public Map<String, Object> queryGraph(String projectId, String bookId, Map<String, Object> request) {
-        Map<String, Object> graph = getGraph(projectId, bookId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Map<String, Object> cache = readQueryCache(projectId, resolvedBookId, request);
+        if (cache != null) {
+            return cache;
+        }
+
+        Map<String, Object> graph = getGraph(projectId, resolvedBookId);
         List<Map<String, Object>> nodes = listOfMaps(graph.get("nodes"));
         List<Map<String, Object>> edges = listOfMaps(graph.get("edges"));
 
@@ -77,7 +85,7 @@ public class GraphArtifactService {
             response.put("analysis", graph.get("analysis"));
             response.put("totalFound", 1);
             response.put("returned", 1);
-            return response;
+            return writeQueryCache(projectId, resolvedBookId, request, response);
         }
 
         List<Map<String, Object>> matchedNodes = nodes.stream()
@@ -127,7 +135,7 @@ public class GraphArtifactService {
         response.put("paths", paths);
         response.put("totalFound", matchedNodes.size() + matchedEdges.size() + paths.size());
         response.put("returned", matchedNodes.size() + matchedEdges.size());
-        return response;
+        return writeQueryCache(projectId, resolvedBookId, request, response);
     }
 
     public Task rebuildGraph(String projectId, String bookId, Map<String, Object> request) {
@@ -145,6 +153,70 @@ public class GraphArtifactService {
         );
         taskExecutorService.executeTaskAsync(task.getId());
         return task;
+    }
+
+    public Map<String, Object> listQueryCaches(String projectId, String bookId) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Path cacheDir = queryCacheDir(projectId);
+        List<Map<String, Object>> items = new ArrayList<>();
+        if (Files.exists(cacheDir)) {
+            try (var stream = Files.list(cacheDir)) {
+                stream
+                    .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".json"))
+                    .forEach(path -> {
+                        try {
+                            Map<String, Object> cache = readJsonMap(path);
+                            if (resolvedBookId.equals(cache.get("bookId")) || resolvedBookId.equals(cache.get("book_id"))) {
+                                items.add(cacheSummary(projectId, path, cache));
+                            }
+                        } catch (Exception ignored) {
+                            Map<String, Object> item = new LinkedHashMap<>();
+                            item.put("id", stripSuffix(path.getFileName().toString(), ".json"));
+                            item.put("path", relative(projectId, path));
+                            item.put("updatedAt", modifiedAt(path));
+                            items.add(item);
+                        }
+                    });
+            } catch (IOException e) {
+                throw new RuntimeException("读取图谱查询缓存失败", e);
+            }
+        }
+        items.sort(Comparator.comparing(item -> String.valueOf(item.get("createdAt")), Comparator.reverseOrder()));
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("bookId", resolvedBookId);
+        response.put("count", items.size());
+        response.put("items", items);
+        return response;
+    }
+
+    public Map<String, Object> clearQueryCaches(String projectId, String bookId) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Path cacheDir = queryCacheDir(projectId);
+        int deleted = 0;
+        if (Files.exists(cacheDir)) {
+            try (var stream = Files.list(cacheDir)) {
+                for (Path path : stream
+                    .filter(candidate -> Files.isRegularFile(candidate) && candidate.getFileName().toString().endsWith(".json"))
+                    .toList()) {
+                    Map<String, Object> cache = readJsonMap(path);
+                    if (resolvedBookId.equals(cache.get("bookId")) || resolvedBookId.equals(cache.get("book_id"))) {
+                        Files.deleteIfExists(path);
+                        deleted++;
+                    }
+                }
+            } catch (IOException e) {
+                throw new RuntimeException("清理图谱查询缓存失败", e);
+            }
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("bookId", resolvedBookId);
+        response.put("deletedCount", deleted);
+        response.put("status", "cleared");
+        return response;
     }
 
     public ExportedGraph exportGraph(String projectId, String bookId, String format) {
@@ -317,6 +389,121 @@ public class GraphArtifactService {
             .toList());
         result.put("warnings", graphWarnings(nodes, edges, components));
         return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> readQueryCache(String projectId, String bookId, Map<String, Object> request) {
+        Path graphFile = resolveGraphFile(projectId, bookId);
+        String cacheId = queryCacheId(projectId, bookId, graphFile, request);
+        Path cacheFile = queryCacheDir(projectId).resolve(cacheId + ".json");
+        if (!Files.exists(cacheFile)) {
+            return null;
+        }
+        try {
+            Map<String, Object> cached = readJsonMap(cacheFile);
+            if (!String.valueOf(modifiedAt(graphFile)).equals(String.valueOf(cached.get("graphUpdatedAt")))) {
+                return null;
+            }
+            Object rawResponse = cached.get("response");
+            if (!(rawResponse instanceof Map<?, ?> responseMap)) {
+                return null;
+            }
+            Map<String, Object> response = new LinkedHashMap<>();
+            responseMap.forEach((key, value) -> response.put(String.valueOf(key), value));
+            response.put("cacheHit", true);
+            response.put("cacheId", cacheId);
+            response.put("cachePath", relative(projectId, cacheFile));
+            response.put("cachedAt", cached.get("createdAt"));
+            return response;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private Map<String, Object> writeQueryCache(
+            String projectId,
+            String bookId,
+            Map<String, Object> request,
+            Map<String, Object> response) {
+        Path graphFile = resolveGraphFile(projectId, bookId);
+        String cacheId = queryCacheId(projectId, bookId, graphFile, request);
+        Path cacheDir = queryCacheDir(projectId);
+        Path cacheFile = cacheDir.resolve(cacheId + ".json");
+        try {
+            Files.createDirectories(cacheDir);
+            Map<String, Object> cache = new LinkedHashMap<>();
+            cache.put("id", cacheId);
+            cache.put("projectId", projectId);
+            cache.put("bookId", bookId);
+            cache.put("book_id", bookId);
+            cache.put("request", normalizedQueryRequest(request));
+            cache.put("graphPath", relative(projectId, graphFile));
+            cache.put("graphUpdatedAt", modifiedAt(graphFile));
+            cache.put("createdAt", LocalDateTime.now().toString());
+            cache.put("response", response);
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(cacheFile.toFile(), cache);
+        } catch (IOException e) {
+            throw new RuntimeException("写入图谱查询缓存失败", e);
+        }
+
+        Map<String, Object> cachedResponse = new LinkedHashMap<>(response);
+        cachedResponse.put("cacheHit", false);
+        cachedResponse.put("cacheId", cacheId);
+        cachedResponse.put("cachePath", relative(projectId, cacheFile));
+        return cachedResponse;
+    }
+
+    private Map<String, Object> cacheSummary(String projectId, Path cacheFile, Map<String, Object> cache) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", cache.getOrDefault("id", stripSuffix(cacheFile.getFileName().toString(), ".json")));
+        item.put("bookId", cache.get("bookId"));
+        item.put("queryType", mapOf(cache.get("request")).get("queryType"));
+        item.put("request", cache.get("request"));
+        item.put("graphPath", cache.get("graphPath"));
+        item.put("graphUpdatedAt", cache.get("graphUpdatedAt"));
+        item.put("createdAt", cache.get("createdAt"));
+        item.put("path", relative(projectId, cacheFile));
+        item.put("updatedAt", modifiedAt(cacheFile));
+        Map<String, Object> response = mapOf(cache.get("response"));
+        item.put("totalFound", response.get("totalFound"));
+        item.put("returned", response.get("returned"));
+        return item;
+    }
+
+    private String queryCacheId(String projectId, String bookId, Path graphFile, Map<String, Object> request) {
+        Map<String, Object> signature = new LinkedHashMap<>();
+        signature.put("projectId", projectId);
+        signature.put("bookId", bookId);
+        signature.put("graphPath", relative(projectId, graphFile));
+        signature.put("graphUpdatedAt", modifiedAt(graphFile));
+        signature.put("request", normalizedQueryRequest(request));
+        return "query_" + sha1(signature).substring(0, 16);
+    }
+
+    private Map<String, Object> normalizedQueryRequest(Map<String, Object> request) {
+        Map<String, Object> normalized = new java.util.TreeMap<>();
+        if (request != null) {
+            request.forEach((key, value) -> {
+                if (key != null && value != null) {
+                    normalized.put(key, value);
+                }
+            });
+        }
+        return new LinkedHashMap<>(normalized);
+    }
+
+    private String sha1(Object value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-1");
+            byte[] bytes = digest.digest(jsonString(value).getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (byte item : bytes) {
+                hex.append(String.format("%02x", item));
+            }
+            return hex.toString();
+        } catch (NoSuchAlgorithmException e) {
+            return UUID.randomUUID().toString().replace("-", "");
+        }
     }
 
     private List<Map<String, Object>> latestGraphTasks(String projectId) {
@@ -608,6 +795,10 @@ public class GraphArtifactService {
 
     private Path projectRoot(String projectId) {
         return Paths.get(basePath, "projects", projectId).normalize();
+    }
+
+    private Path queryCacheDir(String projectId) {
+        return projectRoot(projectId).resolve("graph").resolve("query_cache");
     }
 
     private String relative(String projectId, Path path) {

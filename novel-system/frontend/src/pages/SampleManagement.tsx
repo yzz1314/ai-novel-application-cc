@@ -70,6 +70,38 @@ const statusMap: Record<string, { color: string; text: string }> = {
   CANCELLED: { color: 'default', text: '已取消' },
 }
 
+const asArray = (value: any) => Array.isArray(value) ? value : []
+
+const coverageIssueRows = (report: any) => {
+  const analysisCoverage = report?.analysisCoverage || {}
+  const missingRows = asArray(analysisCoverage.missingAnalysisChunks).map((chunkId: any) => ({
+    key: `missing-${chunkId}`,
+    chunkId: String(chunkId),
+    type: 'missing',
+    status: '缺失',
+    error: '未生成逐块分析结果',
+    path: '',
+  }))
+  const failedRows = asArray(analysisCoverage.failedChunks)
+    .map((item: any) => {
+      const chunkId = item?.chunkId ?? item?.chunk_id ?? item?.id
+      return chunkId ? {
+        key: `failed-${chunkId}`,
+        chunkId: String(chunkId),
+        type: 'failed',
+        status: '失败',
+        error: item?.error || '分析结果文件读取失败',
+        path: item?.path || '',
+      } : null
+    })
+    .filter(Boolean)
+  return [...missingRows, ...failedRows]
+}
+
+const coverageIssueChunkIds = (report: any) => Array.from(new Set(
+  coverageIssueRows(report).map((item: any) => item.chunkId).filter(Boolean)
+))
+
 const SampleManagement: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>()
   const [samples, setSamples] = useState<Sample[]>([])
@@ -251,13 +283,13 @@ const SampleManagement: React.FC = () => {
     }
   }
 
-  const repairAnalysis = async (sampleId: string) => {
+  const repairAnalysis = async (sampleId: string, chunkIds?: string[]) => {
     if (!projectId) return
 
     try {
       setLoading(true)
-      await analysisApi.repairAnalysis(projectId, sampleId)
-      message.success('分析修复任务已启动')
+      await analysisApi.repairAnalysis(projectId, sampleId, chunkIds?.length ? { chunk_ids: chunkIds } : undefined)
+      message.success(chunkIds?.length ? `已启动 ${chunkIds.length} 个问题块的定向修复任务` : '分析修复任务已启动')
       await loadData(true)
     } catch (error) {
       message.error('启动分析修复失败')
@@ -521,6 +553,9 @@ const SampleManagement: React.FC = () => {
   const analyzedCount = analysisStatus?.analyzedSamples || samples.filter((sample) => sample.status === 'ANALYZED').length
   const totalSamples = analysisStatus?.sampleCount ?? samples.length
   const analysisPercent = totalSamples ? Math.round((analyzedCount / totalSamples) * 100) : 0
+  const selectedCoverageReport = coverageReport || sampleArtifacts?.coverageReport
+  const coverageIssues = coverageIssueRows(selectedCoverageReport)
+  const coverageIssueIds = coverageIssueChunkIds(selectedCoverageReport)
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
@@ -707,30 +742,69 @@ const SampleManagement: React.FC = () => {
               {
                 key: 'coverage',
                 label: '覆盖率',
-                children: coverageReport || sampleArtifacts?.coverageReport ? (
+                children: selectedCoverageReport ? (
                   <Space direction="vertical" style={{ width: '100%' }}>
                     <Descriptions bordered column={2}>
                       <Descriptions.Item label="状态">
-                        {(coverageReport || sampleArtifacts.coverageReport).status}
+                        {selectedCoverageReport.status}
                       </Descriptions.Item>
                       <Descriptions.Item label="报告路径">
-                        {(coverageReport || sampleArtifacts.coverageReport).path || sampleArtifacts.coverageReportPath || '-'}
+                        {selectedCoverageReport.path || sampleArtifacts?.coverageReportPath || '-'}
                       </Descriptions.Item>
                       <Descriptions.Item label="文本覆盖率">
-                        {`${Math.round(((coverageReport || sampleArtifacts.coverageReport).textCoverage?.coverageRatio || 0) * 100)}%`}
+                        {`${Math.round((selectedCoverageReport.textCoverage?.coverageRatio || 0) * 100)}%`}
                       </Descriptions.Item>
                       <Descriptions.Item label="分析覆盖率">
-                        {`${Math.round(((coverageReport || sampleArtifacts.coverageReport).analysisCoverage?.coverageRatio || 0) * 100)}%`}
+                        {`${Math.round((selectedCoverageReport.analysisCoverage?.coverageRatio || 0) * 100)}%`}
                       </Descriptions.Item>
                       <Descriptions.Item label="缺失分析块">
-                        {(coverageReport || sampleArtifacts.coverageReport).analysisCoverage?.missingAnalysisCount ?? 0}
+                        {selectedCoverageReport.analysisCoverage?.missingAnalysisCount ?? 0}
                       </Descriptions.Item>
                       <Descriptions.Item label="失败分析块">
-                        {(coverageReport || sampleArtifacts.coverageReport).analysisCoverage?.failedChunkCount ?? 0}
+                        {selectedCoverageReport.analysisCoverage?.failedChunkCount ?? 0}
                       </Descriptions.Item>
                     </Descriptions>
+                    {coverageIssues.length > 0 ? (
+                      <Card
+                        size="small"
+                        title="待修复分块"
+                        extra={
+                          <Button
+                            type="primary"
+                            icon={<ReloadOutlined />}
+                            loading={loading}
+                            onClick={() => selectedSample && repairAnalysis(selectedSample.sampleId || selectedSample.id, coverageIssueIds)}
+                          >
+                            定向修复 {coverageIssueIds.length} 块
+                          </Button>
+                        }
+                      >
+                        <Table
+                          size="small"
+                          dataSource={coverageIssues}
+                          rowKey="key"
+                          pagination={false}
+                          columns={[
+                            { title: 'Chunk ID', dataIndex: 'chunkId', key: 'chunkId', width: 170 },
+                            {
+                              title: '类型',
+                              dataIndex: 'status',
+                              key: 'status',
+                              width: 90,
+                              render: (value: string, record: any) => (
+                                <Tag color={record.type === 'failed' ? 'error' : 'warning'}>{value}</Tag>
+                              ),
+                            },
+                            { title: '原因', dataIndex: 'error', key: 'error' },
+                            { title: '路径', dataIndex: 'path', key: 'path', ellipsis: true },
+                          ]}
+                        />
+                      </Card>
+                    ) : (
+                      <Alert type="success" showIcon message="逐块分析覆盖完整，暂无需要定向修复的分块。" />
+                    )}
                     <pre style={{ whiteSpace: 'pre-wrap' }}>
-                      {JSON.stringify(coverageReport || sampleArtifacts.coverageReport, null, 2)}
+                      {JSON.stringify(selectedCoverageReport, null, 2)}
                     </pre>
                   </Space>
                 ) : (

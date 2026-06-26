@@ -21,6 +21,7 @@ import {
 } from 'antd'
 import {
   DatabaseOutlined,
+  DeleteOutlined,
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons'
@@ -36,6 +37,7 @@ const RetrievalView: React.FC = () => {
   const [rebuilding, setRebuilding] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [evaluating, setEvaluating] = useState(false)
+  const [invalidating, setInvalidating] = useState(false)
   const [overview, setOverview] = useState<any>(null)
   const [config, setConfig] = useState<any>({})
   const [contextPack, setContextPack] = useState<any>(null)
@@ -152,6 +154,31 @@ const RetrievalView: React.FC = () => {
       message.error({ content: '检索质量评估失败', key: 'retrieval-quality' })
     } finally {
       setEvaluating(false)
+    }
+  }
+
+  const invalidateRetrievalCaches = async () => {
+    if (!projectId) return
+    try {
+      setInvalidating(true)
+      message.loading({ content: '正在清理旧检索缓存', key: 'retrieval-invalidate' })
+      const result: any = await retrievalApi.invalidate(projectId, {
+        actor: 'human',
+        reason: 'manual invalidation from RetrievalView',
+        clearContextPacks: true,
+        clearQualityReport: true,
+        clearHybridSummary: true,
+        clearRebuildReport: true,
+      })
+      message.success({
+        content: `已清理 ${result?.deletedCount || 0} 个旧检索产物`,
+        key: 'retrieval-invalidate',
+      })
+      await loadOverview()
+    } catch (error) {
+      message.error({ content: '清理旧检索缓存失败', key: 'retrieval-invalidate' })
+    } finally {
+      setInvalidating(false)
     }
   }
 
@@ -321,6 +348,9 @@ const RetrievalView: React.FC = () => {
           </Button>
           <Button icon={<SearchOutlined />} onClick={evaluateRetrievalQuality} loading={evaluating}>
             评估检索质量
+          </Button>
+          <Button icon={<DeleteOutlined />} onClick={invalidateRetrievalCaches} loading={invalidating}>
+            清理旧缓存
           </Button>
           <Button type="primary" icon={<SearchOutlined />} onClick={rebuild} loading={rebuilding}>
             重建索引

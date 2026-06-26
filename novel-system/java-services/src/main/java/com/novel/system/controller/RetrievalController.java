@@ -71,6 +71,13 @@ public class RetrievalController {
         return ResponseEntity.ok(retrievalArtifactService.evaluateQuality(projectId, request == null ? Map.of() : request));
     }
 
+    @PostMapping("/invalidate")
+    public ResponseEntity<Map<String, Object>> invalidateCaches(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(retrievalArtifactService.invalidateCaches(projectId, request == null ? Map.of() : request));
+    }
+
     @GetMapping("/config")
     public ResponseEntity<Map<String, Object>> getConfig(@PathVariable String projectId) {
         return ResponseEntity.ok(retrievalArtifactService.getConfig(projectId));

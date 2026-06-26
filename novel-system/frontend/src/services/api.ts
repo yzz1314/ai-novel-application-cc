@@ -313,6 +313,8 @@ export const retrievalApi = {
     request(api.get(`/projects/${projectId}/retrieval/quality`)),
   evaluateQuality: (projectId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/retrieval/quality/evaluate`, data || {})),
+  invalidate: (projectId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/retrieval/invalidate`, data || {})),
   getContextPacks: (projectId: string) =>
     request<any[]>(api.get(`/projects/${projectId}/retrieval/context-packs`)),
   getContextPack: (projectId: string, contextPackId: string) =>

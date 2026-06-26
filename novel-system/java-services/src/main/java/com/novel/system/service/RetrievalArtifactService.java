@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
@@ -29,6 +30,7 @@ public class RetrievalArtifactService {
 
     private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9_-]+$");
     private static final List<String> INDEX_TYPES = List.of("bm25", "vector", "hybrid");
+    private static final DateTimeFormatter VERSION_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
 
     private final ProjectService projectService;
     private final TaskExecutorService taskExecutorService;
@@ -321,6 +323,90 @@ public class RetrievalArtifactService {
         return getConfig(projectId);
     }
 
+    public Map<String, Object> invalidateCaches(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        boolean clearContextPacks = booleanValue(firstPresent(
+            options.get("clear_context_packs"),
+            options.get("clearContextPacks")
+        ), true);
+        boolean clearQualityReport = booleanValue(firstPresent(
+            options.get("clear_quality_report"),
+            options.get("clearQualityReport")
+        ), true);
+        boolean clearHybridSummary = booleanValue(firstPresent(
+            options.get("clear_hybrid_summary"),
+            options.get("clearHybridSummary")
+        ), true);
+        boolean clearRebuildReport = booleanValue(firstPresent(
+            options.get("clear_rebuild_report"),
+            options.get("clearRebuildReport")
+        ), true);
+        boolean clearIndexSummaries = booleanValue(firstPresent(
+            options.get("clear_index_summaries"),
+            options.get("clearIndexSummaries")
+        ), false);
+
+        LocalDateTime invalidatedAt = LocalDateTime.now();
+        Path versionFile = versionsDir(projectId).resolve(
+            "retrieval_invalidation_" + invalidatedAt.format(VERSION_TIMESTAMP) + ".json"
+        );
+
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("projectId", projectId);
+        snapshot.put("invalidatedAt", invalidatedAt.toString());
+        snapshot.put("actor", stringValue(firstPresent(options.get("actor"), options.get("user")), "human"));
+        snapshot.put("reason", stringValue(options.get("reason"), "manual retrieval cache invalidation"));
+        snapshot.put("options", Map.of(
+            "clearContextPacks", clearContextPacks,
+            "clearQualityReport", clearQualityReport,
+            "clearHybridSummary", clearHybridSummary,
+            "clearRebuildReport", clearRebuildReport,
+            "clearIndexSummaries", clearIndexSummaries
+        ));
+        snapshot.put("config", getConfig(projectId));
+        snapshot.put("indexes", getIndexSummaries(projectId));
+        snapshot.put("qualityReport", getQualityReport(projectId));
+        snapshot.put("contextPacks", listContextPacks(projectId));
+        snapshot.put("versionPath", relative(projectId, versionFile));
+        writeJson(versionFile, snapshot);
+
+        List<Map<String, Object>> deleted = new ArrayList<>();
+        if (clearContextPacks) {
+            deleteContextPacks(projectId, deleted);
+        }
+        if (clearQualityReport) {
+            deleteFileIfExists(projectId, qualityReportFile(projectId), "quality_report", deleted);
+        }
+        if (clearHybridSummary) {
+            deleteFileIfExists(projectId, indexDir(projectId, "hybrid").resolve("index_summary.json"), "hybrid_summary", deleted);
+        }
+        if (clearRebuildReport) {
+            deleteFileIfExists(projectId, projectRoot(projectId).resolve("indexes").resolve("retrieval_index_report.json"), "rebuild_report", deleted);
+        }
+        if (clearIndexSummaries) {
+            for (String indexType : INDEX_TYPES) {
+                deleteFileIfExists(
+                    projectId,
+                    indexDir(projectId, indexType).resolve("index_summary.json"),
+                    indexType + "_summary",
+                    deleted
+                );
+            }
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "invalidated");
+        response.put("projectId", projectId);
+        response.put("versionId", stripSuffix(versionFile.getFileName().toString(), ".json"));
+        response.put("versionPath", relative(projectId, versionFile));
+        response.put("deletedCount", deleted.size());
+        response.put("deleted", deleted);
+        response.put("remainingContextPackCount", listContextPacks(projectId).size());
+        response.put("invalidatedAt", invalidatedAt.toString());
+        return response;
+    }
+
     public Task rebuildIndexes(String projectId, Map<String, Object> request) {
         projectService.getProject(projectId);
         Map<String, Object> parameters = new LinkedHashMap<>(request == null ? Map.of() : request);
@@ -523,6 +609,78 @@ public class RetrievalArtifactService {
         return defaultValue;
     }
 
+    private boolean booleanValue(Object value, boolean defaultValue) {
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        if (value == null) {
+            return defaultValue;
+        }
+        String text = value.toString().trim().toLowerCase();
+        if (text.isBlank()) {
+            return defaultValue;
+        }
+        return switch (text) {
+            case "true", "1", "yes", "y", "on" -> true;
+            case "false", "0", "no", "n", "off" -> false;
+            default -> defaultValue;
+        };
+    }
+
+    private String stringValue(Object value, String defaultValue) {
+        if (value == null || value.toString().isBlank()) {
+            return defaultValue;
+        }
+        return value.toString();
+    }
+
+    private void deleteContextPacks(String projectId, List<Map<String, Object>> deleted) {
+        Path contextDir = indexDir(projectId, "bm25").resolve("context_packs");
+        if (!Files.exists(contextDir)) {
+            return;
+        }
+        List<Path> contextFiles;
+        try (var stream = Files.list(contextDir)) {
+            contextFiles = stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".json"))
+                .sorted()
+                .toList();
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to invalidate retrieval context packs", e);
+        }
+        for (Path path : contextFiles) {
+            deleteFileIfExists(projectId, path, "context_pack", deleted);
+        }
+        deleteDirectoryIfEmpty(contextDir);
+    }
+
+    private void deleteFileIfExists(String projectId, Path file, String type, List<Map<String, Object>> deleted) {
+        if (!Files.exists(file)) {
+            return;
+        }
+        try {
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("type", type);
+            item.put("path", relative(projectId, file));
+            item.put("sizeBytes", Files.size(file));
+            item.put("updatedAt", modifiedAt(file));
+            Files.delete(file);
+            deleted.add(item);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to invalidate retrieval artifact: " + file.getFileName(), e);
+        }
+    }
+
+    private void deleteDirectoryIfEmpty(Path dir) {
+        try (var stream = Files.list(dir)) {
+            if (stream.findAny().isEmpty()) {
+                Files.deleteIfExists(dir);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to clean empty retrieval cache directory: " + dir.getFileName(), e);
+        }
+    }
+
     private Path indexDir(String projectId, String indexType) {
         return projectRoot(projectId).resolve("indexes").resolve(indexType);
     }
@@ -533,6 +691,10 @@ public class RetrievalArtifactService {
 
     private Path qualityReportFile(String projectId) {
         return projectRoot(projectId).resolve("indexes").resolve("retrieval_quality_report.json");
+    }
+
+    private Path versionsDir(String projectId) {
+        return projectRoot(projectId).resolve("indexes").resolve("versions");
     }
 
     private Map<String, Object> readOptionalJson(Path path) {

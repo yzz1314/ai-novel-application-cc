@@ -325,6 +325,79 @@ class MemoryServiceTest {
             .contains("\"report_type\" : \"continuity\"");
     }
 
+    @Test
+    void applyAuditIssueFixCanSortTimelineByChapter() throws Exception {
+        writeProjectFile("memory/timeline.json", """
+            [
+              {
+                "event_id": "event_3",
+                "title": "Later event",
+                "chapter": 3
+              },
+              {
+                "event_id": "event_1",
+                "title": "Earlier event",
+                "chapter": 1
+              }
+            ]
+            """);
+        writeProjectFile("memory/audits/memory_audit_timeline_sort.json", """
+            {
+              "project_id": "project_memory_versions",
+              "book_id": "default",
+              "issue_count": 1,
+              "issues": [
+                {
+                  "issue_id": "issue_timeline_order",
+                  "issue_type": "timeline",
+                  "severity": "minor",
+                  "title": "时间线排序倒挂",
+                  "description": "timeline.json is not sorted by chapter",
+                  "suggestion": "sort timeline by chapter",
+                  "fix": {
+                    "action": "sort_by_chapter",
+                    "memory_file": "timeline.json",
+                    "field": "chapter"
+                  }
+                }
+              ]
+            }
+            """);
+
+        Map<String, Object> response = memoryService.applyAuditIssueFix(
+            PROJECT_ID,
+            "memory_audit_timeline_sort",
+            0,
+            Map.of("actor", "tester", "note", "sort timeline")
+        );
+
+        assertThat(response)
+            .containsEntry("reportType", "audit")
+            .containsEntry("reportId", "memory_audit_timeline_sort")
+            .containsKey("beforeVersionId")
+            .containsKey("eventPath");
+        String timeline = Files.readString(projectRoot().resolve("memory/timeline.json"), StandardCharsets.UTF_8);
+        assertThat(timeline.indexOf("event_1")).isLessThan(timeline.indexOf("event_3"));
+
+        String report = Files.readString(projectRoot().resolve("memory/audits/memory_audit_timeline_sort.json"), StandardCharsets.UTF_8);
+        assertThat(report)
+            .contains("\"resolution_status\" : \"resolved\"")
+            .contains("\"fix_applied\" : true")
+            .contains("\"action\" : \"sort_by_chapter\"")
+            .contains("\"changedCount\" : 2");
+
+        String beforeVersionPath = String.valueOf(response.get("beforeVersionPath"));
+        assertThat(Files.readString(projectRoot().resolve(beforeVersionPath), StandardCharsets.UTF_8))
+            .contains("\"reason\" : \"before_memory_audit_fix\"")
+            .contains("\\\"event_id\\\": \\\"event_3\\\"");
+
+        String eventPath = String.valueOf(response.get("eventPath"));
+        assertThat(Files.readString(projectRoot().resolve(eventPath), StandardCharsets.UTF_8))
+            .contains("\"event_type\" : \"memory_audit_fix\"")
+            .contains("\"report_type\" : \"audit\"")
+            .contains("\"actor\" : \"tester\"");
+    }
+
     private Path projectRoot() {
         return tempDir.resolve("projects").resolve(PROJECT_ID);
     }

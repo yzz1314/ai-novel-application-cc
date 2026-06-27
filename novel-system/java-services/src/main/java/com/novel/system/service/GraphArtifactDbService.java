@@ -51,6 +51,12 @@ public class GraphArtifactDbService {
         List<Map<String, Object>> nodes = listOfMaps(graph.get("nodes"));
         List<Map<String, Object>> edges = listOfMaps(graph.get("edges"));
         Map<String, Object> statistics = statistics(nodes, edges, mapOf(graph.get("statistics")));
+        Map<String, Object> analysis = analysis(graph, statistics);
+        Map<String, Object> incrementalSummary = incrementalSummary(graph, analysis);
+        List<Map<String, Object>> topNodesByCentrality = listOfMaps(statistics.get("topNodesByCentrality"));
+        List<Map<String, Object>> topNodesByBetweenness = listOfMaps(statistics.get("topNodesByBetweenness"));
+        List<Map<String, Object>> relationshipAnalysis = listOfMaps(analysis.get("relationshipAnalysis"));
+        List<Map<String, Object>> keyPaths = listOfMaps(analysis.get("keyPaths"));
 
         GraphArtifact entity = graphArtifactRepository
             .findByProjectIdAndBookId(projectId, bookId)
@@ -74,10 +80,25 @@ public class GraphArtifactDbService {
         entity.setNodeTypeDistribution(asObjectMap(statistics.get("nodeTypeDistribution")));
         entity.setEdgeTypeDistribution(asObjectMap(statistics.get("edgeTypeDistribution")));
         entity.setTopNodesByDegree(listOfMaps(statistics.get("topNodesByDegree")));
+        entity.setTopNodesByCentrality(topNodesByCentrality);
+        entity.setTopNodesByBetweenness(topNodesByBetweenness);
+        entity.setRelationshipAnalysis(relationshipAnalysis);
+        entity.setKeyPaths(keyPaths);
+        entity.setIncrementalSummary(incrementalSummary);
+        entity.setGraphAnalysis(analysis);
         entity.setAverageDegree(doubleValue(statistics.get("averageDegree")));
         entity.setDensity(doubleValue(statistics.get("density")));
         entity.setLatestTasks(latestGraphTasks(projectId));
-        entity.setGraphMetadata(metadata(projectId, bookId, graphFile, nodes, edges));
+        entity.setGraphMetadata(metadata(
+            projectId,
+            bookId,
+            graphFile,
+            nodes,
+            edges,
+            statistics,
+            analysis,
+            incrementalSummary
+        ));
         entity.setSyncedAt(LocalDateTime.now());
 
         GraphArtifact saved = graphArtifactRepository.save(entity);
@@ -109,7 +130,12 @@ public class GraphArtifactDbService {
         result.put("nodes", entity.getNodes());
         result.put("edges", entity.getEdges());
         result.put("statistics", entity.getStatistics());
-        result.put("analysis", mapOf(entity.getGraphJson().get("analysis")));
+        result.put("analysis", entity.getGraphAnalysis());
+        result.put("topNodesByCentrality", entity.getTopNodesByCentrality());
+        result.put("topNodesByBetweenness", entity.getTopNodesByBetweenness());
+        result.put("relationshipAnalysis", entity.getRelationshipAnalysis());
+        result.put("keyPaths", entity.getKeyPaths());
+        result.put("incrementalSummary", entity.getIncrementalSummary());
         result.put("latestTasks", entity.getLatestTasks());
         result.put("graphMetadata", entity.getGraphMetadata());
         return result;
@@ -128,6 +154,14 @@ public class GraphArtifactDbService {
         result.put("locationCount", entity.getLocationCount());
         result.put("organizationCount", entity.getOrganizationCount());
         result.put("itemCount", entity.getItemCount());
+        result.put("averageDegree", entity.getAverageDegree());
+        result.put("density", entity.getDensity());
+        result.put("connectedComponents", valueFromStatistics(entity, "connectedComponents"));
+        result.put("largestComponentSize", valueFromStatistics(entity, "largestComponentSize"));
+        result.put("topCentralityCount", sizeOf(entity.getTopNodesByCentrality()));
+        result.put("relationshipAnalysisCount", sizeOf(entity.getRelationshipAnalysis()));
+        result.put("keyPathCount", sizeOf(entity.getKeyPaths()));
+        result.put("incrementalSummary", entity.getIncrementalSummary());
         result.put("graphPath", entity.getGraphPath());
         result.put("syncedAt", entity.getSyncedAt());
         result.put("createdAt", entity.getCreatedAt());
@@ -180,12 +214,76 @@ public class GraphArtifactDbService {
         stats.put("topNodesByDegree", topNodes);
         if (!sourceStatistics.isEmpty()) {
             stats.put("sourceStatistics", sourceStatistics);
-            stats.put("topNodesByCentrality", sourceStatistics.get("top_nodes_by_centrality"));
-            stats.put("topNodesByBetweenness", sourceStatistics.get("top_nodes_by_betweenness"));
-            stats.put("connectedComponents", sourceStatistics.get("connected_components"));
-            stats.put("largestComponentSize", sourceStatistics.get("largest_component_size"));
+            stats.put("topNodesByCentrality", firstNonNull(
+                sourceStatistics.get("top_nodes_by_centrality"),
+                sourceStatistics.get("topNodesByCentrality"),
+                List.of()
+            ));
+            stats.put("topNodesByBetweenness", firstNonNull(
+                sourceStatistics.get("top_nodes_by_betweenness"),
+                sourceStatistics.get("topNodesByBetweenness"),
+                List.of()
+            ));
+            stats.put("connectedComponents", firstNonNull(
+                sourceStatistics.get("connected_components"),
+                sourceStatistics.get("connectedComponents"),
+                0
+            ));
+            stats.put("largestComponentSize", firstNonNull(
+                sourceStatistics.get("largest_component_size"),
+                sourceStatistics.get("largestComponentSize"),
+                0
+            ));
         }
         return stats;
+    }
+
+    private Map<String, Object> analysis(Map<String, Object> graph, Map<String, Object> statistics) {
+        Map<String, Object> sourceAnalysis = mapOf(graph.get("analysis"));
+        Map<String, Object> result = new LinkedHashMap<>();
+        sourceAnalysis.forEach((key, value) -> result.put(camelKey(key), value));
+        result.putIfAbsent("relationshipAnalysis", List.of());
+        result.putIfAbsent("keyPaths", List.of());
+        result.putIfAbsent("bridgeNodes", firstNonNull(
+            sourceAnalysis.get("bridge_nodes"),
+            sourceAnalysis.get("bridgeNodes"),
+            statistics.get("topNodesByBetweenness"),
+            List.of()
+        ));
+        result.putIfAbsent("isolatedNodes", firstNonNull(
+            sourceAnalysis.get("isolated_nodes"),
+            sourceAnalysis.get("isolatedNodes"),
+            statistics.get("isolatedNodes"),
+            List.of()
+        ));
+        result.putIfAbsent("warnings", firstNonNull(sourceAnalysis.get("warnings"), List.of()));
+        result.put("incrementalBuild", incrementalSummary(graph, sourceAnalysis));
+        return result;
+    }
+
+    private Map<String, Object> incrementalSummary(Map<String, Object> graph, Map<String, Object> analysis) {
+        Map<String, Object> summary = mapOf(firstNonNull(
+            analysis.get("incrementalBuild"),
+            analysis.get("incremental_build"),
+            graph.get("incremental_summary"),
+            graph.get("incrementalSummary"),
+            Map.of()
+        ));
+        if (summary.isEmpty()) {
+            summary = Map.of(
+                "enabled", false,
+                "usedExistingGraph", false,
+                "nodesCreated", 0,
+                "nodesUpdated", 0,
+                "nodesPreservedFromPrevious", 0,
+                "edgesCreated", 0,
+                "edgesUpdated", 0,
+                "edgesPreservedFromPrevious", 0
+            );
+        }
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        summary.forEach((key, value) -> normalized.put(camelKey(key), value));
+        return normalized;
     }
 
     private Map<String, Object> metadata(
@@ -193,7 +291,10 @@ public class GraphArtifactDbService {
             String bookId,
             Path graphFile,
             List<Map<String, Object>> nodes,
-            List<Map<String, Object>> edges) {
+            List<Map<String, Object>> edges,
+            Map<String, Object> statistics,
+            Map<String, Object> analysis,
+            Map<String, Object> incrementalSummary) {
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("projectId", projectId);
         metadata.put("bookId", bookId);
@@ -201,6 +302,12 @@ public class GraphArtifactDbService {
         metadata.put("graphModifiedAt", modifiedAt(graphFile));
         metadata.put("nodeCount", nodes.size());
         metadata.put("edgeCount", edges.size());
+        metadata.put("connectedComponents", statistics.get("connectedComponents"));
+        metadata.put("largestComponentSize", statistics.get("largestComponentSize"));
+        metadata.put("topCentralityCount", sizeOf(statistics.get("topNodesByCentrality")));
+        metadata.put("relationshipAnalysisCount", sizeOf(analysis.get("relationshipAnalysis")));
+        metadata.put("keyPathCount", sizeOf(analysis.get("keyPaths")));
+        metadata.put("incremental", incrementalSummary);
         metadata.put("latestTasksCount", latestGraphTasks(projectId).size());
         return metadata;
     }
@@ -274,6 +381,49 @@ public class GraphArtifactDbService {
 
     private Map<String, Object> asObjectMap(Object value) {
         return mapOf(value);
+    }
+
+    private Object valueFromStatistics(GraphArtifact entity, String key) {
+        return mapOf(entity.getStatistics()).get(key);
+    }
+
+    private int sizeOf(Object value) {
+        if (value instanceof List<?> list) {
+            return list.size();
+        }
+        return 0;
+    }
+
+    private int sizeOf(List<?> value) {
+        return value == null ? 0 : value.size();
+    }
+
+    private Object firstNonNull(Object... values) {
+        for (Object value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private String camelKey(String key) {
+        if (key == null || !key.contains("_")) {
+            return key;
+        }
+        StringBuilder builder = new StringBuilder();
+        boolean upperNext = false;
+        for (char character : key.toCharArray()) {
+            if (character == '_') {
+                upperNext = true;
+            } else if (upperNext) {
+                builder.append(Character.toUpperCase(character));
+                upperNext = false;
+            } else {
+                builder.append(character);
+            }
+        }
+        return builder.toString();
     }
 
     private double doubleValue(Object value) {

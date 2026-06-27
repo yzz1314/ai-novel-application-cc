@@ -98,6 +98,30 @@ public class GraphArtifact {
     private List<Map<String, Object>> topNodesByDegree = new ArrayList<>();
 
     @Type(JsonType.class)
+    @Column(name = "top_nodes_by_centrality", columnDefinition = "jsonb")
+    private List<Map<String, Object>> topNodesByCentrality = new ArrayList<>();
+
+    @Type(JsonType.class)
+    @Column(name = "top_nodes_by_betweenness", columnDefinition = "jsonb")
+    private List<Map<String, Object>> topNodesByBetweenness = new ArrayList<>();
+
+    @Type(JsonType.class)
+    @Column(name = "relationship_analysis", columnDefinition = "jsonb")
+    private List<Map<String, Object>> relationshipAnalysis = new ArrayList<>();
+
+    @Type(JsonType.class)
+    @Column(name = "key_paths", columnDefinition = "jsonb")
+    private List<Map<String, Object>> keyPaths = new ArrayList<>();
+
+    @Type(JsonType.class)
+    @Column(name = "incremental_summary", columnDefinition = "jsonb")
+    private Map<String, Object> incrementalSummary = new LinkedHashMap<>();
+
+    @Type(JsonType.class)
+    @Column(name = "graph_analysis", columnDefinition = "jsonb")
+    private Map<String, Object> graphAnalysis = new LinkedHashMap<>();
+
+    @Type(JsonType.class)
     @Column(name = "latest_tasks", columnDefinition = "jsonb")
     private List<Map<String, Object>> latestTasks = new ArrayList<>();
 
@@ -127,6 +151,12 @@ public class GraphArtifact {
         nodeTypeDistribution = nodeTypeDistribution == null ? new LinkedHashMap<>() : nodeTypeDistribution;
         edgeTypeDistribution = edgeTypeDistribution == null ? new LinkedHashMap<>() : edgeTypeDistribution;
         topNodesByDegree = topNodesByDegree == null ? new ArrayList<>() : topNodesByDegree;
+        topNodesByCentrality = topNodesByCentrality == null ? new ArrayList<>() : topNodesByCentrality;
+        topNodesByBetweenness = topNodesByBetweenness == null ? new ArrayList<>() : topNodesByBetweenness;
+        relationshipAnalysis = relationshipAnalysis == null ? new ArrayList<>() : relationshipAnalysis;
+        keyPaths = keyPaths == null ? new ArrayList<>() : keyPaths;
+        incrementalSummary = incrementalSummary == null ? new LinkedHashMap<>() : incrementalSummary;
+        graphAnalysis = graphAnalysis == null ? new LinkedHashMap<>() : graphAnalysis;
         latestTasks = latestTasks == null ? new ArrayList<>() : latestTasks;
         graphMetadata = graphMetadata == null ? new LinkedHashMap<>() : graphMetadata;
     }

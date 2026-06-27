@@ -90,23 +90,27 @@ const GraphView: React.FC = () => {
     const graphStats = graph?.statistics || {}
     const sourceStats = graphStats.sourceStatistics || {}
     const analysis = graph?.analysis || {}
+    const incrementalSummary = graph?.incrementalSummary || analysis.incrementalBuild || analysis.incremental_build || {}
     return {
       topCentrality: pickArray(
+        graph?.topNodesByCentrality,
         graphStats.topNodesByCentrality,
         graphStats.top_nodes_by_centrality,
         sourceStats.top_nodes_by_centrality
       ),
       topBetweenness: pickArray(
+        graph?.topNodesByBetweenness,
         graphStats.topNodesByBetweenness,
         graphStats.top_nodes_by_betweenness,
         sourceStats.top_nodes_by_betweenness
       ),
       bridgeNodes: pickArray(analysis.bridgeNodes, analysis.bridge_nodes),
       isolatedNodes: pickArray(analysis.isolatedNodes, analysis.isolated_nodes, graphStats.isolatedNodes),
-      relationshipAnalysis: pickArray(analysis.relationshipAnalysis, analysis.relationship_analysis),
-      keyPaths: pickArray(analysis.keyPaths, analysis.key_paths),
+      relationshipAnalysis: pickArray(graph?.relationshipAnalysis, analysis.relationshipAnalysis, analysis.relationship_analysis),
+      keyPaths: pickArray(graph?.keyPaths, analysis.keyPaths, analysis.key_paths),
       componentSummary: pickArray(analysis.componentSummary, analysis.component_summary),
       warnings: pickArray(analysis.warnings),
+      incrementalSummary,
     }
   }, [graph])
 
@@ -238,7 +242,8 @@ const GraphView: React.FC = () => {
     try {
       setSyncing(true)
       message.loading({ content: '正在同步图谱数据库', key: 'graph-sync' })
-      await graphApi.syncDb(projectId, bookId || 'default', { book_id: bookId || 'default' })
+      const data = await graphApi.syncDb(projectId, bookId || 'default', { book_id: bookId || 'default' })
+      setGraph(data)
       message.success({ content: '图谱数据库已同步', key: 'graph-sync' })
     } catch (error) {
       message.error({ content: '同步图谱数据库失败', key: 'graph-sync' })
@@ -509,6 +514,26 @@ const GraphView: React.FC = () => {
 
             <Card size="small" title="高级分析">
               <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                <Row gutter={16}>
+                  <Col xs={12} md={6}>
+                    <Statistic
+                      title="Incremental"
+                      value={advanced.incrementalSummary?.enabled ? 'on' : 'off'}
+                    />
+                  </Col>
+                  <Col xs={12} md={6}>
+                    <Statistic
+                      title="Preserved nodes"
+                      value={Number(advanced.incrementalSummary?.nodesPreservedFromPrevious ?? advanced.incrementalSummary?.nodes_preserved_from_previous ?? 0)}
+                    />
+                  </Col>
+                  <Col xs={12} md={6}>
+                    <Statistic title="Centrality nodes" value={advanced.topCentrality.length} />
+                  </Col>
+                  <Col xs={12} md={6}>
+                    <Statistic title="Key paths" value={advanced.keyPaths.length} />
+                  </Col>
+                </Row>
                 {advanced.warnings.map((warning: any) => (
                   <Alert
                     key={warning.code || warning.message}

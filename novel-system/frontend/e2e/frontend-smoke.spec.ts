@@ -51,6 +51,11 @@ test('renders project production pages with fixed API fixtures', async ({ page }
   await expect(page.getByText('检索质量评估')).toBeVisible()
   await expect(page.getByText('ctx-1')).toBeVisible()
 
+  await page.goto(`/projects/${projectId}/graph`)
+  await expect(page.getByText('Centrality nodes')).toBeVisible()
+  await expect(page.getByText('Key paths')).toBeVisible()
+  await expect(page.getByRole('row', { name: /character Su 1\.000/ })).toBeVisible()
+
   await page.goto(`/projects/${projectId}/artifacts`)
   await expect(page.getByRole('heading', { name: '产物管理' })).toBeVisible()
   await expect(page.getByRole('cell', { name: 'outline.json', exact: true })).toBeVisible()
@@ -96,6 +101,7 @@ function fixtureFor(path: string): unknown {
   if (path === `/projects/${projectId}/analysis/samples/sample-1/chunks`) return sampleChunksFixture()
   if (path === `/projects/${projectId}/analysis/samples/sample-1/book-report`) return sampleBookReportFixture()
   if (path === `/projects/${projectId}/analysis/samples/sample-1/coverage`) return sampleCoverageFixture()
+  if (path === `/projects/${projectId}/books/default/graph`) return graphFixture()
   if (path === `/projects/${projectId}/retrieval`) return retrievalFixture()
   if (path === `/projects/${projectId}/artifacts`) return artifactOverviewFixture()
   if (path === `/projects/${projectId}/artifacts/list`) return artifactListFixture()
@@ -454,6 +460,65 @@ function bookFixtures() {
       projectSoulPath: 'novel/outline/project_soul.md',
     },
   ]
+}
+
+function graphFixture() {
+  const nodes = [
+    { node_id: 'char_lin', name: 'Lin', node_type: 'character', first_mentioned: 1, last_updated: 3 },
+    { node_id: 'char_su', name: 'Su', node_type: 'character', first_mentioned: 1, last_updated: 3 },
+    { node_id: 'loc_city', name: 'City', node_type: 'location', first_mentioned: 2, last_updated: 3 },
+  ]
+  const edges = [
+    { edge_id: 'edge_1', source_id: 'char_lin', target_id: 'char_su', edge_type: 'ally' },
+    { edge_id: 'edge_2', source_id: 'char_su', target_id: 'loc_city', edge_type: 'appears_in' },
+  ]
+  const topNodesByCentrality = [
+    { node_id: 'char_su', name: 'Su', node_type: 'character', degreeCentrality: 1, degree: 2 },
+  ]
+  const topNodesByBetweenness = [
+    { node_id: 'char_su', name: 'Su', node_type: 'character', betweennessCentrality: 0.5 },
+  ]
+  const keyPaths = [
+    { source: 'char_lin', target: 'loc_city', length: 2, path: ['char_lin', 'char_su', 'loc_city'] },
+  ]
+
+  return {
+    graph_id: 'graph-e2e',
+    graphId: 'graph-e2e',
+    path: 'graph/default_graph.json',
+    updatedAt: '2026-06-26T10:08:00',
+    nodes,
+    edges,
+    statistics: {
+      totalNodes: nodes.length,
+      totalEdges: edges.length,
+      connectedComponents: 1,
+      largestComponentSize: 3,
+      averageDegree: 1.33,
+      density: 0.33,
+      topNodesByCentrality,
+      topNodesByBetweenness,
+    },
+    analysis: {
+      relationshipAnalysis: [{ edge_type: 'ally', count: 1, density: 0.33 }],
+      keyPaths,
+      incrementalBuild: {
+        enabled: true,
+        usedExistingGraph: true,
+        nodesPreservedFromPrevious: 1,
+      },
+      warnings: [],
+    },
+    topNodesByCentrality,
+    topNodesByBetweenness,
+    relationshipAnalysis: [{ edge_type: 'ally', count: 1, density: 0.33 }],
+    keyPaths,
+    incrementalSummary: {
+      enabled: true,
+      usedExistingGraph: true,
+      nodesPreservedFromPrevious: 1,
+    },
+  }
 }
 
 function retrievalFixture() {

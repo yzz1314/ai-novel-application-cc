@@ -113,6 +113,20 @@ public class ChapterController {
     /**
      * 文档中的简写章节更新入口：默认使用最新书籍、第1卷。
      */
+    @PostMapping("/api/projects/{projectId}/chapters/{chapterNumber}/diff")
+    public ResponseEntity<Map<String, Object>> diffDefaultChapter(
+            @PathVariable String projectId,
+            @PathVariable Integer chapterNumber,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.diffChapter(
+            projectId,
+            "default",
+            1,
+            chapterNumber,
+            request
+        ));
+    }
+
     @PatchMapping("/api/projects/{projectId}/chapters/{chapterNumber}")
     public ResponseEntity<Map<String, Object>> updateDefaultChapter(
             @PathVariable String projectId,

@@ -30,6 +30,7 @@ public class BookArtifactService {
 
     private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9_-]+$");
     private static final DateTimeFormatter SNAPSHOT_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
+    private record ChapterComparison(String kind, String stage, String versionId, Path path, Map<String, Object> chapter) {}
 
     private final ProjectService projectService;
     private final TaskExecutorService taskExecutorService;
@@ -836,6 +837,75 @@ public class BookArtifactService {
         return response;
     }
 
+    public Map<String, Object> diffChapter(
+            String projectId,
+            String bookId,
+            Integer volumeNumber,
+            Integer chapterNumber,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        if (volumeNumber == null || volumeNumber < 1 || chapterNumber == null || chapterNumber < 1) {
+            throw new IllegalArgumentException("卷号和章节号必须大于0");
+        }
+
+        Map<String, Object> options = request == null ? Map.of() : request;
+        ChapterComparison from = resolveChapterComparison(
+            projectId,
+            resolvedBookId,
+            volumeNumber,
+            chapterNumber,
+            options,
+            "from",
+            "draft"
+        );
+        ChapterComparison to = resolveChapterComparison(
+            projectId,
+            resolvedBookId,
+            volumeNumber,
+            chapterNumber,
+            options,
+            "to",
+            "final"
+        );
+
+        String fromTitle = stringValue(valueOf(from.chapter(), "chapter_title", "chapterTitle"), "");
+        String toTitle = stringValue(valueOf(to.chapter(), "chapter_title", "chapterTitle"), "");
+        String fromContent = stringValue(valueOf(from.chapter(), "content", "content"), "");
+        String toContent = stringValue(valueOf(to.chapter(), "content", "content"), "");
+        int fromWordCount = chapterWordCount(from.chapter(), fromContent);
+        int toWordCount = chapterWordCount(to.chapter(), toContent);
+        List<Map<String, Object>> hunks = chapterLineDiff(contentLines(fromContent), contentLines(toContent));
+
+        long addedLines = hunks.stream().filter(item -> "added".equals(item.get("type"))).count();
+        long removedLines = hunks.stream().filter(item -> "removed".equals(item.get("type"))).count();
+        long changedLines = hunks.stream().filter(item -> "changed".equals(item.get("type"))).count();
+        long unchangedLines = hunks.stream().filter(item -> "equal".equals(item.get("type"))).count();
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("titleChanged", !fromTitle.equals(toTitle));
+        summary.put("contentChanged", !fromContent.equals(toContent));
+        summary.put("wordCountDelta", toWordCount - fromWordCount);
+        summary.put("fromWordCount", fromWordCount);
+        summary.put("toWordCount", toWordCount);
+        summary.put("addedLines", addedLines);
+        summary.put("removedLines", removedLines);
+        summary.put("changedLines", changedLines);
+        summary.put("unchangedLines", unchangedLines);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("bookId", resolvedBookId);
+        response.put("volumeNumber", volumeNumber);
+        response.put("chapterNumber", chapterNumber);
+        response.put("from", chapterComparisonDescriptor(projectId, from, fromContent));
+        response.put("to", chapterComparisonDescriptor(projectId, to, toContent));
+        response.put("summary", summary);
+        response.put("hunks", hunks);
+        response.put("generatedAt", LocalDateTime.now().toString());
+        return response;
+    }
+
     public Map<String, Object> reviewChapter(
             String projectId,
             String bookId,
@@ -1236,6 +1306,193 @@ public class BookArtifactService {
             throw new IllegalArgumentException("targetStage 仅支持 draft/final/auto");
         }
         return targetStage;
+    }
+
+    private ChapterComparison resolveChapterComparison(
+            String projectId,
+            String bookId,
+            Integer volumeNumber,
+            Integer chapterNumber,
+            Map<String, Object> options,
+            String side,
+            String defaultStage) {
+        Object versionIdValue = valueOf(options, side + "_version_id", side + "VersionId");
+        if (versionIdValue != null && !String.valueOf(versionIdValue).isBlank()) {
+            String versionId = String.valueOf(versionIdValue);
+            validateId(versionId, side + "VersionId");
+            Path versionFile = resolveChapterVersionFile(
+                projectId,
+                bookId,
+                volumeNumber,
+                chapterNumber,
+                versionId
+            );
+            Map<String, Object> versionSnapshot = readJson(versionFile);
+            validateVersionSnapshot(versionSnapshot, bookId, volumeNumber, chapterNumber);
+            return new ChapterComparison(
+                "version",
+                inferChapterStage(projectId, versionFile, versionSnapshot),
+                versionId,
+                versionFile,
+                versionSnapshot
+            );
+        }
+
+        String stage = stringValue(valueOf(options, side + "_stage", side + "Stage"), defaultStage).toLowerCase();
+        Path chapterFile = resolveChapterFileByStage(projectId, bookId, volumeNumber, chapterNumber, stage);
+        Map<String, Object> chapter = readJson(chapterFile);
+        return new ChapterComparison(
+            "stage",
+            inferChapterStage(projectId, chapterFile, chapter),
+            null,
+            chapterFile,
+            chapter
+        );
+    }
+
+    private String inferChapterStage(String projectId, Path path, Map<String, Object> chapter) {
+        String stage = stringValue(valueOf(chapter, "stage", "stage"), "").toLowerCase();
+        if ("draft".equals(stage) || "final".equals(stage)) {
+            return stage;
+        }
+        String sourcePath = stringValue(valueOf(chapter, "source_path", "sourcePath"), "");
+        if (sourcePath.startsWith("novel/chapters/final/")) {
+            return "final";
+        }
+        if (sourcePath.startsWith("novel/chapters/drafts/")) {
+            return "draft";
+        }
+        return isFinalChapterPath(projectId, path) ? "final" : "draft";
+    }
+
+    private Map<String, Object> chapterComparisonDescriptor(
+            String projectId,
+            ChapterComparison comparison,
+            String content) {
+        Map<String, Object> descriptor = new LinkedHashMap<>();
+        descriptor.put("kind", comparison.kind());
+        descriptor.put("stage", comparison.stage());
+        descriptor.put("versionId", comparison.versionId());
+        descriptor.put("path", relative(projectId, comparison.path()));
+        descriptor.put("chapterId", chapterId(comparison.chapter(), comparison.path()));
+        descriptor.put("chapterTitle", valueOf(comparison.chapter(), "chapter_title", "chapterTitle"));
+        descriptor.put("version", valueOf(comparison.chapter(), "version", "version"));
+        descriptor.put("wordCount", chapterWordCount(comparison.chapter(), content));
+        descriptor.put("lineCount", contentLines(content).size());
+        descriptor.put("reviewStatus", valueOf(comparison.chapter(), "review_status", "reviewStatus"));
+        descriptor.put("updatedAt", valueOf(comparison.chapter(), "updated_at", "updatedAt"));
+        return descriptor;
+    }
+
+    private int chapterWordCount(Map<String, Object> chapter, String content) {
+        int wordCount = intValue(valueOf(chapter, "word_count", "wordCount"));
+        return wordCount > 0 || content.isEmpty() ? wordCount : content.length();
+    }
+
+    private List<String> contentLines(String content) {
+        if (content == null || content.isEmpty()) {
+            return List.of();
+        }
+        return List.of(content.split("\\R", -1));
+    }
+
+    private List<Map<String, Object>> chapterLineDiff(List<String> left, List<String> right) {
+        int[][] lcs = new int[left.size() + 1][right.size() + 1];
+        for (int i = left.size() - 1; i >= 0; i -= 1) {
+            for (int j = right.size() - 1; j >= 0; j -= 1) {
+                if (left.get(i).equals(right.get(j))) {
+                    lcs[i][j] = lcs[i + 1][j + 1] + 1;
+                } else {
+                    lcs[i][j] = Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+                }
+            }
+        }
+
+        List<Map<String, Object>> raw = new ArrayList<>();
+        int i = 0;
+        int j = 0;
+        while (i < left.size() && j < right.size()) {
+            if (left.get(i).equals(right.get(j))) {
+                raw.add(chapterDiffLine("equal", i + 1, j + 1, left.get(i), right.get(j)));
+                i += 1;
+                j += 1;
+            } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+                raw.add(chapterDiffLine("removed", i + 1, null, left.get(i), null));
+                i += 1;
+            } else {
+                raw.add(chapterDiffLine("added", null, j + 1, null, right.get(j)));
+                j += 1;
+            }
+        }
+        while (i < left.size()) {
+            raw.add(chapterDiffLine("removed", i + 1, null, left.get(i), null));
+            i += 1;
+        }
+        while (j < right.size()) {
+            raw.add(chapterDiffLine("added", null, j + 1, null, right.get(j)));
+            j += 1;
+        }
+        return collapseChangedChapterLines(raw);
+    }
+
+    private List<Map<String, Object>> collapseChangedChapterLines(List<Map<String, Object>> raw) {
+        List<Map<String, Object>> collapsed = new ArrayList<>();
+        List<Map<String, Object>> removed = new ArrayList<>();
+        List<Map<String, Object>> added = new ArrayList<>();
+        for (Map<String, Object> line : raw) {
+            String type = stringValue(line.get("type"), "");
+            if ("removed".equals(type)) {
+                removed.add(line);
+            } else if ("added".equals(type)) {
+                added.add(line);
+            } else {
+                flushChangedChapterBlock(collapsed, removed, added);
+                collapsed.add(line);
+            }
+        }
+        flushChangedChapterBlock(collapsed, removed, added);
+        return collapsed;
+    }
+
+    private void flushChangedChapterBlock(
+            List<Map<String, Object>> collapsed,
+            List<Map<String, Object>> removed,
+            List<Map<String, Object>> added) {
+        int changedCount = Math.min(removed.size(), added.size());
+        for (int i = 0; i < changedCount; i += 1) {
+            Map<String, Object> oldLine = removed.get(i);
+            Map<String, Object> newLine = added.get(i);
+            collapsed.add(chapterDiffLine(
+                "changed",
+                (Integer) oldLine.get("oldLineNumber"),
+                (Integer) newLine.get("newLineNumber"),
+                stringValue(oldLine.get("oldText"), ""),
+                stringValue(newLine.get("newText"), "")
+            ));
+        }
+        for (int i = changedCount; i < removed.size(); i += 1) {
+            collapsed.add(removed.get(i));
+        }
+        for (int i = changedCount; i < added.size(); i += 1) {
+            collapsed.add(added.get(i));
+        }
+        removed.clear();
+        added.clear();
+    }
+
+    private Map<String, Object> chapterDiffLine(
+            String type,
+            Integer oldLineNumber,
+            Integer newLineNumber,
+            String oldText,
+            String newText) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("type", type);
+        item.put("oldLineNumber", oldLineNumber);
+        item.put("newLineNumber", newLineNumber);
+        item.put("oldText", oldText);
+        item.put("newText", newText);
+        return item;
     }
 
     private Path archiveChapterSnapshot(

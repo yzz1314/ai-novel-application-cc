@@ -219,6 +219,139 @@ class BookArtifactServiceTest {
             .contains("\"last_edited_by\" : \"tester\"");
     }
 
+    @Test
+    void diffsDraftAndFinalChapterWithSummaryAndLineHunks() throws Exception {
+        writeChapterFile("novel/chapters/drafts/book_1/volume_1/chapter_2.json", """
+            {
+              "book_id": "book_1",
+              "volume_number": 1,
+              "chapter_number": 2,
+              "chapter_id": "chapter_2",
+              "chapter_title": "Draft Title",
+              "stage": "draft",
+              "version": 1,
+              "word_count": 17,
+              "content": "same line\\ndraft only\\nold conflict"
+            }
+            """);
+        writeChapterFile("novel/chapters/final/book_1/volume_1/chapter_2.json", """
+            {
+              "book_id": "book_1",
+              "volume_number": 1,
+              "chapter_number": 2,
+              "chapter_id": "chapter_2",
+              "chapter_title": "Final Title",
+              "stage": "final",
+              "version": 2,
+              "word_count": 19,
+              "content": "same line\\nfinal only\\nnew conflict"
+            }
+            """);
+
+        Map<String, Object> response = bookArtifactService.diffChapter(
+            PROJECT_ID,
+            BOOK_ID,
+            1,
+            2,
+            Map.of()
+        );
+
+        assertThat(response)
+            .containsEntry("bookId", BOOK_ID)
+            .containsEntry("volumeNumber", 1)
+            .containsEntry("chapterNumber", 2);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> from = (Map<String, Object>) response.get("from");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> to = (Map<String, Object>) response.get("to");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> summary = (Map<String, Object>) response.get("summary");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> hunks = (List<Map<String, Object>>) response.get("hunks");
+
+        assertThat(from)
+            .containsEntry("kind", "stage")
+            .containsEntry("stage", "draft")
+            .containsEntry("chapterTitle", "Draft Title")
+            .containsEntry("path", "novel/chapters/drafts/book_1/volume_1/chapter_2.json");
+        assertThat(to)
+            .containsEntry("kind", "stage")
+            .containsEntry("stage", "final")
+            .containsEntry("chapterTitle", "Final Title")
+            .containsEntry("path", "novel/chapters/final/book_1/volume_1/chapter_2.json");
+        assertThat(summary)
+            .containsEntry("titleChanged", true)
+            .containsEntry("contentChanged", true)
+            .containsEntry("wordCountDelta", 2)
+            .containsEntry("changedLines", 2L)
+            .containsEntry("unchangedLines", 1L);
+        assertThat(hunks).extracting(item -> item.get("type"))
+            .containsExactly("equal", "changed", "changed");
+    }
+
+    @Test
+    void diffsChapterVersionAgainstFinalChapter() throws Exception {
+        writeChapterFile("novel/chapters/final/book_1/volume_1/chapter_3.json", """
+            {
+              "book_id": "book_1",
+              "volume_number": 1,
+              "chapter_number": 3,
+              "chapter_id": "chapter_3",
+              "chapter_title": "Final Version",
+              "stage": "final",
+              "version": 4,
+              "word_count": 18,
+              "content": "line A\\nline B final"
+            }
+            """);
+        writeChapterFile("novel/chapters/versions/book_1/volume_1/chapter_3_v2_20260627010101000.json", """
+            {
+              "book_id": "book_1",
+              "volume_number": 1,
+              "chapter_number": 3,
+              "chapter_id": "chapter_3",
+              "chapter_title": "Archived Version",
+              "stage": "draft",
+              "version": 2,
+              "word_count": 19,
+              "source_path": "novel/chapters/drafts/book_1/volume_1/chapter_3.json",
+              "content": "line A\\nline B archived"
+            }
+            """);
+
+        Map<String, Object> response = bookArtifactService.diffChapter(
+            PROJECT_ID,
+            BOOK_ID,
+            1,
+            3,
+            Map.of(
+                "fromVersionId", "chapter_3_v2_20260627010101000",
+                "toStage", "final"
+            )
+        );
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> from = (Map<String, Object>) response.get("from");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> to = (Map<String, Object>) response.get("to");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> summary = (Map<String, Object>) response.get("summary");
+
+        assertThat(from)
+            .containsEntry("kind", "version")
+            .containsEntry("versionId", "chapter_3_v2_20260627010101000")
+            .containsEntry("stage", "draft");
+        assertThat(to)
+            .containsEntry("kind", "stage")
+            .containsEntry("stage", "final");
+        assertThat(summary)
+            .containsEntry("titleChanged", true)
+            .containsEntry("contentChanged", true)
+            .containsEntry("wordCountDelta", -1)
+            .containsEntry("changedLines", 1L);
+    }
+
     private Path projectRoot() {
         return tempDir.resolve("projects").resolve(PROJECT_ID);
     }
@@ -228,5 +361,9 @@ class BookArtifactServiceTest {
         Files.createDirectories(file.getParent());
         Files.writeString(file, content, StandardCharsets.UTF_8);
         return file;
+    }
+
+    private Path writeChapterFile(String relativePath, String content) throws Exception {
+        return writeProjectFile(relativePath, content);
     }
 }

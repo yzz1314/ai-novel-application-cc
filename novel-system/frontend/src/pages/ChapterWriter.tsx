@@ -19,6 +19,8 @@ import {
   Alert,
   Popconfirm,
   List,
+  Row,
+  Col,
 } from 'antd';
 import {
   EditOutlined,
@@ -31,6 +33,7 @@ import {
   AuditOutlined,
   SaveOutlined,
   CloseOutlined,
+  DiffOutlined,
 } from '@ant-design/icons';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { bookApi, chapterApi, retrievalApi } from '../services/api';
@@ -77,6 +80,9 @@ const ChapterWriter: React.FC = () => {
   const [editNote, setEditNote] = useState('');
   const [chapterVersions, setChapterVersions] = useState<any[]>([]);
   const [chapterReviews, setChapterReviews] = useState<any[]>([]);
+  const [diffModalVisible, setDiffModalVisible] = useState(false);
+  const [chapterDiff, setChapterDiff] = useState<any>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
   const [form] = Form.useForm();
   const [revisionForm] = Form.useForm();
   const [reviewForm] = Form.useForm();
@@ -317,6 +323,39 @@ const ChapterWriter: React.FC = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleDiffChapter = async (data: any = {}) => {
+    if (!projectId || !currentChapter) return;
+
+    try {
+      setDiffLoading(true);
+      const bookId = selectedBookId === 'default' ? (books[0]?.bookId || 'default') : selectedBookId;
+      const result = await chapterApi.diff(
+        projectId,
+        bookId,
+        currentChapter.volumeNumber,
+        currentChapter.chapterNumber,
+        data
+      );
+      setChapterDiff(result);
+      setDiffModalVisible(true);
+    } catch (error) {
+      message.error('章节差异对比失败');
+    } finally {
+      setDiffLoading(false);
+    }
+  };
+
+  const handleDiffDraftAndFinal = () => {
+    handleDiffChapter({ fromStage: 'draft', toStage: 'final' });
+  };
+
+  const handleDiffVersionWithCurrent = (version: any) => {
+    handleDiffChapter({
+      fromVersionId: version.id,
+      toStage: currentChapter?.isFinal ? 'final' : 'draft',
+    });
   };
 
   const openReviewModal = (chapter: Chapter | any, decision = 'approved') => {
@@ -885,6 +924,14 @@ const ChapterWriter: React.FC = () => {
                 </Button>
                 <Button
                   size="small"
+                  icon={<DiffOutlined />}
+                  loading={diffLoading}
+                  onClick={handleDiffDraftAndFinal}
+                >
+                  草稿/终稿对比
+                </Button>
+                <Button
+                  size="small"
                   danger
                   onClick={() => openReviewModal(currentChapter, 'rejected')}
                 >
@@ -1030,6 +1077,16 @@ const ChapterWriter: React.FC = () => {
                         renderItem={(item: any) => (
                           <List.Item
                             actions={[
+                              <Button
+                                key="diff-current"
+                                type="link"
+                                size="small"
+                                icon={<DiffOutlined />}
+                                loading={diffLoading}
+                                onClick={() => handleDiffVersionWithCurrent(item)}
+                              >
+                                与当前对比
+                              </Button>,
                               <Popconfirm
                                 key="restore-draft"
                                 title="恢复为草稿"
@@ -1195,6 +1252,99 @@ const ChapterWriter: React.FC = () => {
           </Space>
         )}
       </Drawer>
+
+      <Modal
+        title="章节差异对比"
+        open={diffModalVisible}
+        footer={null}
+        width={960}
+        onCancel={() => setDiffModalVisible(false)}
+      >
+        {chapterDiff ? (
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            <Descriptions column={2} size="small" bordered>
+              <Descriptions.Item label="对比来源" span={2}>
+                {chapterDiff.from?.path}{' -> '}{chapterDiff.to?.path}
+              </Descriptions.Item>
+              <Descriptions.Item label="左侧版本">
+                <Space>
+                  <Tag>{chapterDiff.from?.stage}</Tag>
+                  {chapterDiff.from?.versionId ? <Tag color="purple">{chapterDiff.from.versionId}</Tag> : null}
+                  <span>v{chapterDiff.from?.version || '-'}</span>
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="右侧版本">
+                <Space>
+                  <Tag color={chapterDiff.to?.stage === 'final' ? 'gold' : 'default'}>{chapterDiff.to?.stage}</Tag>
+                  {chapterDiff.to?.versionId ? <Tag color="purple">{chapterDiff.to.versionId}</Tag> : null}
+                  <span>v{chapterDiff.to?.version || '-'}</span>
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="标题变化">
+                {chapterDiff.summary?.titleChanged ? <Tag color="orange">已变化</Tag> : <Tag>无变化</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="内容变化">
+                {chapterDiff.summary?.contentChanged ? <Tag color="orange">已变化</Tag> : <Tag>无变化</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="字数">
+                {chapterDiff.summary?.fromWordCount || 0}{' -> '}{chapterDiff.summary?.toWordCount || 0}
+                <Tag color={(chapterDiff.summary?.wordCountDelta || 0) >= 0 ? 'green' : 'red'} style={{ marginLeft: 8 }}>
+                  {chapterDiff.summary?.wordCountDelta || 0}
+                </Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="行变化">
+                <Space wrap>
+                  <Tag color="green">新增 {chapterDiff.summary?.addedLines || 0}</Tag>
+                  <Tag color="red">删除 {chapterDiff.summary?.removedLines || 0}</Tag>
+                  <Tag color="orange">修改 {chapterDiff.summary?.changedLines || 0}</Tag>
+                  <Tag>相同 {chapterDiff.summary?.unchangedLines || 0}</Tag>
+                </Space>
+              </Descriptions.Item>
+            </Descriptions>
+
+            <List
+              size="small"
+              bordered
+              dataSource={chapterDiff.hunks || []}
+              locale={{ emptyText: '没有差异' }}
+              renderItem={(item: any, index: number) => {
+                const colorMap: Record<string, string> = {
+                  equal: 'default',
+                  added: 'green',
+                  removed: 'red',
+                  changed: 'orange',
+                };
+                return (
+                  <List.Item key={`${item.type}-${index}`}>
+                    <Space direction="vertical" style={{ width: '100%' }} size={4}>
+                      <Space>
+                        <Tag color={colorMap[item.type] || 'default'}>{item.type}</Tag>
+                        <span>
+                          {item.oldLineNumber || '-'}{' -> '}{item.newLineNumber || '-'}
+                        </span>
+                      </Space>
+                      {item.type === 'changed' ? (
+                        <Row gutter={12}>
+                          <Col span={12}>
+                            <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{item.oldText}</pre>
+                          </Col>
+                          <Col span={12}>
+                            <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{item.newText}</pre>
+                          </Col>
+                        </Row>
+                      ) : (
+                        <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{item.newText ?? item.oldText}</pre>
+                      )}
+                    </Space>
+                  </List.Item>
+                );
+              }}
+            />
+          </Space>
+        ) : (
+          <Empty description="暂无差异数据" />
+        )}
+      </Modal>
     </div>
   );
 };

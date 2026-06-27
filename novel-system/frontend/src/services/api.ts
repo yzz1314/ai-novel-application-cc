@@ -198,6 +198,19 @@ export const chapterApi = {
     request<any[]>(
       api.get(`/projects/${projectId}/books/${bookId}/chapters/${volumeNumber}/${chapterNumber}/versions`)
     ),
+  diff: (
+    projectId: string,
+    bookId: string,
+    volumeNumber: number,
+    chapterNumber: number,
+    data?: any
+  ) =>
+    request(
+      api.post(
+        `/projects/${projectId}/books/${bookId}/chapters/${volumeNumber}/${chapterNumber}/diff`,
+        data || {}
+      )
+    ),
   restoreVersion: (
     projectId: string,
     bookId: string,

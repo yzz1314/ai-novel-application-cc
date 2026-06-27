@@ -289,6 +289,22 @@ public class BookController {
         ));
     }
 
+    @PostMapping("/{bookId}/chapters/{volumeNumber}/{chapterNumber}/diff")
+    public ResponseEntity<Map<String, Object>> diffChapter(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @PathVariable Integer volumeNumber,
+            @PathVariable Integer chapterNumber,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.diffChapter(
+            projectId,
+            bookId,
+            volumeNumber,
+            chapterNumber,
+            request
+        ));
+    }
+
     @PostMapping("/{bookId}/chapters/{volumeNumber}/{chapterNumber}/review")
     public ResponseEntity<Map<String, Object>> reviewChapter(
             @PathVariable String projectId,

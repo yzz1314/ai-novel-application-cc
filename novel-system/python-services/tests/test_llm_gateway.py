@@ -140,8 +140,27 @@ async def test_llm_gateway_fallback_cache_and_cost_metrics(tmp_path, monkeypatch
 @pytest.mark.asyncio
 async def test_llm_gateway_rate_limit_interval(monkeypatch):
     client = LLMClient(model_config={"model": "mock-local", "mock": True})
-    config = {"model": "mock-local", "min_interval_ms": 20}
+    config = {"model": "mock-local", "model_profile_id": "profile_rate", "min_interval_ms": 20}
     assert client._min_interval_seconds(config) == 0.02
+
+    clock = {"value": 100.0}
+    sleeps = []
+
+    def fake_monotonic():
+        return clock["value"]
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        clock["value"] += seconds
+
+    monkeypatch.setattr(llm_client_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(llm_client_module.asyncio, "sleep", fake_sleep)
+
+    await client._apply_rate_limit(config)
+    await client._apply_rate_limit(config)
+
+    assert sleeps == [pytest.approx(0.02)]
+    assert client.rate_limit_state["profile_rate:mock-local"] == pytest.approx(100.04)
 
 
 @pytest.mark.asyncio

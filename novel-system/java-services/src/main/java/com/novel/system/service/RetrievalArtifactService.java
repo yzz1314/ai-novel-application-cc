@@ -49,6 +49,7 @@ public class RetrievalArtifactService {
         overview.put("qualityReport", getQualityReport(projectId));
         overview.put("contextPacks", listContextPacks(projectId));
         overview.put("latestTasks", latestRetrievalTasks(projectId));
+        overview.put("latestVersions", listIndexVersions(projectId).stream().limit(5).toList());
         return overview;
     }
 
@@ -354,6 +355,9 @@ public class RetrievalArtifactService {
 
         Map<String, Object> snapshot = new LinkedHashMap<>();
         snapshot.put("projectId", projectId);
+        snapshot.put("id", stripSuffix(versionFile.getFileName().toString(), ".json"));
+        snapshot.put("type", "cache_invalidation");
+        snapshot.put("createdAt", invalidatedAt.toString());
         snapshot.put("invalidatedAt", invalidatedAt.toString());
         snapshot.put("actor", stringValue(firstPresent(options.get("actor"), options.get("user")), "human"));
         snapshot.put("reason", stringValue(options.get("reason"), "manual retrieval cache invalidation"));
@@ -411,6 +415,16 @@ public class RetrievalArtifactService {
         projectService.getProject(projectId);
         Map<String, Object> parameters = new LinkedHashMap<>(request == null ? Map.of() : request);
         parameters.put("project_id", projectId);
+        Map<String, Object> version = createIndexVersionIfPresent(
+            projectId,
+            "before_retrieval_index_rebuild",
+            stringValue(firstPresent(parameters.get("actor"), parameters.get("user")), "system"),
+            "Automatic snapshot before retrieval index rebuild"
+        );
+        if (!version.isEmpty()) {
+            parameters.put("previous_retrieval_version_id", version.get("id"));
+            parameters.put("previous_retrieval_version_path", version.get("path"));
+        }
 
         Task task = taskExecutorService.createTask(
             projectId,
@@ -421,6 +435,62 @@ public class RetrievalArtifactService {
         );
         taskExecutorService.executeTaskAsync(task.getId());
         return task;
+    }
+
+    public Map<String, Object> createIndexVersion(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        return createIndexVersion(
+            projectId,
+            stringValue(options.get("reason"), "manual_retrieval_index_snapshot"),
+            stringValue(firstPresent(options.get("actor"), options.get("user")), "human"),
+            stringValue(options.get("note"), "")
+        );
+    }
+
+    public List<Map<String, Object>> listIndexVersions(String projectId) {
+        projectService.getProject(projectId);
+        Path versionsDir = versionsDir(projectId);
+        if (!Files.exists(versionsDir)) {
+            return List.of();
+        }
+        List<Map<String, Object>> versions = new ArrayList<>();
+        try (var stream = Files.list(versionsDir)) {
+            stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".json"))
+                .forEach(path -> {
+                    try {
+                        versions.add(indexVersionSummary(projectId, path, readOptionalJson(path)));
+                    } catch (Exception ignored) {
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("id", stripSuffix(path.getFileName().toString(), ".json"));
+                        item.put("projectId", projectId);
+                        item.put("path", relative(projectId, path));
+                        item.put("createdAt", modifiedAt(path));
+                        item.put("updatedAt", modifiedAt(path));
+                        versions.add(item);
+                    }
+                });
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to read retrieval index versions", e);
+        }
+        versions.sort(Comparator.comparing(version -> String.valueOf(version.get("createdAt")), Comparator.reverseOrder()));
+        return versions;
+    }
+
+    public Map<String, Object> getIndexVersion(String projectId, String versionId) {
+        projectService.getProject(projectId);
+        validateId(versionId, "versionId");
+        Path versionFile = versionsDir(projectId).resolve(versionId + ".json");
+        if (!Files.exists(versionFile)) {
+            throw new ResourceNotFoundException("Retrieval index version does not exist: " + versionId);
+        }
+        Map<String, Object> version = readOptionalJson(versionFile);
+        version.put("id", versionId);
+        version.put("path", relative(projectId, versionFile));
+        version.put("updatedAt", modifiedAt(versionFile));
+        version.put("summary", indexVersionSummary(projectId, versionFile, version));
+        return version;
     }
 
     public List<Map<String, Object>> listContextPacks(String projectId) {
@@ -632,6 +702,126 @@ public class RetrievalArtifactService {
             return defaultValue;
         }
         return value.toString();
+    }
+
+    private Map<String, Object> createIndexVersionIfPresent(
+            String projectId,
+            String reason,
+            String actor,
+            String note) {
+        try {
+            return createIndexVersion(projectId, reason, actor, note);
+        } catch (ResourceNotFoundException ignored) {
+            return Map.of();
+        }
+    }
+
+    private Map<String, Object> createIndexVersion(
+            String projectId,
+            String reason,
+            String actor,
+            String note) {
+        LocalDateTime createdAt = LocalDateTime.now();
+        String versionId = "retrieval_index_" + createdAt.format(VERSION_TIMESTAMP);
+        Path versionFile = versionsDir(projectId).resolve(versionId + ".json");
+
+        Map<String, Object> indexes = getIndexSummaries(projectId);
+        Map<String, Object> qualityReport = getQualityReport(projectId);
+        List<Map<String, Object>> contextPacks = listContextPacks(projectId);
+        if (!hasIndexVersionContent(indexes, qualityReport, contextPacks)) {
+            throw new ResourceNotFoundException("Retrieval index artifacts do not exist, rebuild indexes first");
+        }
+
+        Map<String, Object> version = new LinkedHashMap<>();
+        version.put("id", versionId);
+        version.put("type", "index_snapshot");
+        version.put("projectId", projectId);
+        version.put("reason", reason);
+        version.put("actor", actor);
+        version.put("note", note);
+        version.put("createdAt", createdAt.toString());
+        version.put("config", getConfig(projectId));
+        version.put("indexes", indexes);
+        version.put("qualityReport", qualityReport);
+        version.put("contextPacks", contextPacks);
+        version.put("documentCounts", indexDocumentCounts(indexes));
+        version.put("artifactRefs", Map.of(
+            "config", artifactRef(projectId, configFile(projectId)),
+            "bm25", artifactRef(projectId, indexDir(projectId, "bm25").resolve("index_summary.json")),
+            "vector", artifactRef(projectId, indexDir(projectId, "vector").resolve("index_summary.json")),
+            "hybrid", artifactRef(projectId, indexDir(projectId, "hybrid").resolve("index_summary.json")),
+            "rebuildReport", artifactRef(projectId, projectRoot(projectId).resolve("indexes").resolve("retrieval_index_report.json")),
+            "qualityReport", artifactRef(projectId, qualityReportFile(projectId))
+        ));
+        version.put("versionPath", relative(projectId, versionFile));
+        writeJson(versionFile, version);
+
+        Map<String, Object> response = indexVersionSummary(projectId, versionFile, version);
+        response.put("documentCounts", version.get("documentCounts"));
+        response.put("artifactRefs", version.get("artifactRefs"));
+        return response;
+    }
+
+    private boolean hasIndexVersionContent(
+            Map<String, Object> indexes,
+            Map<String, Object> qualityReport,
+            List<Map<String, Object>> contextPacks) {
+        for (String indexType : INDEX_TYPES) {
+            if (Boolean.TRUE.equals(asMap(indexes.get(indexType)).get("exists"))) {
+                return true;
+            }
+        }
+        if (Boolean.TRUE.equals(asMap(indexes.get("rebuildReport")).get("exists"))) {
+            return true;
+        }
+        if (Boolean.TRUE.equals(qualityReport.get("exists"))) {
+            return true;
+        }
+        return contextPacks != null && !contextPacks.isEmpty();
+    }
+
+    private Map<String, Object> indexVersionSummary(String projectId, Path versionFile, Map<String, Object> version) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        String id = String.valueOf(version.getOrDefault("id", stripSuffix(versionFile.getFileName().toString(), ".json")));
+        Map<String, Object> indexes = asMap(version.get("indexes"));
+        Map<String, Object> qualityReport = asMap(version.get("qualityReport"));
+        Map<String, Object> hybridQuality = asMap(asMap(indexes.get("hybrid")).get("quality_evaluation"));
+
+        item.put("id", id);
+        item.put("type", version.getOrDefault("type", id.startsWith("retrieval_invalidation_") ? "cache_invalidation" : "index_snapshot"));
+        item.put("projectId", version.getOrDefault("projectId", projectId));
+        item.put("reason", version.get("reason"));
+        item.put("actor", version.get("actor"));
+        item.put("note", version.get("note"));
+        item.put("createdAt", firstPresent(version.get("createdAt"), version.get("invalidatedAt"), modifiedAt(versionFile)));
+        item.put("path", relative(projectId, versionFile));
+        item.put("updatedAt", modifiedAt(versionFile));
+        item.put("bm25DocumentCount", documentCount(asMap(indexes.get("bm25"))));
+        item.put("vectorDocumentCount", documentCount(asMap(indexes.get("vector"))));
+        item.put("hybridDocumentCount", documentCount(asMap(indexes.get("hybrid"))));
+        item.put("contextPackCount", listSize(version.get("contextPacks")));
+        item.put("qualityScore", firstPresent(qualityReport.get("score"), hybridQuality.get("score")));
+        item.put("qualityStatus", firstPresent(qualityReport.get("status"), hybridQuality.get("status")));
+        item.put("rebuildReportExists", Boolean.TRUE.equals(asMap(indexes.get("rebuildReport")).get("exists")));
+        if (version.containsKey("deletedCount")) {
+            item.put("deletedCount", version.get("deletedCount"));
+        }
+        return item;
+    }
+
+    private Map<String, Object> indexDocumentCounts(Map<String, Object> indexes) {
+        Map<String, Object> counts = new LinkedHashMap<>();
+        for (String indexType : INDEX_TYPES) {
+            counts.put(indexType, documentCount(asMap(indexes.get(indexType))));
+        }
+        return counts;
+    }
+
+    private int listSize(Object value) {
+        if (value instanceof List<?> list) {
+            return list.size();
+        }
+        return 0;
     }
 
     private void deleteContextPacks(String projectId, List<Map<String, Object>> deleted) {

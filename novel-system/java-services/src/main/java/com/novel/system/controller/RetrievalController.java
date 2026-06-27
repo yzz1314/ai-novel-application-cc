@@ -78,6 +78,25 @@ public class RetrievalController {
         return ResponseEntity.ok(retrievalArtifactService.invalidateCaches(projectId, request == null ? Map.of() : request));
     }
 
+    @GetMapping("/versions")
+    public ResponseEntity<List<Map<String, Object>>> listIndexVersions(@PathVariable String projectId) {
+        return ResponseEntity.ok(retrievalArtifactService.listIndexVersions(projectId));
+    }
+
+    @PostMapping("/versions")
+    public ResponseEntity<Map<String, Object>> createIndexVersion(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(retrievalArtifactService.createIndexVersion(projectId, request == null ? Map.of() : request));
+    }
+
+    @GetMapping("/versions/{versionId}")
+    public ResponseEntity<Map<String, Object>> getIndexVersion(
+            @PathVariable String projectId,
+            @PathVariable String versionId) {
+        return ResponseEntity.ok(retrievalArtifactService.getIndexVersion(projectId, versionId));
+    }
+
     @GetMapping("/config")
     public ResponseEntity<Map<String, Object>> getConfig(@PathVariable String projectId) {
         return ResponseEntity.ok(retrievalArtifactService.getConfig(projectId));

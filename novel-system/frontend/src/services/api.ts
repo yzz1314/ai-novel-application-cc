@@ -363,6 +363,12 @@ export const retrievalApi = {
     request(api.post(`/projects/${projectId}/retrieval/quality/evaluate`, data || {})),
   invalidate: (projectId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/retrieval/invalidate`, data || {})),
+  getVersions: (projectId: string) =>
+    request<any[]>(api.get(`/projects/${projectId}/retrieval/versions`)),
+  createVersion: (projectId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/retrieval/versions`, data || {})),
+  getVersion: (projectId: string, versionId: string) =>
+    request(api.get(`/projects/${projectId}/retrieval/versions/${versionId}`)),
   getContextPacks: (projectId: string) =>
     request<any[]>(api.get(`/projects/${projectId}/retrieval/context-packs`)),
   getContextPack: (projectId: string, contextPackId: string) =>

@@ -22,6 +22,7 @@ import {
 import {
   DatabaseOutlined,
   DeleteOutlined,
+  HistoryOutlined,
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons'
@@ -38,9 +39,13 @@ const RetrievalView: React.FC = () => {
   const [syncing, setSyncing] = useState(false)
   const [evaluating, setEvaluating] = useState(false)
   const [invalidating, setInvalidating] = useState(false)
+  const [versioning, setVersioning] = useState(false)
   const [overview, setOverview] = useState<any>(null)
   const [config, setConfig] = useState<any>({})
   const [contextPack, setContextPack] = useState<any>(null)
+  const [versions, setVersions] = useState<any[]>([])
+  const [versionDrawerOpen, setVersionDrawerOpen] = useState(false)
+  const [versionDetail, setVersionDetail] = useState<any>(null)
   const [form] = Form.useForm()
 
   useEffect(() => {
@@ -50,6 +55,7 @@ const RetrievalView: React.FC = () => {
   const indexes = overview?.indexes || {}
   const packs = overview?.contextPacks || []
   const latestTasks = overview?.latestTasks || []
+  const latestVersions = overview?.latestVersions || []
   const qualityReport = overview?.qualityReport || {}
   const latestQuality = indexes?.hybrid?.quality_evaluation || indexes?.rebuildReport?.quality_evaluation || {}
   const latestBudget = indexes?.hybrid?.citation_budget || indexes?.rebuildReport?.citation_budget || {}
@@ -179,6 +185,51 @@ const RetrievalView: React.FC = () => {
       message.error({ content: '清理旧检索缓存失败', key: 'retrieval-invalidate' })
     } finally {
       setInvalidating(false)
+    }
+  }
+
+  const createIndexVersion = async () => {
+    if (!projectId) return
+    try {
+      setVersioning(true)
+      const version: any = await retrievalApi.createVersion(projectId, {
+        actor: 'human',
+        reason: 'manual_retrieval_index_snapshot',
+        note: 'Created from RetrievalView',
+      })
+      message.success(`索引版本已创建 ${version?.id || ''}`)
+      await loadOverview()
+    } catch (error) {
+      message.error('创建索引版本失败')
+    } finally {
+      setVersioning(false)
+    }
+  }
+
+  const openVersions = async () => {
+    if (!projectId) return
+    try {
+      setVersioning(true)
+      const data = await retrievalApi.getVersions(projectId)
+      setVersions(data || [])
+      setVersionDrawerOpen(true)
+    } catch (error) {
+      message.error('加载索引版本失败')
+    } finally {
+      setVersioning(false)
+    }
+  }
+
+  const openVersionDetail = async (record: any) => {
+    if (!projectId || !record?.id) return
+    try {
+      setVersioning(true)
+      const detail = await retrievalApi.getVersion(projectId, record.id)
+      setVersionDetail(detail)
+    } catch (error) {
+      message.error('加载索引版本详情失败')
+    } finally {
+      setVersioning(false)
     }
   }
 
@@ -314,6 +365,39 @@ const RetrievalView: React.FC = () => {
     { title: '完成时间', dataIndex: 'finishedAt', key: 'finishedAt' },
   ]
 
+  const versionColumns = [
+    { title: '版本', dataIndex: 'id', key: 'id', ellipsis: true },
+    {
+      title: '类型',
+      dataIndex: 'type',
+      key: 'type',
+      width: 140,
+      render: (value: string) => <Tag>{value || 'index_snapshot'}</Tag>,
+    },
+    { title: 'BM25', dataIndex: 'bm25DocumentCount', key: 'bm25DocumentCount', width: 80 },
+    { title: 'Vector', dataIndex: 'vectorDocumentCount', key: 'vectorDocumentCount', width: 80 },
+    { title: 'Hybrid', dataIndex: 'hybridDocumentCount', key: 'hybridDocumentCount', width: 80 },
+    {
+      title: '质量',
+      key: 'quality',
+      width: 110,
+      render: (_: any, record: any) => record.qualityScore !== undefined ? (
+        <Tag color={qualityColor(record.qualityStatus)}>{record.qualityStatus || 'unknown'} {record.qualityScore}</Tag>
+      ) : '-',
+    },
+    { title: '时间', dataIndex: 'createdAt', key: 'createdAt', width: 190 },
+    {
+      title: '操作',
+      key: 'action',
+      width: 90,
+      render: (_: any, record: any) => (
+        <Button type="link" onClick={() => openVersionDetail(record)}>
+          查看
+        </Button>
+      ),
+    },
+  ]
+
   const qualityCheckColumns = [
     {
       title: '检查项',
@@ -351,6 +435,12 @@ const RetrievalView: React.FC = () => {
           </Button>
           <Button icon={<DeleteOutlined />} onClick={invalidateRetrievalCaches} loading={invalidating}>
             清理旧缓存
+          </Button>
+          <Button icon={<HistoryOutlined />} onClick={createIndexVersion} loading={versioning}>
+            创建版本
+          </Button>
+          <Button icon={<HistoryOutlined />} onClick={openVersions} loading={versioning}>
+            版本
           </Button>
           <Button type="primary" icon={<SearchOutlined />} onClick={rebuild} loading={rebuilding}>
             重建索引
@@ -507,6 +597,21 @@ const RetrievalView: React.FC = () => {
         />
       </Card>
 
+      <Card title="索引版本">
+        {(latestVersions || []).length ? (
+          <Table
+            columns={versionColumns}
+            dataSource={latestVersions}
+            rowKey="id"
+            loading={loading}
+            pagination={false}
+            size="small"
+          />
+        ) : (
+          <Empty description="尚未生成索引版本" />
+        )}
+      </Card>
+
       <Card title="章节上下文包">
         {packs.length ? (
           <Table
@@ -620,6 +725,51 @@ const RetrievalView: React.FC = () => {
             </Card>
           </Space>
         ) : null}
+      </Drawer>
+
+      <Drawer
+        title="索引版本"
+        open={versionDrawerOpen}
+        width={920}
+        onClose={() => {
+          setVersionDrawerOpen(false)
+          setVersionDetail(null)
+        }}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Table
+            columns={versionColumns}
+            dataSource={versions}
+            rowKey="id"
+            loading={versioning}
+            pagination={{ pageSize: 8 }}
+            size="small"
+            locale={{ emptyText: '暂无索引版本' }}
+          />
+          {versionDetail ? (
+            <Card title={versionDetail.id} size="small">
+              <Descriptions bordered size="small" column={2}>
+                <Descriptions.Item label="路径" span={2}>{versionDetail.path}</Descriptions.Item>
+                <Descriptions.Item label="类型">{versionDetail.type || versionDetail.summary?.type}</Descriptions.Item>
+                <Descriptions.Item label="原因">{versionDetail.reason || '-'}</Descriptions.Item>
+                <Descriptions.Item label="操作者">{versionDetail.actor || '-'}</Descriptions.Item>
+                <Descriptions.Item label="创建时间">{versionDetail.createdAt || versionDetail.summary?.createdAt}</Descriptions.Item>
+                <Descriptions.Item label="上下文包">{(versionDetail.contextPacks || []).length}</Descriptions.Item>
+                <Descriptions.Item label="质量">
+                  {versionDetail.qualityReport?.score ?? versionDetail.summary?.qualityScore ?? '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="说明">{versionDetail.note || '-'}</Descriptions.Item>
+              </Descriptions>
+              <Paragraph style={{ whiteSpace: 'pre-wrap', maxHeight: 420, overflow: 'auto', marginTop: 16 }}>
+                {JSON.stringify({
+                  documentCounts: versionDetail.documentCounts || versionDetail.summary,
+                  artifactRefs: versionDetail.artifactRefs,
+                  qualityReport: versionDetail.qualityReport,
+                }, null, 2)}
+              </Paragraph>
+            </Card>
+          ) : null}
+        </Space>
       </Drawer>
     </Space>
   )

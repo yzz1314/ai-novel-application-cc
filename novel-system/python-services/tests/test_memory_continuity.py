@@ -93,6 +93,21 @@ async def test_continuity_check_detects_future_timeline_and_missing_appearance(t
     issue_titles = {issue["title"] for issue in response.structured_output["issues"]}
     assert "人物出场记录未更新" in issue_titles
     assert "未来时间线事件提前发生" in issue_titles
+    missing_appearance_issue = next(
+        issue for issue in response.structured_output["issues"]
+        if issue["title"] == "人物出场记录未更新"
+    )
+    assert missing_appearance_issue["fix"] == {
+        "action": "append_unique",
+        "memory_file": "characters.json",
+        "match": {
+            "character_id": "char_linmo",
+            "name": "林墨",
+        },
+        "field": "appearances",
+        "value": 2,
+        "sort": True,
+    }
     assert response.output_refs
 
 

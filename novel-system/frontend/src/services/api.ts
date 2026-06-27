@@ -282,6 +282,8 @@ export const memoryApi = {
     request(api.get(`/projects/${projectId}/memory/continuity/reports/${reportId}`)),
   resolveContinuityIssue: (projectId: string, reportId: string, issueIndex: number, data?: any) =>
     request(api.post(`/projects/${projectId}/memory/continuity/reports/${reportId}/issues/${issueIndex}/resolution`, data || {})),
+  applyContinuityIssueFix: (projectId: string, reportId: string, issueIndex: number, data?: any) =>
+    request(api.post(`/projects/${projectId}/memory/continuity/reports/${reportId}/issues/${issueIndex}/fix`, data || {})),
   audit: (projectId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/memory/audit`, data || {})),
   getAuditReports: (projectId: string) =>

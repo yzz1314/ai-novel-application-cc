@@ -403,8 +403,26 @@ public class MemoryService {
         return resolveReportIssue(projectId, "audit", reportId, issueIndex, request);
     }
 
+    public Map<String, Object> applyContinuityIssueFix(
+            String projectId,
+            String reportId,
+            Integer issueIndex,
+            Map<String, Object> request) {
+        return applyReportIssueFix(projectId, "continuity", reportId, issueIndex, request);
+    }
+
     public Map<String, Object> applyAuditIssueFix(
             String projectId,
+            String reportId,
+            Integer issueIndex,
+            Map<String, Object> request) {
+        return applyReportIssueFix(projectId, "audit", reportId, issueIndex, request);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> applyReportIssueFix(
+            String projectId,
+            String reportType,
             String reportId,
             Integer issueIndex,
             Map<String, Object> request) {
@@ -414,9 +432,9 @@ public class MemoryService {
             throw new IllegalArgumentException("非法issueIndex: " + issueIndex);
         }
 
-        Path reportPath = reportFile(projectId, "audit", reportId);
+        Path reportPath = reportFile(projectId, reportType, reportId);
         if (!Files.exists(reportPath)) {
-            throw new ResourceNotFoundException("记忆审计报告不存在: " + reportId);
+            throw new ResourceNotFoundException(reportDisplayName(reportType) + "不存在: " + reportId);
         }
 
         Map<String, Object> report = readJsonMap(reportPath);
@@ -428,13 +446,13 @@ public class MemoryService {
         Map<String, Object> issue = issues.get(issueIndex);
         Map<String, Object> fix = asMap(issue.get("fix"));
         if (fix.isEmpty()) {
-            throw new IllegalArgumentException("该记忆审计问题没有可自动应用的修复");
+            throw new IllegalArgumentException("该" + reportDisplayName(reportType) + "问题没有可自动应用的修复");
         }
 
         Map<String, Object> beforeVersion = createMemoryVersion(projectId, Map.of(
-            "reason", "before_memory_audit_fix",
+            "reason", "before_memory_" + reportType + "_fix",
             "actor", stringValue(requestValue(request, "actor"), "system"),
-            "note", "Before applying memory audit fix " + reportId + "#" + issueIndex
+            "note", "Before applying memory " + reportType + " fix " + reportId + "#" + issueIndex
         ));
 
         Map<String, Object> fixResult = applyMemoryFix(projectId, fix);
@@ -456,7 +474,6 @@ public class MemoryService {
         resolution.put("fix", fix);
         resolution.put("fix_result", fixResult);
 
-        @SuppressWarnings("unchecked")
         List<Map<String, Object>> history = issue.get("resolution_history") instanceof List<?> rawHistory
             ? new ArrayList<>((List<Map<String, Object>>) rawHistory)
             : new ArrayList<>();
@@ -486,6 +503,7 @@ public class MemoryService {
 
         Path eventFile = saveMemoryFixEvent(
             projectId,
+            reportType,
             reportId,
             issueIndex,
             issue,
@@ -498,6 +516,7 @@ public class MemoryService {
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("projectId", projectId);
+        response.put("reportType", reportType);
         response.put("reportId", reportId);
         response.put("issueIndex", issueIndex);
         response.put("issue", issue);
@@ -876,6 +895,7 @@ public class MemoryService {
 
         return switch (action) {
             case "set_field" -> applySetFieldFix(file, records, fix);
+            case "append_unique" -> applyAppendUniqueFix(file, records, fix);
             case "sort_by_chapter" -> applySortByChapterFix(file, records, fix);
             default -> throw new IllegalArgumentException("不支持的记忆自动修复动作: " + action);
         };
@@ -914,6 +934,61 @@ public class MemoryService {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("action", "set_field");
         result.put("memoryFile", file.getFileName().toString());
+        result.put("changedCount", changed.size());
+        result.put("changes", changed);
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> applyAppendUniqueFix(Path file, List<Map<String, Object>> records, Map<String, Object> fix) {
+        Map<String, Object> match = asMap(fix.get("match"));
+        String field = stringValue(fix.get("field"), "");
+        if (field.isBlank()) {
+            throw new IllegalArgumentException("记忆自动修复缺少field");
+        }
+
+        List<Map<String, Object>> changed = new ArrayList<>();
+        for (Map<String, Object> record : records) {
+            if (!matchesMemoryRecord(record, match)) {
+                continue;
+            }
+
+            Object previous = record.get(field);
+            List<Object> nextValues = previous instanceof List<?> rawList
+                ? new ArrayList<>((List<Object>) rawList)
+                : new ArrayList<>();
+            Object value = fix.get("value");
+            boolean exists = nextValues.stream().anyMatch(item -> valuesEqual(item, value));
+            if (exists) {
+                continue;
+            }
+
+            nextValues.add(value);
+            if (Boolean.TRUE.equals(fix.get("sort"))) {
+                nextValues.sort(Comparator
+                    .comparingInt(this::numericSortValue)
+                    .thenComparing(item -> stringValue(item, "")));
+            }
+            record.put(field, nextValues);
+
+            Map<String, Object> change = new LinkedHashMap<>();
+            change.put("field", field);
+            change.put("previous", previous);
+            change.put("next", nextValues);
+            change.put("appended", value);
+            change.put("match", match);
+            changed.add(change);
+        }
+
+        if (changed.isEmpty()) {
+            throw new IllegalArgumentException("未找到需要更新的记忆条目");
+        }
+
+        writeJsonList(file, records);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("action", "append_unique");
+        result.put("memoryFile", file.getFileName().toString());
+        result.put("field", field);
         result.put("changedCount", changed.size());
         result.put("changes", changed);
         return result;
@@ -979,6 +1054,7 @@ public class MemoryService {
 
     private Path saveMemoryFixEvent(
             String projectId,
+            String reportType,
             String reportId,
             Integer issueIndex,
             Map<String, Object> issue,
@@ -996,10 +1072,11 @@ public class MemoryService {
 
         String timestamp = LocalDateTime.now().format(VERSION_TIMESTAMP);
         String issueId = sanitizeFilePart(stringValue(issue.get("issue_id"), "issue_" + issueIndex));
-        Path file = dir.resolve("audit_fix_" + sanitizeFilePart(reportId) + "_" + issueId + "_" + timestamp + ".json");
+        Path file = dir.resolve(reportType + "_fix_" + sanitizeFilePart(reportId) + "_" + issueId + "_" + timestamp + ".json");
         Map<String, Object> event = new LinkedHashMap<>();
         event.put("project_id", projectId);
-        event.put("event_type", "memory_audit_fix");
+        event.put("event_type", "memory_" + reportType + "_fix");
+        event.put("report_type", reportType);
         event.put("report_id", reportId);
         event.put("issue_index", issueIndex);
         event.put("issue_id", issue.get("issue_id"));

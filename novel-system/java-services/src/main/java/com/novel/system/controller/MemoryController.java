@@ -128,6 +128,20 @@ public class MemoryController {
         ));
     }
 
+    @PostMapping("/continuity/reports/{reportId}/issues/{issueIndex}/fix")
+    public ResponseEntity<Map<String, Object>> applyContinuityIssueFix(
+            @PathVariable String projectId,
+            @PathVariable String reportId,
+            @PathVariable Integer issueIndex,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(memoryService.applyContinuityIssueFix(
+            projectId,
+            reportId,
+            issueIndex,
+            request == null ? Map.of() : request
+        ));
+    }
+
     @GetMapping("/audits")
     public ResponseEntity<List<Map<String, Object>>> listAuditReports(@PathVariable String projectId) {
         return ResponseEntity.ok(memoryService.listAuditReports(projectId));

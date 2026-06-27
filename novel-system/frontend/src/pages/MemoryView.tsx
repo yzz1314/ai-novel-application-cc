@@ -263,16 +263,27 @@ const MemoryView: React.FC = () => {
     }
   }
 
-  const handleApplyAuditFix = async (issueIndex: number) => {
-    if (!projectId || !auditDrawer?.id) return
-    const key = issueKey('audit', issueIndex)
+  const handleApplyIssueFix = async (reportType: 'continuity' | 'audit', issueIndex: number) => {
+    if (!projectId) return
+    const drawer = reportType === 'continuity' ? continuityDrawer : auditDrawer
+    if (!drawer?.id) return
+    const key = issueKey(reportType, issueIndex)
+    const payload = {
+      actor: 'human',
+      note: resolutionNotes[key] || '',
+    }
     try {
-      await memoryApi.applyAuditIssueFix(projectId, auditDrawer.id, issueIndex, {
-        actor: 'human',
-        note: resolutionNotes[key] || '',
-      })
-      const refreshed = await memoryApi.getAuditReport(projectId, auditDrawer.id)
-      setAuditDrawer(refreshed)
+      await (reportType === 'continuity'
+        ? memoryApi.applyContinuityIssueFix(projectId, drawer.id, issueIndex, payload)
+        : memoryApi.applyAuditIssueFix(projectId, drawer.id, issueIndex, payload))
+      const refreshed = reportType === 'continuity'
+        ? await memoryApi.getContinuityReport(projectId, drawer.id)
+        : await memoryApi.getAuditReport(projectId, drawer.id)
+      if (reportType === 'continuity') {
+        setContinuityDrawer(refreshed)
+      } else {
+        setAuditDrawer(refreshed)
+      }
       setResolutionNotes((prev) => ({ ...prev, [key]: '' }))
       await loadMemories()
       message.success('记忆修复已应用')
@@ -473,11 +484,11 @@ const MemoryView: React.FC = () => {
               <Button size="small" onClick={() => handleResolveIssue(reportType, index, 'open')}>
                 重开
               </Button>
-              {reportType === 'audit' && record?.fix && !record?.fixApplied && !record?.fix_applied && (
+              {record?.fix && !record?.fixApplied && !record?.fix_applied && (
                 <Popconfirm
                   title="应用这条自动修复？"
                   description="应用前会自动创建记忆版本，便于回滚。"
-                  onConfirm={() => handleApplyAuditFix(index)}
+                  onConfirm={() => handleApplyIssueFix(reportType, index)}
                   okText="应用"
                   cancelText="取消"
                 >

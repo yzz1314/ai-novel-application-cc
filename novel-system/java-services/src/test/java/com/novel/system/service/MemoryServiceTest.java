@@ -176,6 +176,83 @@ class MemoryServiceTest {
             .contains("\"actor\" : \"tester\"");
     }
 
+    @Test
+    void applyContinuityIssueFixAppendsMissingAppearanceAndMarksIssueResolved() throws Exception {
+        writeProjectFile("memory/characters.json", """
+            [
+              {
+                "character_id": "char_lin",
+                "name": "Lin Yuan",
+                "appearances": [1],
+                "first_mentioned": 1,
+                "last_updated": 1
+              }
+            ]
+            """);
+        writeProjectFile("memory/continuity/continuity_test.json", """
+            {
+              "project_id": "project_memory_versions",
+              "book_id": "default",
+              "chapter_id": "chapter_2",
+              "chapter_number": 2,
+              "has_issues": true,
+              "issues": [
+                {
+                  "issue_id": "issue_missing_appearance",
+                  "issue_type": "character",
+                  "severity": "minor",
+                  "title": "missing appearance",
+                  "description": "appearances missing chapter 2",
+                  "suggestion": "append chapter",
+                  "fix": {
+                    "action": "append_unique",
+                    "memory_file": "characters.json",
+                    "match": {
+                      "character_id": "char_lin"
+                    },
+                    "field": "appearances",
+                    "value": 2,
+                    "sort": true
+                  }
+                }
+              ]
+            }
+            """);
+
+        Map<String, Object> response = memoryService.applyContinuityIssueFix(
+            PROJECT_ID,
+            "continuity_test",
+            0,
+            Map.of("actor", "tester", "note", "append missing appearance")
+        );
+
+        assertThat(response)
+            .containsEntry("reportType", "continuity")
+            .containsEntry("reportId", "continuity_test")
+            .containsKey("beforeVersionId")
+            .containsKey("eventPath");
+        assertThat(Files.readString(projectRoot().resolve("memory/characters.json"), StandardCharsets.UTF_8))
+            .contains("\"appearances\" : [ 1, 2 ]");
+
+        String report = Files.readString(projectRoot().resolve("memory/continuity/continuity_test.json"), StandardCharsets.UTF_8);
+        assertThat(report)
+            .contains("\"resolution_status\" : \"resolved\"")
+            .contains("\"fix_applied\" : true")
+            .contains("\"changedCount\" : 1")
+            .contains("\"action\" : \"append_unique\"");
+
+        String beforeVersionPath = String.valueOf(response.get("beforeVersionPath"));
+        assertThat(Files.readString(projectRoot().resolve(beforeVersionPath), StandardCharsets.UTF_8))
+            .contains("\"reason\" : \"before_memory_continuity_fix\"")
+            .contains("\\\"appearances\\\": [1]");
+
+        String eventPath = String.valueOf(response.get("eventPath"));
+        assertThat(Files.readString(projectRoot().resolve(eventPath), StandardCharsets.UTF_8))
+            .contains("\"event_type\" : \"memory_continuity_fix\"")
+            .contains("\"report_type\" : \"continuity\"")
+            .contains("\"actor\" : \"tester\"");
+    }
+
     private Path projectRoot() {
         return tempDir.resolve("projects").resolve(PROJECT_ID);
     }

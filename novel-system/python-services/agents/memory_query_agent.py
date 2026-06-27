@@ -338,6 +338,14 @@ class MemoryQueryAgent(BaseAgent):
                     f"{character.get('name')} 在本章文本中出现，但人物记忆 appearances 未包含第 {chapter_number} 章。",
                     [chapter_number],
                     "终稿摄取后更新人物出场记录，或确认本次检查使用的是最新记忆。",
+                    fix={
+                        "action": "append_unique",
+                        "memory_file": "characters.json",
+                        "match": self._memory_match(character, ["character_id", "name"]),
+                        "field": "appearances",
+                        "value": chapter_number,
+                        "sort": True,
+                    },
                 ))
 
             future_events = self._future_records(character.get("important_events", []), chapter_number)

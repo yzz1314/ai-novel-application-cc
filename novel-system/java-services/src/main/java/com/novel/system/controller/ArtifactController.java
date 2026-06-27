@@ -42,8 +42,9 @@ public class ArtifactController {
             @RequestParam("path") String path,
             @RequestParam(defaultValue = "false") boolean allowSensitive,
             @RequestParam(required = false) String actor,
-            @RequestParam(required = false) String reason) {
-        return ResponseEntity.ok(artifactService.getArtifact(projectId, path, allowSensitive, actor, reason));
+            @RequestParam(required = false) String reason,
+            @RequestParam(required = false) String role) {
+        return ResponseEntity.ok(artifactService.getArtifact(projectId, path, allowSensitive, actor, reason, role));
     }
 
     @GetMapping("/download")
@@ -52,8 +53,9 @@ public class ArtifactController {
             @RequestParam("path") String path,
             @RequestParam(defaultValue = "false") boolean allowSensitive,
             @RequestParam(required = false) String actor,
-            @RequestParam(required = false) String reason) {
-        ArtifactService.DownloadedArtifact artifact = artifactService.downloadArtifact(projectId, path, allowSensitive, actor, reason);
+            @RequestParam(required = false) String reason,
+            @RequestParam(required = false) String role) {
+        ArtifactService.DownloadedArtifact artifact = artifactService.downloadArtifact(projectId, path, allowSensitive, actor, reason, role);
         return downloaded(artifact);
     }
 
@@ -86,6 +88,13 @@ public class ArtifactController {
         return ResponseEntity.ok(artifactService.deleteArchivedArtifact(projectId, request == null ? Map.of() : request));
     }
 
+    @PostMapping("/retention/apply")
+    public ResponseEntity<Map<String, Object>> applyRetentionPolicy(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(artifactService.applyRetentionPolicy(projectId, request == null ? Map.of() : request));
+    }
+
     @PostMapping("/diff")
     public ResponseEntity<Map<String, Object>> diffArtifacts(
             @PathVariable String projectId,
@@ -96,8 +105,10 @@ public class ArtifactController {
     @GetMapping("/audit")
     public ResponseEntity<Map<String, Object>> listAuditEvents(
             @PathVariable String projectId,
-            @RequestParam(defaultValue = "100") int limit) {
-        return ResponseEntity.ok(artifactService.listAuditEvents(projectId, limit));
+            @RequestParam(defaultValue = "100") int limit,
+            @RequestParam(required = false) String actor,
+            @RequestParam(required = false) String role) {
+        return ResponseEntity.ok(artifactService.listAuditEvents(projectId, limit, actor, role));
     }
 
     private ResponseEntity<?> downloaded(ArtifactService.DownloadedArtifact artifact) {

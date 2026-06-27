@@ -32,6 +32,8 @@ import { artifactApi } from '../services/api'
 
 const { Paragraph, Text, Title } = Typography
 const { Search } = Input
+const ARTIFACT_ACTOR = 'human'
+const ARTIFACT_ROLE = 'artifact_manager'
 
 const categoryColors: Record<string, string> = {
   samples: 'blue',
@@ -130,7 +132,8 @@ const ArtifactView: React.FC = () => {
     try {
       const detail = await artifactApi.view(projectId, record.path, allowSensitive ? {
         allowSensitive: true,
-        actor: 'human',
+        actor: ARTIFACT_ACTOR,
+        role: ARTIFACT_ROLE,
         reason: 'ArtifactView敏感完整预览授权',
       } : undefined)
       setDrawer(detail)
@@ -156,7 +159,8 @@ const ArtifactView: React.FC = () => {
     try {
       const blob = await artifactApi.download(projectId, record.path, allowSensitive ? {
         allowSensitive: true,
-        actor: 'human',
+        actor: ARTIFACT_ACTOR,
+        role: ARTIFACT_ROLE,
         reason: 'ArtifactView敏感下载授权',
       } : undefined)
       const url = window.URL.createObjectURL(blob)
@@ -193,7 +197,8 @@ const ArtifactView: React.FC = () => {
       const blob = await artifactApi.bulkDownload(projectId, {
         paths: selectedItems.map((item) => item.path),
         allowSensitive,
-        actor: 'human',
+        actor: ARTIFACT_ACTOR,
+        role: ARTIFACT_ROLE,
         reason: allowSensitive ? 'ArtifactView批量导出含敏感样本授权' : 'ArtifactView批量导出',
       })
       const url = window.URL.createObjectURL(blob)
@@ -239,7 +244,8 @@ const ArtifactView: React.FC = () => {
           setActionLoading(true)
           await artifactApi.archive(projectId, {
             path: record.path,
-            actor: 'human',
+            actor: ARTIFACT_ACTOR,
+            role: ARTIFACT_ROLE,
             reason: 'ArtifactView归档',
           })
           message.success('产物已归档')
@@ -265,7 +271,8 @@ const ArtifactView: React.FC = () => {
           setActionLoading(true)
           await artifactApi.restore(projectId, {
             path: record.path,
-            actor: 'human',
+            actor: ARTIFACT_ACTOR,
+            role: ARTIFACT_ROLE,
             reason: 'ArtifactView归档恢复',
           })
           message.success('归档产物已恢复')
@@ -292,7 +299,8 @@ const ArtifactView: React.FC = () => {
           setActionLoading(true)
           await artifactApi.deleteArchived(projectId, {
             path: record.path,
-            actor: 'human',
+            actor: ARTIFACT_ACTOR,
+            role: ARTIFACT_ROLE,
             reason: 'ArtifactView archived artifact permanent delete',
           })
           message.success('归档产物已永久删除')
@@ -317,7 +325,8 @@ const ArtifactView: React.FC = () => {
         leftPath: selectedItems[0].path,
         rightPath: selectedItems[1].path,
         allowSensitive,
-        actor: 'human',
+        actor: ARTIFACT_ACTOR,
+        role: ARTIFACT_ROLE,
         reason: allowSensitive ? 'ArtifactView敏感差异对比授权' : 'ArtifactView差异对比',
       })
       setDiffDrawer(result)
@@ -351,7 +360,7 @@ const ArtifactView: React.FC = () => {
     if (!projectId) return
     try {
       setActionLoading(true)
-      const result = await artifactApi.audit(projectId, { limit: 100 })
+      const result = await artifactApi.audit(projectId, { limit: 100, actor: ARTIFACT_ACTOR, role: ARTIFACT_ROLE })
       setAuditDrawer((result?.items || []).map((item: any) => ({
         ...item,
         sourcePath: auditPathText(item),
@@ -360,6 +369,37 @@ const ArtifactView: React.FC = () => {
       setAuditOpen(true)
     } catch (error) {
       message.error('加载审计日志失败')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const applyRetention = async (dryRun = true) => {
+    if (!projectId) return
+    try {
+      setActionLoading(true)
+      const result = await artifactApi.applyRetention(projectId, {
+        retentionDays: 30,
+        dryRun,
+        actor: ARTIFACT_ACTOR,
+        role: ARTIFACT_ROLE,
+        reason: dryRun ? 'ArtifactView保留策略预览' : 'ArtifactView保留策略执行',
+      })
+      if (dryRun) {
+        Modal.confirm({
+          title: '执行归档保留策略',
+          content: `当前策略会清理 ${result?.expiredCount || 0} 个超过 30 天的归档产物。`,
+          okText: '执行清理',
+          cancelText: '仅预览',
+          okButtonProps: { danger: true },
+          onOk: () => applyRetention(false),
+        })
+      } else {
+        message.success(`保留策略已执行，清理 ${result?.deletedCount || 0} 个归档产物`)
+        await loadData()
+      }
+    } catch (error) {
+      message.error('执行保留策略失败')
     } finally {
       setActionLoading(false)
     }
@@ -490,6 +530,9 @@ const ArtifactView: React.FC = () => {
           </Button>
           <Button icon={<HistoryOutlined />} onClick={openAudit} loading={actionLoading}>
             审计
+          </Button>
+          <Button danger icon={<DeleteOutlined />} onClick={() => applyRetention(true)} loading={actionLoading}>
+            保留策略
           </Button>
         </Space>
         {items.length ? (

@@ -420,6 +420,8 @@ export const artifactApi = {
     request(api.post(`/projects/${projectId}/artifacts/delete`, data || {})),
   diff: (projectId: string, data: any) =>
     request(api.post(`/projects/${projectId}/artifacts/diff`, data || {})),
+  applyRetention: (projectId: string, data: any) =>
+    request(api.post(`/projects/${projectId}/artifacts/retention/apply`, data || {})),
   audit: (projectId: string, params?: any) =>
     request(api.get(`/projects/${projectId}/artifacts/audit`, { params })),
 }

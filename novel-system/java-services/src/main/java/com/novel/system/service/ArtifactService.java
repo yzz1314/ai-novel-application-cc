@@ -20,6 +20,7 @@ import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -43,6 +44,11 @@ public class ArtifactService {
     private static final int DIFF_LINE_LIMIT = 1_200;
     private static final int MAX_BULK_EXPORT_FILES = 200;
     private static final long MAX_BULK_EXPORT_BYTES = 200L * 1024L * 1024L;
+    private static final int DEFAULT_ARCHIVE_RETENTION_DAYS = 30;
+    private static final int MAX_ARCHIVE_RETENTION_DAYS = 3650;
+    private static final Set<String> ARTIFACT_MANAGER_ROLES = Set.of("owner", "admin", "artifact_manager");
+    private static final Set<String> ARTIFACT_AUDITOR_ROLES = Set.of("owner", "admin", "artifact_manager", "auditor");
+    private static final Set<String> ARTIFACT_SENSITIVE_ROLES = Set.of("owner", "admin", "artifact_manager", "auditor");
     private static final Set<String> TEXT_EXTENSIONS = Set.of(
         "txt", "md", "json", "yaml", "yml", "csv", "log", "html", "xml"
     );
@@ -117,7 +123,18 @@ public class ArtifactService {
             boolean allowSensitive,
             String actor,
             String reason) {
+        return getArtifact(projectId, pathValue, allowSensitive, actor, reason, null);
+    }
+
+    public Map<String, Object> getArtifact(
+            String projectId,
+            String pathValue,
+            boolean allowSensitive,
+            String actor,
+            String reason,
+            String role) {
         projectService.getProject(projectId);
+        String normalizedRole = normalizeRole(role);
         Path file = resolveProjectPath(projectId, pathValue);
         if (!Files.isRegularFile(file)) {
             throw new ResourceNotFoundException("Artifact does not exist: " + pathValue);
@@ -128,6 +145,9 @@ public class ArtifactService {
         response.put("sensitive", sensitive);
         response.put("sensitivePolicy", sensitive ? "sample_source_protected" : "none");
         if (sensitive && allowSensitive) {
+            requireRole(projectId, "sensitive_preview", actor, normalizedRole, ARTIFACT_SENSITIVE_ROLES, Map.of(
+                "path", relative(projectId, file)
+            ));
             appendSensitiveAccessAudit(projectId, "sensitive_preview", actor, reason, Map.of(
                 "path", relative(projectId, file)
             ));
@@ -170,7 +190,18 @@ public class ArtifactService {
             boolean allowSensitive,
             String actor,
             String reason) {
+        return downloadArtifact(projectId, pathValue, allowSensitive, actor, reason, null);
+    }
+
+    public DownloadedArtifact downloadArtifact(
+            String projectId,
+            String pathValue,
+            boolean allowSensitive,
+            String actor,
+            String reason,
+            String role) {
         projectService.getProject(projectId);
+        String normalizedRole = normalizeRole(role);
         Path file = resolveProjectPath(projectId, pathValue);
         if (!Files.isRegularFile(file)) {
             throw new ResourceNotFoundException("Artifact does not exist: " + pathValue);
@@ -183,6 +214,9 @@ public class ArtifactService {
             throw new IllegalArgumentException("敏感样本原文默认禁止直接下载，请显式授权后重试: " + pathValue);
         }
         if (sensitive && allowSensitive) {
+            requireRole(projectId, "sensitive_download", actor, normalizedRole, ARTIFACT_SENSITIVE_ROLES, Map.of(
+                "path", relative(projectId, file)
+            ));
             appendSensitiveAccessAudit(projectId, "sensitive_download", actor, reason, Map.of(
                 "path", relative(projectId, file)
             ));
@@ -206,6 +240,7 @@ public class ArtifactService {
         List<String> paths = stringList(request == null ? null : request.get("paths"));
         boolean allowSensitive = booleanValue(request == null ? null : request.get("allowSensitive"), false);
         String actor = stringValue(request == null ? null : request.get("actor"), "human");
+        String role = roleFromRequest(request);
         if (paths.isEmpty()) {
             throw new IllegalArgumentException("paths 不能为空");
         }
@@ -216,6 +251,11 @@ public class ArtifactService {
         List<Map<String, Object>> included = new ArrayList<>();
         List<Map<String, Object>> skipped = new ArrayList<>();
         long totalBytes = 0L;
+        if (allowSensitive) {
+            requireRole(projectId, "sensitive_bulk_export", actor, role, ARTIFACT_SENSITIVE_ROLES, Map.of(
+                "requestedCount", paths.size()
+            ));
+        }
         try {
             ByteArrayOutputStream buffer = new ByteArrayOutputStream();
             try (ZipOutputStream zip = new ZipOutputStream(buffer, StandardCharsets.UTF_8)) {
@@ -269,6 +309,10 @@ public class ArtifactService {
         String pathValue = stringValue(request == null ? null : request.get("path"), null);
         String actor = stringValue(request == null ? null : request.get("actor"), "human");
         String reason = stringValue(request == null ? null : request.get("reason"), "");
+        String role = roleFromRequest(request);
+        requireRole(projectId, "archive", actor, role, ARTIFACT_MANAGER_ROLES, Map.of(
+            "path", pathValue == null ? "" : pathValue
+        ));
         if (pathValue == null || pathValue.isBlank()) {
             throw new IllegalArgumentException("path 不能为空");
         }
@@ -318,6 +362,10 @@ public class ArtifactService {
         String pathValue = stringValue(request == null ? null : request.get("path"), null);
         String actor = stringValue(request == null ? null : request.get("actor"), "human");
         String reason = stringValue(request == null ? null : request.get("reason"), "");
+        String role = roleFromRequest(request);
+        requireRole(projectId, "restore", actor, role, ARTIFACT_MANAGER_ROLES, Map.of(
+            "path", pathValue == null ? "" : pathValue
+        ));
         if (pathValue == null || pathValue.isBlank()) {
             throw new IllegalArgumentException("path cannot be empty");
         }
@@ -368,6 +416,10 @@ public class ArtifactService {
         String pathValue = stringValue(request == null ? null : request.get("path"), null);
         String actor = stringValue(request == null ? null : request.get("actor"), "human");
         String reason = stringValue(request == null ? null : request.get("reason"), "");
+        String role = roleFromRequest(request);
+        requireRole(projectId, "delete_archived", actor, role, ARTIFACT_MANAGER_ROLES, Map.of(
+            "path", pathValue == null ? "" : pathValue
+        ));
         if (pathValue == null || pathValue.isBlank()) {
             throw new IllegalArgumentException("path cannot be empty");
         }
@@ -414,6 +466,8 @@ public class ArtifactService {
         String leftPath = stringValue(request == null ? null : request.get("leftPath"), stringValue(request == null ? null : request.get("left"), null));
         String rightPath = stringValue(request == null ? null : request.get("rightPath"), stringValue(request == null ? null : request.get("right"), null));
         boolean allowSensitive = booleanValue(request == null ? null : request.get("allowSensitive"), false);
+        String actor = stringValue(request == null ? null : request.get("actor"), "human");
+        String role = roleFromRequest(request);
         if (leftPath == null || rightPath == null) {
             throw new IllegalArgumentException("leftPath 和 rightPath 不能为空");
         }
@@ -432,10 +486,14 @@ public class ArtifactService {
             throw new IllegalArgumentException("敏感样本原文默认禁止差异对比，请显式授权后重试");
         }
         if ((leftSensitive || rightSensitive) && allowSensitive) {
+            requireRole(projectId, "sensitive_diff", actor, role, ARTIFACT_SENSITIVE_ROLES, Map.of(
+                "leftPath", relative(projectId, left),
+                "rightPath", relative(projectId, right)
+            ));
             appendSensitiveAccessAudit(
                 projectId,
                 "sensitive_diff",
-                stringValue(request == null ? null : request.get("actor"), "human"),
+                actor,
                 stringValue(request == null ? null : request.get("reason"), ""),
                 Map.of(
                     "leftPath", relative(projectId, left),
@@ -467,7 +525,14 @@ public class ArtifactService {
     }
 
     public Map<String, Object> listAuditEvents(String projectId, int limit) {
+        return listAuditEvents(projectId, limit, "human", null);
+    }
+
+    public Map<String, Object> listAuditEvents(String projectId, int limit, String actor, String role) {
         projectService.getProject(projectId);
+        requireRole(projectId, "audit_read", actor, normalizeRole(role), ARTIFACT_AUDITOR_ROLES, Map.of(
+            "limit", limit
+        ));
         int safeLimit = Math.max(1, Math.min(limit <= 0 ? 100 : limit, 500));
         Path auditFile = auditFile(projectId);
         List<Map<String, Object>> items = new ArrayList<>();
@@ -489,6 +554,73 @@ public class ArtifactService {
         response.put("limit", safeLimit);
         response.put("count", items.size());
         response.put("items", items);
+        return response;
+    }
+
+    public Map<String, Object> applyRetentionPolicy(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String actor = stringValue(request == null ? null : request.get("actor"), "human");
+        String role = roleFromRequest(request);
+        int retentionDays = intValue(request == null ? null : request.get("retentionDays"), DEFAULT_ARCHIVE_RETENTION_DAYS);
+        retentionDays = Math.max(0, Math.min(retentionDays, MAX_ARCHIVE_RETENTION_DAYS));
+        boolean dryRun = booleanValue(request == null ? null : request.get("dryRun"), true);
+        requireRole(projectId, "retention_apply", actor, role, ARTIFACT_MANAGER_ROLES, Map.of(
+            "retentionDays", retentionDays,
+            "dryRun", dryRun
+        ));
+
+        Path archiveRoot = projectRoot(projectId).resolve("artifacts").resolve("archive");
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(retentionDays);
+        List<Map<String, Object>> expired = new ArrayList<>();
+        long deletedBytes = 0L;
+        if (Files.exists(archiveRoot)) {
+            try (Stream<Path> stream = Files.walk(archiveRoot)) {
+                List<Path> files = stream.filter(Files::isRegularFile).toList();
+                for (Path file : files) {
+                    String archivedRelative = relative(projectId, file);
+                    LocalDateTime archivedAt = archivedAtFromArchivePath(archivedRelative);
+                    if (archivedAt == null || archivedAt.isAfter(cutoff)) {
+                        continue;
+                    }
+                    String originalPath = restorePathFromArchive(archivedRelative);
+                    long size = Files.size(file);
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("archivedPath", archivedRelative);
+                    item.put("originalPath", originalPath);
+                    item.put("archivedAt", archivedAt.toString());
+                    item.put("size", size);
+                    item.put("sensitive", isSensitivePath(originalPath));
+                    expired.add(item);
+                    if (!dryRun) {
+                        Files.delete(file);
+                        deletedBytes += size;
+                        cleanupEmptyParents(file.getParent(), archiveRoot);
+                    }
+                }
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to apply artifact retention policy", e);
+            }
+        }
+
+        Map<String, Object> audit = auditBase(projectId, dryRun ? "retention_preview" : "retention_delete", actor, stringValue(request == null ? null : request.get("reason"), ""));
+        audit.put("role", role);
+        audit.put("retentionDays", retentionDays);
+        audit.put("dryRun", dryRun);
+        audit.put("expiredCount", expired.size());
+        audit.put("deletedBytes", deletedBytes);
+        audit.put("expired", expired);
+        appendAudit(projectId, audit);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("retentionDays", retentionDays);
+        response.put("dryRun", dryRun);
+        response.put("cutoff", cutoff.toString());
+        response.put("expiredCount", expired.size());
+        response.put("deletedCount", dryRun ? 0 : expired.size());
+        response.put("deletedBytes", deletedBytes);
+        response.put("expired", expired);
+        response.put("audit", audit);
         return response;
     }
 
@@ -828,6 +960,73 @@ public class ArtifactService {
             return fallback;
         }
         return Boolean.parseBoolean(String.valueOf(value));
+    }
+
+    private int intValue(Object value, int fallback) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value == null || String.valueOf(value).isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private String roleFromRequest(Map<String, Object> request) {
+        return normalizeRole(request == null ? null : request.get("role"));
+    }
+
+    private String normalizeRole(Object value) {
+        String role = value == null || String.valueOf(value).isBlank()
+            ? "owner"
+            : String.valueOf(value).trim().toLowerCase(Locale.ROOT);
+        return switch (role) {
+            case "manager" -> "artifact_manager";
+            case "viewer", "reader" -> "viewer";
+            default -> role;
+        };
+    }
+
+    private void requireRole(
+            String projectId,
+            String action,
+            String actor,
+            String role,
+            Set<String> allowedRoles,
+            Map<String, Object> details) {
+        String normalizedRole = normalizeRole(role);
+        if (allowedRoles.contains(normalizedRole)) {
+            return;
+        }
+        Map<String, Object> audit = auditBase(projectId, action + "_denied", actor, "role_not_allowed");
+        audit.put("role", normalizedRole);
+        audit.put("allowedRoles", allowedRoles);
+        audit.put("details", details == null ? Map.of() : details);
+        appendAudit(projectId, audit);
+        throw new IllegalArgumentException("Role " + normalizedRole + " cannot perform artifact action " + action);
+    }
+
+    private LocalDateTime archivedAtFromArchivePath(String archivedRelative) {
+        String prefix = "artifacts/archive/";
+        if (!archivedRelative.startsWith(prefix)) {
+            return null;
+        }
+        String remainder = archivedRelative.substring(prefix.length());
+        int separator = remainder.indexOf('/');
+        if (separator <= 0) {
+            return null;
+        }
+        String archiveId = remainder.substring(0, separator);
+        String timestamp = archiveId.length() >= 17 ? archiveId.substring(0, 17) : archiveId;
+        try {
+            return LocalDateTime.parse(timestamp, DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"));
+        } catch (DateTimeParseException e) {
+            return null;
+        }
     }
 
     private List<String> limitedLines(String text) {

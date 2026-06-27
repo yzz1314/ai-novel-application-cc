@@ -141,6 +141,69 @@ class ArtifactServiceTest {
     }
 
     @Test
+    void viewerCannotArchiveArtifactAndDenialIsAudited() throws Exception {
+        writeProjectFile("analysis/protected.md", "protected report");
+
+        assertThatThrownBy(() -> artifactService.archiveArtifact(PROJECT_ID, Map.of(
+            "path", "analysis/protected.md",
+            "actor", "reader",
+            "role", "viewer"
+        )))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("cannot perform artifact action archive");
+
+        assertThat(Files.readString(projectRoot().resolve("analysis/protected.md"))).isEqualTo("protected report");
+        assertThat(auditLog())
+            .contains("\"action\":\"archive_denied\"")
+            .contains("\"actor\":\"reader\"")
+            .contains("\"role\":\"viewer\"");
+    }
+
+    @Test
+    void retentionPolicyDryRunAndDeleteExpiredArchiveArtifacts() throws Exception {
+        Path oldArchived = projectRoot().resolve("artifacts/archive/20200101000000000_deadbeef/analysis/old.md");
+        Path futureArchived = projectRoot().resolve("artifacts/archive/29990101000000000_deadbeef/analysis/future.md");
+        Files.createDirectories(oldArchived.getParent());
+        Files.writeString(oldArchived, "old archive", StandardCharsets.UTF_8);
+        Files.createDirectories(futureArchived.getParent());
+        Files.writeString(futureArchived, "future archive", StandardCharsets.UTF_8);
+
+        Map<String, Object> preview = artifactService.applyRetentionPolicy(PROJECT_ID, Map.of(
+            "retentionDays", 30,
+            "dryRun", true,
+            "actor", "manager",
+            "role", "artifact_manager",
+            "reason", "preview retention"
+        ));
+
+        assertThat(preview)
+            .containsEntry("dryRun", true)
+            .containsEntry("expiredCount", 1)
+            .containsEntry("deletedCount", 0);
+        assertThat(Files.exists(oldArchived)).isTrue();
+
+        Map<String, Object> applied = artifactService.applyRetentionPolicy(PROJECT_ID, Map.of(
+            "retentionDays", 30,
+            "dryRun", false,
+            "actor", "manager",
+            "role", "artifact_manager",
+            "reason", "apply retention"
+        ));
+
+        assertThat(applied)
+            .containsEntry("dryRun", false)
+            .containsEntry("expiredCount", 1)
+            .containsEntry("deletedCount", 1);
+        assertThat(Files.exists(oldArchived)).isFalse();
+        assertThat(Files.exists(futureArchived)).isTrue();
+        assertThat(auditLog())
+            .contains("\"action\":\"retention_preview\"")
+            .contains("\"action\":\"retention_delete\"")
+            .contains("\"retentionDays\":30")
+            .contains("\"expiredCount\":1");
+    }
+
+    @Test
     void previewDownloadAndDiffWriteAuditEvents() throws Exception {
         writeProjectFile("analysis/left.md", "one\ntwo\n");
         writeProjectFile("analysis/right.md", "one\nthree\n");

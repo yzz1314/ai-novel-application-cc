@@ -12,7 +12,9 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import java.util.zip.ZipInputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -183,6 +185,55 @@ class ArtifactServiceTest {
             .contains("\"sensitive\":true");
     }
 
+    @Test
+    void bulkDownloadSkipsSensitiveArtifactsByDefaultAndWritesManifestAudit() throws Exception {
+        writeProjectFile("analysis/report.md", "safe report");
+        writeProjectFile("samples/raw/sample.txt", "sensitive source");
+
+        ArtifactService.DownloadedArtifact downloaded = artifactService.bulkDownloadArtifacts(PROJECT_ID, Map.of(
+            "paths", List.of("analysis/report.md", "samples/raw/sample.txt"),
+            "actor", "tester",
+            "reason", "bulk export"
+        ));
+
+        assertThat(downloaded.filename()).startsWith("artifacts_").endsWith(".zip");
+        String zipText = zipEntriesAsText(downloaded.resource().getByteArray());
+        assertThat(zipText)
+            .contains("ENTRY:analysis/report.md")
+            .doesNotContain("ENTRY:samples/raw/sample.txt")
+            .contains("ENTRY:artifact_export_manifest.json")
+            .contains("\"path\":\"samples/raw/sample.txt\"")
+            .contains("\"reason\":\"sensitive_sample_protected\"");
+        assertThat(auditLog())
+            .contains("\"action\":\"bulk_export\"")
+            .contains("\"includedCount\":1")
+            .contains("\"skippedCount\":1")
+            .contains("\"reason\":\"bulk export\"");
+    }
+
+    @Test
+    void listAuditEventsReturnsRecentEventsFirstAndHonorsLimit() throws Exception {
+        writeProjectFile("analysis/one.md", "one");
+        writeProjectFile("analysis/two.md", "two");
+        writeProjectFile("analysis/three.md", "three");
+
+        artifactService.getArtifact(PROJECT_ID, "analysis/one.md", false, "tester", "first");
+        artifactService.getArtifact(PROJECT_ID, "analysis/two.md", false, "tester", "second");
+        artifactService.getArtifact(PROJECT_ID, "analysis/three.md", false, "tester", "third");
+
+        Map<String, Object> response = artifactService.listAuditEvents(PROJECT_ID, 2);
+
+        assertThat(response)
+            .containsEntry("projectId", PROJECT_ID)
+            .containsEntry("limit", 2)
+            .containsEntry("count", 2);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> items = (List<Map<String, Object>>) response.get("items");
+        assertThat(items).hasSize(2);
+        assertThat(items.get(0)).containsEntry("reason", "third");
+        assertThat(items.get(1)).containsEntry("reason", "second");
+    }
+
     private Path projectRoot() {
         return tempDir.resolve("projects").resolve(PROJECT_ID);
     }
@@ -195,5 +246,17 @@ class ArtifactServiceTest {
 
     private String auditLog() throws Exception {
         return Files.readString(projectRoot().resolve("artifacts/audit/artifact_events.jsonl"));
+    }
+
+    private String zipEntriesAsText(byte[] bytes) throws Exception {
+        StringBuilder builder = new StringBuilder();
+        try (ZipInputStream zip = new ZipInputStream(new java.io.ByteArrayInputStream(bytes), StandardCharsets.UTF_8)) {
+            java.util.zip.ZipEntry entry;
+            while ((entry = zip.getNextEntry()) != null) {
+                builder.append("ENTRY:").append(entry.getName()).append('\n');
+                builder.append(new String(zip.readAllBytes(), StandardCharsets.UTF_8)).append('\n');
+            }
+        }
+        return builder.toString();
     }
 }

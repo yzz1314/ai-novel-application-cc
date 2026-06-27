@@ -73,7 +73,22 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
         ], ensure_ascii=False),
         encoding="utf-8",
     )
-    (memory_dir / "suspenses.json").write_text("[]", encoding="utf-8")
+    (memory_dir / "suspenses.json").write_text(
+        json.dumps([
+            {
+                "suspense_id": "suspense_fire_secret",
+                "title": "天火旧谜",
+                "suspense_type": "mystery",
+                "question": "天火城异变源头是谁",
+                "involved_characters": ["林墨"],
+                "involved_settings": ["天火城"],
+                "resolved_by_plot": "玄门试炼",
+                "set_chapter": 2,
+                "resolved_chapter": 5,
+            }
+        ], ensure_ascii=False),
+        encoding="utf-8",
+    )
     (memory_dir / "timeline.json").write_text(
         json.dumps([
             {
@@ -120,6 +135,20 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
     assert graph["analysis"]["relationship_analysis"]
     assert graph["analysis"]["key_paths"]
     assert "warnings" in graph["analysis"]
+    edge_types = {edge["edge_type"] for edge in graph["edges"]}
+    assert "resolved_by" in edge_types
+    assert any(
+        edge["source_id"] == "suspense_fire_secret"
+        and edge["target_id"] == "plot_trial"
+        and edge["edge_type"] == "resolved_by"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["source_id"] == "suspense_fire_secret"
+        and edge["target_id"] == "char_linmo"
+        and edge["edge_type"] == "involves_character"
+        for edge in graph["edges"]
+    )
 
 
 @pytest.mark.asyncio

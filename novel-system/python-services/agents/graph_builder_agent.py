@@ -284,6 +284,26 @@ class GraphBuilderAgent(BaseAgent):
             if source_id:
                 self._append_involvement_edges(graph, source_id, plot, node_by_name, plot.get("start_chapter", 1))
 
+        for suspense in memories.get("suspenses", []):
+            source_id = node_by_name.get(suspense.get("title", ""))
+            if source_id:
+                chapter = suspense.get("set_chapter", 1)
+                self._append_involvement_edges(graph, source_id, suspense, node_by_name, chapter)
+                for resolved_by in self._as_list(
+                    suspense.get("resolved_by_plot")
+                    or suspense.get("resolved_by")
+                    or suspense.get("resolution_plot")
+                ):
+                    target_id = node_by_name.get(str(resolved_by))
+                    if target_id:
+                        graph.edges.append(self._edge(
+                            source_id,
+                            target_id,
+                            "resolved_by",
+                            chapter,
+                            suspense.get("resolved_chapter") or chapter
+                        ))
+
         for event in memories.get("timeline", []):
             source_id = node_by_name.get(event.get("title", ""))
             if source_id:
@@ -855,3 +875,10 @@ class GraphBuilderAgent(BaseAgent):
             target_id = node_by_name.get(setting_name)
             if target_id:
                 graph.edges.append(self._edge(source_id, target_id, "involves_setting", chapter, chapter))
+
+    def _as_list(self, value: Any) -> List[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]

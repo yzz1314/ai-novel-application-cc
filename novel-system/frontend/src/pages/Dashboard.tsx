@@ -71,6 +71,21 @@ const taskPercent = (task: any) => {
 
 const taskProgressLabel = (task: any) => task.progress?.label || `${taskPercent(task)}%`
 
+const formatDuration = (value?: number) => {
+  const ms = Number(value || 0)
+  if (!Number.isFinite(ms) || ms <= 0) return '0s'
+  const seconds = Math.round(ms / 1000)
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const restSeconds = seconds % 60
+  if (minutes < 60) return restSeconds ? `${minutes}m ${restSeconds}s` : `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  const restMinutes = minutes % 60
+  return restMinutes ? `${hours}h ${restMinutes}m` : `${hours}h`
+}
+
+const formatNumber = (value?: number) => Number(value || 0).toLocaleString()
+
 const actionPath = (target?: string) => {
   if (target === 'tasks') return '/tasks'
   if (target === 'projects') return '/projects'
@@ -94,6 +109,7 @@ const Dashboard: React.FC = () => {
   const workflowSummary = dashboard?.workflowSummary || []
   const serviceStatus = dashboard?.serviceStatus || {}
   const healthSummary = dashboard?.healthSummary || {}
+  const performanceSummary = dashboard?.performanceSummary || {}
   const blockedProjects = dashboard?.blockedProjects || []
   const nextActions = dashboard?.nextActions || []
 
@@ -322,6 +338,16 @@ const Dashboard: React.FC = () => {
         />
       ) : null}
 
+      {(performanceSummary.slowTaskCount || performanceSummary.highRetryTaskCount) ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="性能监控提示"
+          description={`最近 ${performanceSummary.windowTaskCount || 0} 个任务中有 ${performanceSummary.slowTaskCount || 0} 个慢任务、${performanceSummary.highRetryTaskCount || 0} 个高重试任务。`}
+          action={<Button size="small" onClick={() => navigate('/tasks')}>任务中心</Button>}
+        />
+      ) : null}
+
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} lg={6}>
           <Card loading={loading}>
@@ -374,6 +400,33 @@ const Dashboard: React.FC = () => {
               prefix={<WarningOutlined />}
               valueStyle={{ color: failedTasks ? '#cf1322' : undefined }}
             />
+          </Card>
+        </Col>
+      </Row>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} md={6}>
+          <Card loading={loading}>
+            <Statistic title="平均任务耗时" value={formatDuration(performanceSummary.avgDurationMs)} />
+          </Card>
+        </Col>
+        <Col xs={24} md={6}>
+          <Card loading={loading}>
+            <Statistic
+              title="最长任务耗时"
+              value={formatDuration(performanceSummary.maxDurationMs)}
+              valueStyle={{ color: performanceSummary.slowTaskCount ? '#faad14' : undefined }}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} md={6}>
+          <Card loading={loading}>
+            <Statistic title="LLM 调用" value={performanceSummary.totalLlmCalls || 0} />
+          </Card>
+        </Col>
+        <Col xs={24} md={6}>
+          <Card loading={loading}>
+            <Statistic title="Token 消耗" value={formatNumber(performanceSummary.totalTokens)} />
           </Card>
         </Col>
       </Row>
@@ -485,6 +538,31 @@ const Dashboard: React.FC = () => {
                 <Tag key={status} color={statusColor(status)}>
                   {status} {taskSummary[status] || 0}
                 </Tag>
+              ))}
+            </Space>
+          </Card>
+
+          <Card title="性能监控" loading={loading} style={{ marginTop: 16 }}>
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <Text type="secondary">
+                最近 {performanceSummary.windowTaskCount || 0} 个任务，已完成 {performanceSummary.completedTaskCount || 0} 个
+              </Text>
+              <Space wrap>
+                <Tag color={performanceSummary.slowTaskCount ? 'warning' : 'success'}>
+                  慢任务 {performanceSummary.slowTaskCount || 0}
+                </Tag>
+                <Tag color={performanceSummary.highRetryTaskCount ? 'warning' : 'success'}>
+                  高重试 {performanceSummary.highRetryTaskCount || 0}
+                </Tag>
+                <Tag>最慢 {performanceSummary.slowestTaskId || '-'}</Tag>
+              </Space>
+              {(performanceSummary.byTaskType || []).slice(0, 4).map((item: any) => (
+                <Space key={item.taskType} style={{ width: '100%', justifyContent: 'space-between' }}>
+                  <Text>{item.taskType}</Text>
+                  <Text type="secondary">
+                    {item.taskCount || 0} 次 / 平均 {formatDuration(item.avgDurationMs)} / LLM {item.totalLlmCalls || 0}
+                  </Text>
+                </Space>
               ))}
             </Space>
           </Card>

@@ -78,9 +78,19 @@ class DashboardServiceTest {
     void dashboardHighlightsFailuresApprovalsAndBlockedProjects() {
         Project project = project("project_dashboard");
         Task failedTask = task("task_failed", TaskStatus.FAILED, null);
+        failedTask.setMetrics(Map.of(
+            "duration_ms", 700_000,
+            "llm_calls", 2,
+            "input_tokens", 100,
+            "output_tokens", 50
+        ));
         Task approvalTask = task("task_partial", TaskStatus.PARTIAL, Map.of(
             "waiting_for_human", Map.of("node_id", "approve_outline")
         ));
+        approvalTask.setRetryCount(2);
+        LocalDateTime finishedAt = LocalDateTime.now();
+        approvalTask.setStartedAt(finishedAt.minusMinutes(2));
+        approvalTask.setFinishedAt(finishedAt);
 
         when(projectRepository.findAll()).thenReturn(List.of(project));
         when(projectRepository.count()).thenReturn(1L);
@@ -131,6 +141,24 @@ class DashboardServiceTest {
         assertThat(health.get("failedTasks")).isEqualTo(1L);
         assertThat(health.get("waitingApprovals")).isEqualTo(1L);
         assertThat(health.get("successRate")).isEqualTo(33);
+
+        Map<String, Object> performance = (Map<String, Object>) dashboard.get("performanceSummary");
+        assertThat(performance.get("windowTaskCount")).isEqualTo(2);
+        assertThat(performance.get("completedTaskCount")).isEqualTo(2L);
+        assertThat(performance.get("avgDurationMs")).isEqualTo(410_000L);
+        assertThat(performance.get("maxDurationMs")).isEqualTo(700_000L);
+        assertThat(performance.get("slowestTaskId")).isEqualTo("task_failed");
+        assertThat(performance.get("slowTaskCount")).isEqualTo(1L);
+        assertThat(performance.get("highRetryTaskCount")).isEqualTo(1L);
+        assertThat(performance.get("totalLlmCalls")).isEqualTo(2L);
+        assertThat(performance.get("totalTokens")).isEqualTo(150L);
+        assertThat((List<Map<String, Object>>) performance.get("byTaskType"))
+            .singleElement()
+            .satisfies(item -> {
+                assertThat(item.get("taskType")).isEqualTo("workflow");
+                assertThat(item.get("taskCount")).isEqualTo(2L);
+                assertThat(item.get("avgDurationMs")).isEqualTo(410_000L);
+            });
 
         List<Map<String, Object>> blockedProjects = (List<Map<String, Object>>) dashboard.get("blockedProjects");
         assertThat(blockedProjects).hasSize(1);

@@ -20,6 +20,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -29,6 +30,11 @@ import java.util.Map;
 @Service
 @RequiredArgsConstructor
 public class DashboardService {
+
+    private static final long SLOW_TASK_THRESHOLD_MS = 10 * 60 * 1000L;
+    private static final int HIGH_RETRY_THRESHOLD = 2;
+    private static final int MONITORED_TASK_LIMIT = 50;
+    private static final int RECENT_TASK_LIMIT = 8;
 
     private final ProjectRepository projectRepository;
     private final SampleRepository sampleRepository;
@@ -48,7 +54,8 @@ public class DashboardService {
             .sorted((left, right) -> nullSafeTime(right.getUpdatedAt()).compareTo(nullSafeTime(left.getUpdatedAt())))
             .limit(6)
             .toList();
-        List<Task> recentTasks = taskRepository.findAllByOrderByCreatedAtDesc(PageRequest.of(0, 8));
+        List<Task> monitoredTasks = taskRepository.findAllByOrderByCreatedAtDesc(PageRequest.of(0, MONITORED_TASK_LIMIT));
+        List<Task> recentTasks = monitoredTasks.stream().limit(RECENT_TASK_LIMIT).toList();
         Map<String, Object> stats = stats();
         Map<String, Object> taskSummary = taskSummary();
         List<Task> partialTasks = taskRepository.findByStatus(TaskStatus.PARTIAL);
@@ -59,6 +66,7 @@ public class DashboardService {
         response.put("stats", stats);
         response.put("taskSummary", taskSummary);
         response.put("healthSummary", healthSummary(stats, taskSummary, partialTasks, serviceStatus));
+        response.put("performanceSummary", performanceSummary(monitoredTasks));
         response.put("workflowSummary", workflowSummary(recentProjects));
         response.put("blockedProjects", blockedProjects(projects));
         response.put("nextActions", nextActions(stats, taskSummary, partialTasks, serviceStatus));
@@ -96,6 +104,102 @@ public class DashboardService {
             summary.put(status.name(), taskRepository.countByStatus(status));
         }
         return summary;
+    }
+
+    private Map<String, Object> performanceSummary(List<Task> tasks) {
+        long completedTaskCount = 0;
+        long totalDurationMs = 0;
+        long maxDurationMs = 0;
+        String slowestTaskId = null;
+        long slowTaskCount = 0;
+        long highRetryTaskCount = 0;
+        long totalLlmCalls = 0;
+        long totalInputTokens = 0;
+        long totalOutputTokens = 0;
+        long totalTokens = 0;
+        Map<String, Object> byTaskType = new LinkedHashMap<>();
+
+        for (Task task : tasks) {
+            long durationMs = taskDurationMs(task);
+            if (durationMs > 0) {
+                completedTaskCount += 1;
+                totalDurationMs += durationMs;
+                if (durationMs > maxDurationMs) {
+                    maxDurationMs = durationMs;
+                    slowestTaskId = task.getId();
+                }
+                if (durationMs >= SLOW_TASK_THRESHOLD_MS) {
+                    slowTaskCount += 1;
+                }
+            }
+
+            if (task.getRetryCount() != null && task.getRetryCount() >= HIGH_RETRY_THRESHOLD) {
+                highRetryTaskCount += 1;
+            }
+
+            long llmCalls = metricLong(task.getMetrics(), "llm_calls", "llmCalls");
+            long inputTokens = metricLong(task.getMetrics(), "input_tokens", "inputTokens", "prompt_tokens", "promptTokens");
+            long outputTokens = metricLong(task.getMetrics(), "output_tokens", "outputTokens", "completion_tokens", "completionTokens");
+            long taskTokens = metricLong(task.getMetrics(), "total_tokens", "totalTokens");
+            if (taskTokens == 0) {
+                taskTokens = inputTokens + outputTokens;
+            }
+            totalLlmCalls += llmCalls;
+            totalInputTokens += inputTokens;
+            totalOutputTokens += outputTokens;
+            totalTokens += taskTokens;
+
+            mergeTaskTypeMetrics(byTaskType, task, durationMs, llmCalls, taskTokens);
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("windowTaskCount", tasks.size());
+        summary.put("completedTaskCount", completedTaskCount);
+        summary.put("avgDurationMs", completedTaskCount > 0 ? Math.round((double) totalDurationMs / completedTaskCount) : 0L);
+        summary.put("maxDurationMs", maxDurationMs);
+        summary.put("slowestTaskId", slowestTaskId);
+        summary.put("slowTaskThresholdMs", SLOW_TASK_THRESHOLD_MS);
+        summary.put("slowTaskCount", slowTaskCount);
+        summary.put("highRetryThreshold", HIGH_RETRY_THRESHOLD);
+        summary.put("highRetryTaskCount", highRetryTaskCount);
+        summary.put("totalLlmCalls", totalLlmCalls);
+        summary.put("totalInputTokens", totalInputTokens);
+        summary.put("totalOutputTokens", totalOutputTokens);
+        summary.put("totalTokens", totalTokens);
+        summary.put("avgTokensPerLlmCall", totalLlmCalls > 0 ? Math.round((double) totalTokens / totalLlmCalls) : 0L);
+        summary.put("byTaskType", byTaskType.values().stream().toList());
+        return summary;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void mergeTaskTypeMetrics(
+            Map<String, Object> byTaskType,
+            Task task,
+            long durationMs,
+            long llmCalls,
+            long tokens) {
+        String taskType = task.getTaskType() != null ? task.getTaskType() : "unknown";
+        Map<String, Object> item = (Map<String, Object>) byTaskType.computeIfAbsent(taskType, key -> {
+            Map<String, Object> created = new LinkedHashMap<>();
+            created.put("taskType", key);
+            created.put("taskCount", 0L);
+            created.put("completedTaskCount", 0L);
+            created.put("totalDurationMs", 0L);
+            created.put("avgDurationMs", 0L);
+            created.put("totalLlmCalls", 0L);
+            created.put("totalTokens", 0L);
+            return created;
+        });
+        item.put("taskCount", numberValue(item.get("taskCount")) + 1);
+        item.put("totalLlmCalls", numberValue(item.get("totalLlmCalls")) + llmCalls);
+        item.put("totalTokens", numberValue(item.get("totalTokens")) + tokens);
+        if (durationMs > 0) {
+            long completed = numberValue(item.get("completedTaskCount")) + 1;
+            long totalDuration = numberValue(item.get("totalDurationMs")) + durationMs;
+            item.put("completedTaskCount", completed);
+            item.put("totalDurationMs", totalDuration);
+            item.put("avgDurationMs", Math.round((double) totalDuration / completed));
+        }
     }
 
     private Map<String, Object> healthSummary(
@@ -282,7 +386,47 @@ public class DashboardService {
     }
 
     private long numberValue(Object value) {
-        return value instanceof Number number ? number.longValue() : 0L;
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        if (value instanceof String text) {
+            try {
+                return Long.parseLong(text);
+            } catch (NumberFormatException ignored) {
+                return 0L;
+            }
+        }
+        return 0L;
+    }
+
+    private long taskDurationMs(Task task) {
+        long durationMs = metricLong(task.getMetrics(), "duration_ms", "durationMs");
+        if (durationMs > 0) {
+            return durationMs;
+        }
+
+        long durationSeconds = metricLong(task.getMetrics(), "duration_seconds", "durationSeconds");
+        if (durationSeconds > 0) {
+            return durationSeconds * 1000L;
+        }
+
+        if (task.getStartedAt() != null && task.getFinishedAt() != null) {
+            return Math.max(0L, Duration.between(task.getStartedAt(), task.getFinishedAt()).toMillis());
+        }
+        return 0L;
+    }
+
+    private long metricLong(Map<String, Object> metrics, String... keys) {
+        if (metrics == null || metrics.isEmpty()) {
+            return 0L;
+        }
+        for (String key : keys) {
+            long value = numberValue(metrics.get(key));
+            if (value != 0L) {
+                return value;
+            }
+        }
+        return 0L;
     }
 
     private boolean isWaitingForHuman(Task task) {

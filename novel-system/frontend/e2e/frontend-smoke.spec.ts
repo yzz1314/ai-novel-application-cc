@@ -10,7 +10,8 @@ test('renders global workbench pages with mocked backend data', async ({ page })
   await page.goto('/dashboard')
   await expect(page.getByRole('heading', { name: '工作台' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'E2E 长篇创作项目' })).toBeVisible()
-  await expect(page.getByText('retrieval_index')).toBeVisible()
+  await expect(page.getByText('retrieval_index', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('性能监控')).toBeVisible()
 
   await page.goto('/projects')
   await expect(page.getByText('项目列表')).toBeVisible()
@@ -166,6 +167,42 @@ function dashboardFixture() {
       failedTasks: 0,
       waitingApprovals: 1,
       successRate: 50,
+    },
+    performanceSummary: {
+      windowTaskCount: 2,
+      completedTaskCount: 2,
+      avgDurationMs: 60500,
+      maxDurationMs: 120000,
+      slowestTaskId: 'task-workflow-approval',
+      slowTaskThresholdMs: 600000,
+      slowTaskCount: 0,
+      highRetryThreshold: 2,
+      highRetryTaskCount: 0,
+      totalLlmCalls: 6,
+      totalInputTokens: 1200,
+      totalOutputTokens: 800,
+      totalTokens: 2000,
+      avgTokensPerLlmCall: 333,
+      byTaskType: [
+        {
+          taskType: 'retrieval_index',
+          taskCount: 1,
+          completedTaskCount: 1,
+          totalDurationMs: 1000,
+          avgDurationMs: 1000,
+          totalLlmCalls: 2,
+          totalTokens: 500,
+        },
+        {
+          taskType: 'chapter_pipeline',
+          taskCount: 1,
+          completedTaskCount: 1,
+          totalDurationMs: 120000,
+          avgDurationMs: 120000,
+          totalLlmCalls: 4,
+          totalTokens: 1500,
+        },
+      ],
     },
     serviceStatus: {
       java: { status: 'UP', service: 'novel-system-java' },

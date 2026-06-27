@@ -114,6 +114,54 @@ public class AnalysisArtifactService {
         return response;
     }
 
+    public Map<String, Object> getSampleAnalysisIssues(String projectId, String sampleId) {
+        getProjectSample(projectId, sampleId);
+        Map<String, Object> coverage = readOptionalJson(coverageReport(projectId, sampleId))
+            .map(this::camelizeMap)
+            .orElseGet(LinkedHashMap::new);
+        Map<String, Object> analysisCoverage = mapValue(coverage.get("analysisCoverage"));
+        Map<String, Object> repairQueue = mapValue(coverage.get("repairQueue"));
+        Map<String, Map<String, Object>> repairItems = repairItemsByChunkId(repairQueue);
+
+        List<Map<String, Object>> rawIssues = new ArrayList<>();
+        asList(analysisCoverage.get("missingAnalysisChunks")).forEach(chunkId -> {
+            String normalizedChunkId = stringValue(chunkId);
+            if (!normalizedChunkId.isBlank()) {
+                rawIssues.add(analysisIssue(projectId, sampleId, normalizedChunkId, "missing", repairItems.get(normalizedChunkId), null));
+            }
+        });
+        asList(analysisCoverage.get("failedChunks")).stream()
+            .filter(Map.class::isInstance)
+            .map(Map.class::cast)
+            .forEach(failed -> {
+                String chunkId = firstString(failed, "chunkId", "chunk_id", "id");
+                if (!chunkId.isBlank()) {
+                    rawIssues.add(analysisIssue(projectId, sampleId, chunkId, "failed", repairItems.get(chunkId), failed));
+                }
+            });
+        List<Map<String, Object>> issues = sortIssuesByRepairQueue(rawIssues, repairQueue);
+
+        List<String> issueChunkIds = issues.stream()
+            .map(issue -> stringValue(issue.get("chunkId")))
+            .filter(chunkId -> !chunkId.isBlank())
+            .distinct()
+            .toList();
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("sampleId", sampleId);
+        response.put("status", coverage.getOrDefault("status", issues.isEmpty() ? "passed" : "failed"));
+        response.put("coverageReportPath", relativeIfExists(projectId, coverageReport(projectId, sampleId)));
+        response.put("repairQueuePath", coverage.get("repairQueuePath"));
+        response.put("totalCount", issues.size());
+        response.put("missingCount", issues.stream().filter(issue -> "missing".equals(issue.get("type"))).count());
+        response.put("failedCount", issues.stream().filter(issue -> "failed".equals(issue.get("type"))).count());
+        response.put("issueChunkIds", issueChunkIds);
+        response.put("issues", issues);
+        response.put("repairQueue", repairQueue);
+        return response;
+    }
+
     public Task checkSampleCoverage(String projectId, String sampleId) {
         return checkSampleCoverage(projectId, sampleId, Map.of());
     }
@@ -315,6 +363,96 @@ public class AnalysisArtifactService {
         return analysis;
     }
 
+    private Map<String, Object> analysisIssue(
+            String projectId,
+            String sampleId,
+            String chunkId,
+            String type,
+            Map<String, Object> repairItem,
+            Map<?, ?> failedItem) {
+        Path chunkPath = chunksDir(projectId, sampleId).resolve(chunkId + ".json");
+        Path analysisPath = analysisDir(projectId, sampleId).resolve(chunkId + "_analysis.json");
+        if (!Files.exists(analysisPath)) {
+            analysisPath = legacyAnalysisDir(projectId, sampleId).resolve(chunkId + "_analysis.json");
+        }
+
+        Map<String, Object> chunk = Files.exists(chunkPath) ? chunkResponse(projectId, chunkPath, false) : new LinkedHashMap<>();
+        Map<String, Object> issue = new LinkedHashMap<>();
+        issue.put("key", type + "-" + chunkId);
+        issue.put("chunkId", chunkId);
+        issue.put("type", type);
+        issue.put("status", "failed".equals(type) ? "失败" : "缺失");
+        issue.put("reason", repairItem != null ? repairItem.getOrDefault("reason", defaultIssueReason(type)) : defaultIssueReason(type));
+        issue.put("priority", repairItem != null ? repairItem.getOrDefault("priority", defaultIssuePriority(type)) : defaultIssuePriority(type));
+        issue.put("error", issueError(type, repairItem, failedItem));
+        issue.put("repairable", true);
+        issue.put("chunkPath", Files.exists(chunkPath) ? relative(projectId, chunkPath) : null);
+        issue.put("analysisPath", Files.exists(analysisPath) ? relative(projectId, analysisPath) : null);
+        issue.put("chunkIndex", chunk.get("chunkIndex"));
+        issue.put("chapterIndex", chunk.get("chapterIndex"));
+        issue.put("chapterRange", chunk.get("chapterRange"));
+        issue.put("startOffset", chunk.get("startOffset"));
+        issue.put("endOffset", chunk.get("endOffset"));
+        issue.put("charCount", chunk.get("charCount"));
+        issue.put("preview", chunk.get("preview"));
+        issue.put("repairItem", repairItem);
+        return issue;
+    }
+
+    private Map<String, Map<String, Object>> repairItemsByChunkId(Map<String, Object> repairQueue) {
+        Map<String, Map<String, Object>> result = new LinkedHashMap<>();
+        asList(repairQueue.get("items")).stream()
+            .filter(Map.class::isInstance)
+            .map(Map.class::cast)
+            .forEach(raw -> {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> item = (Map<String, Object>) raw;
+                String chunkId = firstString(item, "chunkId", "chunk_id");
+                if (!chunkId.isBlank()) {
+                    result.put(chunkId, item);
+                }
+            });
+        return result;
+    }
+
+    private List<Map<String, Object>> sortIssuesByRepairQueue(List<Map<String, Object>> issues, Map<String, Object> repairQueue) {
+        List<?> queueChunkIds = asList(repairQueue.get("chunkIds"));
+        if (queueChunkIds.isEmpty()) {
+            queueChunkIds = asList(repairQueue.get("chunk_ids"));
+        }
+        Map<String, Integer> order = new LinkedHashMap<>();
+        for (int i = 0; i < queueChunkIds.size(); i++) {
+            order.put(stringValue(queueChunkIds.get(i)), i);
+        }
+        return issues.stream()
+            .sorted(Comparator
+                .comparingInt((Map<String, Object> issue) -> order.getOrDefault(stringValue(issue.get("chunkId")), Integer.MAX_VALUE))
+                .thenComparing(issue -> stringValue(issue.get("chunkId"))))
+            .toList();
+    }
+
+    private String issueError(String type, Map<String, Object> repairItem, Map<?, ?> failedItem) {
+        String repairError = repairItem != null ? stringValue(repairItem.get("error")) : "";
+        if (!repairError.isBlank()) {
+            return repairError;
+        }
+        if (failedItem != null) {
+            String failedError = firstString(failedItem, "error", "message");
+            if (!failedError.isBlank()) {
+                return failedError;
+            }
+        }
+        return "failed".equals(type) ? "分析结果文件失败或不可读" : "未生成逐块分析结果";
+    }
+
+    private String defaultIssueReason(String type) {
+        return "failed".equals(type) ? "failed_analysis" : "missing_analysis";
+    }
+
+    private String defaultIssuePriority(String type) {
+        return "failed".equals(type) ? "critical" : "high";
+    }
+
     private Map<String, Object> reportContent(String projectId, Path file, String content) {
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("path", relative(projectId, file));
@@ -423,6 +561,18 @@ public class AnalysisArtifactService {
         return Files.exists(file) ? Optional.of(readText(file)) : Optional.empty();
     }
 
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> mapValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            return (Map<String, Object>) map;
+        }
+        return new LinkedHashMap<>();
+    }
+
+    private List<?> asList(Object value) {
+        return value instanceof List<?> list ? list : List.of();
+    }
+
     private Map<String, Object> readJson(Path file) {
         try {
             return objectMapper.readValue(file.toFile(), new TypeReference<>() {});
@@ -498,6 +648,16 @@ public class AnalysisArtifactService {
 
     private String stripSuffix(String value, String suffix) {
         return value.endsWith(suffix) ? value.substring(0, value.length() - suffix.length()) : value;
+    }
+
+    private String firstString(Map<?, ?> map, String... keys) {
+        for (String key : keys) {
+            Object value = map.get(key);
+            if (value != null && !value.toString().isBlank()) {
+                return value.toString();
+            }
+        }
+        return "";
     }
 
     private String stringValue(Object value) {

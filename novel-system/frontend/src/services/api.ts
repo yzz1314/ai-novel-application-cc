@@ -445,6 +445,8 @@ export const analysisApi = {
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/chunks/${chunkId}/analysis`)),
   getCoverage: (projectId: string, sampleId: string) =>
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/coverage`)),
+  getIssues: (projectId: string, sampleId: string) =>
+    request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/issues`)),
   checkCoverage: (projectId: string, sampleId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/analysis/samples/${sampleId}/coverage/check`, data || {})),
   repairAnalysis: (projectId: string, sampleId: string, data?: any) =>

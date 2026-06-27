@@ -113,6 +113,13 @@ public class AnalysisController {
         return ResponseEntity.ok(analysisArtifactService.getSampleCoverage(projectId, sampleId));
     }
 
+    @GetMapping("/samples/{sampleId}/issues")
+    public ResponseEntity<Map<String, Object>> getSampleAnalysisIssues(
+            @PathVariable String projectId,
+            @PathVariable String sampleId) {
+        return ResponseEntity.ok(analysisArtifactService.getSampleAnalysisIssues(projectId, sampleId));
+    }
+
     @PostMapping("/samples/{sampleId}/coverage/check")
     public ResponseEntity<TaskResponse> checkSampleCoverage(
             @PathVariable String projectId,

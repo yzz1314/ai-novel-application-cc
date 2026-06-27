@@ -99,6 +99,11 @@ const coverageIssueRows = (report: any) => {
   return [...missingRows, ...failedRows]
 }
 
+const analysisIssueRows = (issues: any, report: any) => {
+  const issueRows = asArray(issues?.issues)
+  return issueRows.length ? issueRows : coverageIssueRows(report)
+}
+
 const coverageIssueChunkIds = (report: any) => Array.from(new Set(
   coverageIssueRows(report).map((item: any) => item.chunkId).filter(Boolean)
 ))
@@ -118,6 +123,7 @@ const SampleManagement: React.FC = () => {
   const [chunks, setChunks] = useState<any[]>([])
   const [bookReport, setBookReport] = useState<any>(null)
   const [coverageReport, setCoverageReport] = useState<any>(null)
+  const [analysisIssues, setAnalysisIssues] = useState<any>(null)
   const [reportDrawer, setReportDrawer] = useState<any>(null)
   const [chunkDrawer, setChunkDrawer] = useState<any>(null)
   const [chunkLoading, setChunkLoading] = useState(false)
@@ -366,18 +372,21 @@ const SampleManagement: React.FC = () => {
     setChunks([])
     setBookReport(null)
     setCoverageReport(null)
+    setAnalysisIssues(null)
     try {
       const sampleId = sample.sampleId || sample.id
-      const [artifactsData, chunkData, reportData, coverageData] = await Promise.all([
+      const [artifactsData, chunkData, reportData, coverageData, issuesData] = await Promise.all([
         analysisApi.getSampleArtifacts(projectId, sampleId).catch(() => null),
         analysisApi.getChunks(projectId, sampleId).catch(() => []),
         analysisApi.getBookReport(projectId, sampleId).catch(() => null),
         analysisApi.getCoverage(projectId, sampleId).catch(() => null),
+        analysisApi.getIssues(projectId, sampleId).catch(() => null),
       ])
       setSampleArtifacts(artifactsData)
       setChunks(chunkData || [])
       setBookReport(reportData)
       setCoverageReport(coverageData || artifactsData?.coverageReport || null)
+      setAnalysisIssues(issuesData)
     } catch (error) {
       message.error('加载样本产物失败')
     } finally {
@@ -624,8 +633,10 @@ const SampleManagement: React.FC = () => {
   const totalSamples = analysisStatus?.sampleCount ?? samples.length
   const analysisPercent = totalSamples ? Math.round((analyzedCount / totalSamples) * 100) : 0
   const selectedCoverageReport = coverageReport || sampleArtifacts?.coverageReport
-  const coverageIssues = coverageIssueRows(selectedCoverageReport)
-  const coverageIssueIds = coverageIssueChunkIds(selectedCoverageReport)
+  const coverageIssues = analysisIssueRows(analysisIssues, selectedCoverageReport)
+  const coverageIssueIds = analysisIssues?.issueChunkIds?.length
+    ? analysisIssues.issueChunkIds
+    : coverageIssueChunkIds(selectedCoverageReport)
   const repairQueue = coverageRepairQueue(selectedCoverageReport)
 
   return (
@@ -844,7 +855,7 @@ const SampleManagement: React.FC = () => {
                     {coverageIssues.length > 0 ? (
                       <Card
                         size="small"
-                        title="待修复分块"
+                        title={`待修复分块 ${analysisIssues?.totalCount ?? coverageIssues.length}`}
                         extra={
                           <Space>
                             <Button
@@ -868,10 +879,11 @@ const SampleManagement: React.FC = () => {
                         <Table
                           size="small"
                           dataSource={coverageIssues}
-                          rowKey="key"
+                          rowKey={(record: any) => record.key || `${record.type}-${record.chunkId}`}
                           pagination={false}
+                          scroll={{ x: 980 }}
                           columns={[
-                            { title: 'Chunk ID', dataIndex: 'chunkId', key: 'chunkId', width: 170 },
+                            { title: 'Chunk ID', dataIndex: 'chunkId', key: 'chunkId', width: 150 },
                             {
                               title: '类型',
                               dataIndex: 'status',
@@ -881,8 +893,57 @@ const SampleManagement: React.FC = () => {
                                 <Tag color={record.type === 'failed' ? 'error' : 'warning'}>{value}</Tag>
                               ),
                             },
-                            { title: '原因', dataIndex: 'error', key: 'error' },
-                            { title: '路径', dataIndex: 'path', key: 'path', ellipsis: true },
+                            {
+                              title: '优先级',
+                              dataIndex: 'priority',
+                              key: 'priority',
+                              width: 90,
+                              render: (value: string) => (
+                                <Tag color={value === 'critical' ? 'error' : 'warning'}>{value || '-'}</Tag>
+                              ),
+                            },
+                            {
+                              title: '范围',
+                              key: 'range',
+                              width: 150,
+                              render: (_: any, record: any) => (
+                                <Space direction="vertical" size={0}>
+                                  <Text>{record.chapterRange || `第 ${record.chapterIndex ?? '-'} 章`}</Text>
+                                  <Text type="secondary">{record.startOffset ?? '-'} - {record.endOffset ?? '-'}</Text>
+                                </Space>
+                              ),
+                            },
+                            { title: '原因', dataIndex: 'error', key: 'error', ellipsis: true },
+                            {
+                              title: '路径',
+                              key: 'path',
+                              ellipsis: true,
+                              render: (_: any, record: any) => record.analysisPath || record.path || record.chunkPath || '-',
+                            },
+                            {
+                              title: '操作',
+                              key: 'action',
+                              width: 150,
+                              render: (_: any, record: any) => (
+                                <Space>
+                                  <Button
+                                    type="link"
+                                    icon={<EyeOutlined />}
+                                    onClick={() => openChunkDetail({ id: record.chunkId })}
+                                  >
+                                    详情
+                                  </Button>
+                                  <Button
+                                    type="link"
+                                    icon={<ReloadOutlined />}
+                                    loading={loading}
+                                    onClick={() => selectedSample && repairAnalysis(selectedSample.sampleId || selectedSample.id, [record.chunkId])}
+                                  >
+                                    修复
+                                  </Button>
+                                </Space>
+                              ),
+                            },
                           ]}
                         />
                       </Card>
@@ -890,7 +951,7 @@ const SampleManagement: React.FC = () => {
                       <Alert type="success" showIcon message="逐块分析覆盖完整，暂无需要定向修复的分块。" />
                     )}
                     <pre style={{ whiteSpace: 'pre-wrap' }}>
-                      {JSON.stringify(selectedCoverageReport, null, 2)}
+                      {JSON.stringify({ coverage: selectedCoverageReport, issues: analysisIssues }, null, 2)}
                     </pre>
                   </Space>
                 ) : (

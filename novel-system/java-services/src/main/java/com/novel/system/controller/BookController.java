@@ -90,6 +90,35 @@ public class BookController {
         return ResponseEntity.ok(bookArtifactService.updateOutlineGovernance(projectId, bookId, "approve", request));
     }
 
+    @GetMapping("/{bookId}/outline/versions")
+    public ResponseEntity<List<Map<String, Object>>> listOutlineVersions(
+            @PathVariable String projectId,
+            @PathVariable String bookId) {
+        return ResponseEntity.ok(bookArtifactService.listOutlineVersions(projectId, bookId));
+    }
+
+    @GetMapping("/{bookId}/outline/versions/{versionId}")
+    public ResponseEntity<Map<String, Object>> getOutlineVersion(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @PathVariable String versionId) {
+        return ResponseEntity.ok(bookArtifactService.getOutlineVersion(projectId, bookId, versionId));
+    }
+
+    @PostMapping("/{bookId}/outline/versions/{versionId}/restore")
+    public ResponseEntity<Map<String, Object>> restoreOutlineVersion(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @PathVariable String versionId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.restoreOutlineVersion(
+            projectId,
+            bookId,
+            versionId,
+            request == null ? Map.of() : request
+        ));
+    }
+
     @GetMapping("/{bookId}/outline/reviews")
     public ResponseEntity<List<Map<String, Object>>> listOutlineReviews(
             @PathVariable String projectId,

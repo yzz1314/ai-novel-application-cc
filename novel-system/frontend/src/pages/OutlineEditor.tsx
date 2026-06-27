@@ -72,6 +72,9 @@ const OutlineEditor: React.FC = () => {
   const [editNote, setEditNote] = useState('');
   const [outlineReviews, setOutlineReviews] = useState<any[]>([]);
   const [reviewing, setReviewing] = useState(false);
+  const [outlineVersions, setOutlineVersions] = useState<any[]>([]);
+  const [outlineVersionOpen, setOutlineVersionOpen] = useState(false);
+  const [outlineVersionPreview, setOutlineVersionPreview] = useState<any>(null);
   const [soulVersions, setSoulVersions] = useState<any[]>([]);
   const [soulVersionOpen, setSoulVersionOpen] = useState(false);
   const [soulVersionPreview, setSoulVersionPreview] = useState<any>(null);
@@ -246,6 +249,57 @@ const OutlineEditor: React.FC = () => {
       }
     } catch (error) {
       message.error('更新大纲治理状态失败');
+    } finally {
+      setOutlineGovernanceLoading(false);
+    }
+  };
+
+  const openOutlineVersions = async () => {
+    if (!projectId || !outline) return;
+    try {
+      setOutlineGovernanceLoading(true);
+      const bookId = selectedBookId || outline.bookId || 'default';
+      const versions = await outlineApi.getVersions(projectId, bookId);
+      setOutlineVersions(versions || []);
+      setOutlineVersionOpen(true);
+    } catch (error) {
+      message.error('加载大纲版本失败');
+    } finally {
+      setOutlineGovernanceLoading(false);
+    }
+  };
+
+  const previewOutlineVersion = async (version: any) => {
+    if (!projectId || !outline) return;
+    try {
+      setOutlineGovernanceLoading(true);
+      const bookId = selectedBookId || outline.bookId || 'default';
+      const detail = await outlineApi.getVersion(projectId, bookId, version.id);
+      setOutlineVersionPreview(detail);
+    } catch (error) {
+      message.error('加载大纲版本内容失败');
+    } finally {
+      setOutlineGovernanceLoading(false);
+    }
+  };
+
+  const restoreOutlineVersion = async (version: any, overrideOutlineLock = false) => {
+    if (!projectId || !outline) return;
+    try {
+      setOutlineGovernanceLoading(true);
+      const bookId = selectedBookId || outline.bookId || 'default';
+      await outlineApi.restoreVersion(projectId, bookId, version.id, {
+        actor: 'human',
+        note: `Restore outline from ${version.id}`,
+        createVersionSnapshot: true,
+        overrideOutlineLock,
+      });
+      message.success('大纲版本已恢复');
+      setOutlineVersionPreview(null);
+      setOutlineVersionOpen(false);
+      await loadOutline();
+    } catch (error) {
+      message.error('恢复大纲版本失败');
     } finally {
       setOutlineGovernanceLoading(false);
     }
@@ -540,6 +594,9 @@ const OutlineEditor: React.FC = () => {
                 )}
                 <Button icon={<CheckCircleOutlined />} loading={outlineGovernanceLoading} onClick={() => runOutlineGovernance('approve')}>
                   批准并锁定大纲
+                </Button>
+                <Button icon={<HistoryOutlined />} loading={outlineGovernanceLoading} onClick={openOutlineVersions}>
+                  大纲版本
                 </Button>
               </Space>
             </Space>
@@ -876,6 +933,50 @@ const OutlineEditor: React.FC = () => {
             placeholder={outlineGovernance.locked ? '大纲已锁定，请先解锁' : '完整大纲 JSON'}
           />
         </Space>
+      </Modal>
+
+      <Modal
+        title="大纲历史版本"
+        open={outlineVersionOpen}
+        footer={null}
+        width={860}
+        onCancel={() => setOutlineVersionOpen(false)}
+      >
+        <Table
+          dataSource={outlineVersions}
+          rowKey="id"
+          pagination={{ pageSize: 6 }}
+          onRow={(record: any) => ({
+            onClick: () => previewOutlineVersion(record),
+          })}
+          columns={[
+            { title: '版本ID', dataIndex: 'id', key: 'id', ellipsis: true },
+            { title: '书名', dataIndex: 'bookTitle', key: 'bookTitle', ellipsis: true },
+            { title: '原因', dataIndex: 'archiveReason', key: 'archiveReason', width: 160 },
+            { title: '归档时间', dataIndex: 'archivedAt', key: 'archivedAt', width: 190 },
+            { title: '章节数', dataIndex: 'totalChapters', key: 'totalChapters', width: 90 },
+          ]}
+          locale={{ emptyText: '暂无大纲历史版本' }}
+        />
+        {outlineVersionPreview && (
+          <Card size="small" title={outlineVersionPreview.id} style={{ marginTop: 16 }}>
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Descriptions column={1} size="small">
+                <Descriptions.Item label="Path">{outlineVersionPreview.path}</Descriptions.Item>
+                <Descriptions.Item label="Archived">{outlineVersionPreview.archivedAt}</Descriptions.Item>
+                <Descriptions.Item label="Reason">{outlineVersionPreview.archiveReason || '-'}</Descriptions.Item>
+              </Descriptions>
+              <Button
+                danger
+                loading={outlineGovernanceLoading}
+                onClick={() => restoreOutlineVersion(outlineVersionPreview, !!outlineGovernance.locked)}
+              >
+                Restore this version
+              </Button>
+              <ParagraphText content={JSON.stringify(outlineVersionPreview.outline || {}, null, 2)} />
+            </Space>
+          </Card>
+        )}
       </Modal>
 
       <Modal

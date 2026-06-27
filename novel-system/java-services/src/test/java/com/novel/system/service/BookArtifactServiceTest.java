@@ -220,6 +220,135 @@ class BookArtifactServiceTest {
     }
 
     @Test
+    void restoresOutlineVersionWithSnapshotAndPendingReviewGovernance() throws Exception {
+        writeProjectFile("novel/outline/book_1_outline.json", """
+            {
+              "project_id": "project_soul_restore",
+              "book_id": "book_1",
+              "book_title": "Current Outline",
+              "genre": "玄幻",
+              "target_word_count": 100000,
+              "total_volumes": 1,
+              "total_chapters": 1,
+              "volumes": []
+            }
+            """);
+        writeProjectFile("novel/outline/versions/book_1/book_1_outline_20260626010101000.json", """
+            {
+              "project_id": "project_soul_restore",
+              "book_id": "book_1",
+              "book_title": "Archived Outline",
+              "genre": "玄幻",
+              "target_word_count": 120000,
+              "total_volumes": 1,
+              "total_chapters": 2,
+              "archived_at": "2026-06-26T01:01:01",
+              "archive_reason": "before_outline_edit",
+              "volumes": []
+            }
+            """);
+        when(outlineArtifactService.syncOutlineFromWorkspace(eq(PROJECT_ID), eq(BOOK_ID)))
+            .thenReturn(Map.of("status", "synced"));
+
+        List<Map<String, Object>> versions = bookArtifactService.listOutlineVersions(PROJECT_ID, BOOK_ID);
+        assertThat(versions).hasSize(1);
+        assertThat(versions.get(0))
+            .containsEntry("id", "book_1_outline_20260626010101000")
+            .containsEntry("bookTitle", "Archived Outline")
+            .containsEntry("archiveReason", "before_outline_edit");
+
+        Map<String, Object> detail = bookArtifactService.getOutlineVersion(
+            PROJECT_ID,
+            BOOK_ID,
+            "book_1_outline_20260626010101000"
+        );
+        @SuppressWarnings("unchecked")
+        Map<String, Object> detailOutline = (Map<String, Object>) detail.get("outline");
+        assertThat(detailOutline)
+            .containsEntry("bookTitle", "Archived Outline")
+            .containsEntry("totalChapters", 2);
+
+        Map<String, Object> response = bookArtifactService.restoreOutlineVersion(
+            PROJECT_ID,
+            BOOK_ID,
+            "book_1_outline_20260626010101000",
+            Map.of("actor", "tester", "note", "restore outline")
+        );
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> outline = (Map<String, Object>) response.get("outline");
+        assertThat(response)
+            .containsEntry("status", "restored")
+            .containsEntry("restoredFromVersionId", "book_1_outline_20260626010101000");
+        assertThat(outline)
+            .containsEntry("bookTitle", "Archived Outline")
+            .containsEntry("restoredBy", "tester");
+        assertThat(Files.readString(projectRoot().resolve("novel/outline/book_1_outline.json")))
+            .contains("Archived Outline")
+            .doesNotContain("archived_at")
+            .doesNotContain("archive_reason");
+
+        String previousSnapshotPath = String.valueOf(response.get("previousSnapshotPath"));
+        assertThat(previousSnapshotPath).startsWith("novel/outline/versions/book_1/book_1_outline_");
+        assertThat(Files.readString(projectRoot().resolve(previousSnapshotPath)))
+            .contains("Current Outline")
+            .contains("before_outline_restore");
+
+        String meta = Files.readString(projectRoot().resolve("novel/outline/book_1_outline_meta.json"));
+        assertThat(meta)
+            .contains("\"approval_status\" : \"pending_review\"")
+            .contains("\"restored_from_version_id\"")
+            .contains("book_1_outline_20260626010101000");
+    }
+
+    @Test
+    void lockedOutlineRejectsRestoreWithoutOverride() throws Exception {
+        writeProjectFile("novel/outline/book_1_outline.json", """
+            {
+              "project_id": "project_soul_restore",
+              "book_id": "book_1",
+              "book_title": "Locked Current Outline",
+              "genre": "玄幻",
+              "target_word_count": 100000,
+              "total_volumes": 1,
+              "total_chapters": 1,
+              "volumes": []
+            }
+            """);
+        writeProjectFile("novel/outline/book_1_outline_meta.json", """
+            {
+              "book_id": "book_1",
+              "locked": true,
+              "approval_status": "approved"
+            }
+            """);
+        writeProjectFile("novel/outline/versions/book_1/book_1_outline_20260626010101000.json", """
+            {
+              "project_id": "project_soul_restore",
+              "book_id": "book_1",
+              "book_title": "Archived Outline",
+              "genre": "玄幻",
+              "target_word_count": 120000,
+              "total_volumes": 1,
+              "total_chapters": 2,
+              "volumes": []
+            }
+            """);
+
+        assertThatThrownBy(() -> bookArtifactService.restoreOutlineVersion(
+            PROJECT_ID,
+            BOOK_ID,
+            "book_1_outline_20260626010101000",
+            Map.of("actor", "tester")
+        ))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("locked");
+
+        assertThat(Files.readString(projectRoot().resolve("novel/outline/book_1_outline.json")))
+            .contains("Locked Current Outline");
+    }
+
+    @Test
     void diffsDraftAndFinalChapterWithSummaryAndLineHunks() throws Exception {
         writeChapterFile("novel/chapters/drafts/book_1/volume_1/chapter_2.json", """
             {

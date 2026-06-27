@@ -140,6 +140,12 @@ export const outlineApi = {
     request(api.post(`/projects/${projectId}/books/${bookId}/outline/unlock`, data || {})),
   approve: (projectId: string, bookId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/books/${bookId}/outline/approve`, data || {})),
+  getVersions: (projectId: string, bookId: string) =>
+    request<any[]>(api.get(`/projects/${projectId}/books/${bookId}/outline/versions`)),
+  getVersion: (projectId: string, bookId: string, versionId: string) =>
+    request(api.get(`/projects/${projectId}/books/${bookId}/outline/versions/${versionId}`)),
+  restoreVersion: (projectId: string, bookId: string, versionId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/books/${bookId}/outline/versions/${versionId}/restore`, data || {})),
   review: (projectId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/outline/review`, data || {})),
   getReviews: (projectId: string, bookId: string) =>

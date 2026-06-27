@@ -313,6 +313,128 @@ public class BookArtifactService {
         return response;
     }
 
+    public List<Map<String, Object>> listOutlineVersions(String projectId, String bookId) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Path versionsDir = outlineVersionsDir(projectId, resolvedBookId);
+        if (!Files.exists(versionsDir)) {
+            return List.of();
+        }
+
+        try (var stream = Files.list(versionsDir)) {
+            return stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().matches(Pattern.quote(resolvedBookId) + "_outline_.*\\.json"))
+                .sorted(Comparator.comparing(this::modifiedAt).reversed())
+                .map(path -> {
+                    Map<String, Object> version = readJson(path);
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("bookId", resolvedBookId);
+                    item.put("id", stripSuffix(path.getFileName().toString(), ".json"));
+                    item.put("path", relative(projectId, path));
+                    item.put("sizeBytes", fileSize(path));
+                    item.put("archivedAt", stringValue(version.get("archived_at"), modifiedAt(path)));
+                    item.put("archiveReason", version.getOrDefault("archive_reason", ""));
+                    item.put("sourcePath", version.getOrDefault("source_path", ""));
+                    item.put("bookTitle", version.getOrDefault("book_title", resolvedBookId));
+                    item.put("totalChapters", version.getOrDefault("total_chapters", 0));
+                    return item;
+                })
+                .toList();
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to read outline versions", e);
+        }
+    }
+
+    public Map<String, Object> getOutlineVersion(String projectId, String bookId, String versionId) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Path versionFile = resolveOutlineVersionFile(projectId, resolvedBookId, versionId);
+        Map<String, Object> outline = readJson(versionFile);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("bookId", resolvedBookId);
+        response.put("id", stripSuffix(versionFile.getFileName().toString(), ".json"));
+        response.put("path", relative(projectId, versionFile));
+        response.put("sizeBytes", fileSize(versionFile));
+        response.put("archivedAt", stringValue(outline.get("archived_at"), modifiedAt(versionFile)));
+        response.put("archiveReason", outline.getOrDefault("archive_reason", ""));
+        response.put("sourcePath", outline.getOrDefault("source_path", ""));
+        response.put("outline", camelizeMap(outline));
+        return response;
+    }
+
+    public Map<String, Object> restoreOutlineVersion(
+            String projectId,
+            String bookId,
+            String versionId,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        Map<String, Object> governance = readOutlineGovernance(projectId, resolvedBookId);
+        if (booleanValue(governance.get("locked"), false)
+                && !booleanOption(options, "overrideOutlineLock", false)) {
+            throw new IllegalArgumentException("Outline is locked; unlock it before restoring a version.");
+        }
+
+        Path versionFile = resolveOutlineVersionFile(projectId, resolvedBookId, versionId);
+        Path outlineFile = resolveOutlineFile(projectId, resolvedBookId);
+        Map<String, Object> before = readJson(outlineFile);
+        Map<String, Object> versionOutline = readJson(versionFile);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> restoredOutline = (Map<String, Object>) decamelize(versionOutline);
+        removeReadOnlyOutlineFields(restoredOutline);
+        restoredOutline.put("project_id", projectId);
+        restoredOutline.put("book_id", resolvedBookId);
+
+        Path previousSnapshotPath = null;
+        if (booleanOption(options, "createVersionSnapshot", true)) {
+            previousSnapshotPath = archiveOutlineSnapshot(
+                projectId,
+                resolvedBookId,
+                outlineFile,
+                before,
+                "before_outline_restore"
+            );
+        }
+
+        String actor = stringValue(valueOf(options, "actor", "restoredBy"), "human");
+        String note = stringValue(valueOf(options, "note", "reason"), "");
+        String restoredAt = LocalDateTime.now().toString();
+        restoredOutline.put("updated_at", restoredAt);
+        restoredOutline.put("restored_at", restoredAt);
+        restoredOutline.put("restored_by", actor);
+        restoredOutline.put("restore_note", note);
+        restoredOutline.put("restored_from_version_id", stripSuffix(versionFile.getFileName().toString(), ".json"));
+        restoredOutline.put("restored_from_path", relative(projectId, versionFile));
+        if (previousSnapshotPath != null) {
+            restoredOutline.put("previous_snapshot_path", relative(projectId, previousSnapshotPath));
+        }
+        writeJson(outlineFile, restoredOutline);
+
+        governance.put("bookId", resolvedBookId);
+        governance.put("approvalStatus", "pending_review");
+        governance.put("restoredBy", actor);
+        governance.put("restoredAt", restoredAt);
+        governance.put("restoreNote", note);
+        governance.put("restoredFromVersionId", stripSuffix(versionFile.getFileName().toString(), ".json"));
+        governance.put("restoredFromPath", relative(projectId, versionFile));
+        governance.put("previousSnapshotPath", previousSnapshotPath != null ? relative(projectId, previousSnapshotPath) : null);
+        governance.put("updatedAt", restoredAt);
+        writeJson(outlineGovernanceFile(projectId, resolvedBookId), decamelizeMap(governance));
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("status", "restored");
+        response.put("bookId", resolvedBookId);
+        response.put("restoredFromVersionId", stripSuffix(versionFile.getFileName().toString(), ".json"));
+        response.put("restoredFromPath", relative(projectId, versionFile));
+        response.put("previousSnapshotPath", previousSnapshotPath != null ? relative(projectId, previousSnapshotPath) : null);
+        response.put("restoredAt", restoredAt);
+        response.put("outline", getOutline(projectId, resolvedBookId));
+        response.put("outlineDb", outlineArtifactService.syncOutlineFromWorkspace(projectId, resolvedBookId));
+        return response;
+    }
+
     public Map<String, Object> updateOutline(
             String projectId,
             String bookId,
@@ -1299,6 +1421,22 @@ public class BookArtifactService {
         return versionFile;
     }
 
+    private Path resolveOutlineVersionFile(String projectId, String bookId, String versionId) {
+        if (versionId == null || !versionId.matches(Pattern.quote(bookId) + "_outline_[A-Za-z0-9_-]+")) {
+            throw new IllegalArgumentException("Invalid outline version id: " + versionId);
+        }
+        Path versionsDir = outlineVersionsDir(projectId, bookId).normalize();
+        Path versionFile = versionsDir.resolve(versionId + ".json").normalize();
+        if (!versionFile.startsWith(versionsDir) || !Files.exists(versionFile) || !Files.isRegularFile(versionFile)) {
+            throw new ResourceNotFoundException("Outline version does not exist: " + versionId);
+        }
+        return versionFile;
+    }
+
+    private Path outlineVersionsDir(String projectId, String bookId) {
+        return projectRoot(projectId).resolve("novel").resolve("outline").resolve("versions").resolve(bookId);
+    }
+
     private List<Path> outlineFiles(String projectId) {
         List<Path> files = new ArrayList<>();
         for (Path dir : List.of(
@@ -1624,8 +1762,7 @@ public class BookArtifactService {
             Path sourceFile,
             Map<String, Object> outline,
             String reason) {
-        Path versionsDir = projectRoot(projectId).resolve("novel").resolve("outline").resolve("versions")
-            .resolve(bookId);
+        Path versionsDir = outlineVersionsDir(projectId, bookId);
         String timestamp = LocalDateTime.now().format(SNAPSHOT_TIMESTAMP);
         Path snapshotFile = versionsDir.resolve(bookId + "_outline_" + timestamp + ".json");
         Map<String, Object> snapshot = new LinkedHashMap<>(outline);
@@ -2071,6 +2208,9 @@ public class BookArtifactService {
         outline.remove("project_soul_governance");
         outline.remove("outline_governance");
         outline.remove("chapter_count");
+        outline.remove("archived_at");
+        outline.remove("source_path");
+        outline.remove("archive_reason");
         removeNestedKey(outline, "chapter_count");
     }
 

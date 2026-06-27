@@ -19,6 +19,8 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
     memory_dir.mkdir(parents=True)
     outline_dir = project_root / "novel" / "outline"
     outline_dir.mkdir(parents=True)
+    cross_book_dir = project_root / "analysis" / "cross_book"
+    cross_book_dir.mkdir(parents=True)
     chapter_dir = project_root / "novel" / "chapters" / "drafts" / "default" / "volume_1"
     chapter_dir.mkdir(parents=True)
 
@@ -172,6 +174,16 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
         }, ensure_ascii=False),
         encoding="utf-8",
     )
+    (cross_book_dir / "technique_summary.json").write_text(
+        json.dumps({
+            "scene_techniques": {"钟声压迫": 3},
+            "prose_techniques": {},
+            "outline_techniques": {"以弱破局": 4},
+            "conflict_types": {"external": 2},
+            "appeal_types": {"逆袭": 1},
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
     (chapter_dir / "chapter_1.json").write_text(
         json.dumps({
             "chapter_id": "chapter_1",
@@ -179,7 +191,7 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
             "volume_number": 1,
             "chapter_number": 1,
             "chapter_title": "旧谜入城",
-            "content": "林墨踏入天火城时，玄门试炼的钟声刚刚响起。天火旧谜的纹路在令牌上复现，他意识到玄门试炼并非普通考核。",
+            "content": "林墨踏入天火城时，玄门试炼的钟声刚刚响起。天火旧谜的纹路在令牌上复现，他意识到玄门试炼并非普通考核。钟声压迫让场景更紧。",
             "word_count": 52,
             "quality_score": 82,
             "review_status": "reviewed",
@@ -261,6 +273,19 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
         and edge["edge_type"] == "advances_plot"
         for edge in graph["edges"]
     )
+    technique_nodes = {
+        node["name"]: node
+        for node in graph["nodes"]
+        if node["node_type"] == "technique"
+    }
+    assert technique_nodes["以弱破局"]["properties"]["total_count"] == 4
+    assert technique_nodes["钟声压迫"]["properties"]["categories"] == ["scene"]
+    assert any(
+        edge["source_id"] == "outline_chapter_1_1"
+        and edge["target_id"] == technique_nodes["以弱破局"]["node_id"]
+        and edge["edge_type"] == "uses_technique"
+        for edge in graph["edges"]
+    )
     assert "chapter_content_1_1" in nodes_by_id
     assert nodes_by_id["chapter_content_1_1"]["node_type"] == "chapter_content"
     assert any(
@@ -291,6 +316,12 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
         edge["source_id"] == "chapter_content_1_1"
         and edge["target_id"] == "plot_trial"
         and edge["edge_type"] == "mentions_plot"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["source_id"] == "chapter_content_1_1"
+        and edge["target_id"] == technique_nodes["钟声压迫"]["node_id"]
+        and edge["edge_type"] == "uses_technique"
         for edge in graph["edges"]
     )
 

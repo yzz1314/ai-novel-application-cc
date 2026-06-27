@@ -103,7 +103,8 @@ class GraphBuilderAgent(BaseAgent):
             "suspenses": [],
             "timeline": [],
             "outline": {},
-            "chapters": []
+            "chapters": [],
+            "techniques": []
         }
 
         for memory_type in ["characters", "world_settings", "plots", "suspenses", "timeline"]:
@@ -121,6 +122,7 @@ class GraphBuilderAgent(BaseAgent):
             memories["outline"] = await self._load_outline(build_request)
 
         memories["chapters"] = await self._load_chapters(build_request)
+        memories["techniques"] = await self._load_techniques(build_request)
 
         return memories
 
@@ -242,6 +244,8 @@ class GraphBuilderAgent(BaseAgent):
             )
             graph.nodes.append(node)
             node_by_name[title] = node.node_id
+
+        self._append_technique_nodes(graph, build_request, memories.get("techniques") or [], node_by_name)
 
         if outline:
             self._append_outline_entity_nodes(graph, build_request, outline, node_by_name)
@@ -893,6 +897,23 @@ class GraphBuilderAgent(BaseAgent):
             for key in sorted(chapters_by_key.keys())
         ]
 
+    async def _load_techniques(self, build_request: GraphBuildRequest) -> List[Dict[str, Any]]:
+        project_root = Path(settings.PROJECT_BASE_PATH) / "projects" / build_request.project_id
+        candidates = [
+            project_root / "analysis" / "cross_book" / "technique_summary.json",
+            project_root / "technique_summary.json",
+        ]
+        summary_file = next((path for path in candidates if path.exists()), None)
+        if not summary_file:
+            return []
+        try:
+            with open(summary_file, 'r', encoding='utf-8') as f:
+                summary = json.load(f)
+        except Exception as exc:
+            self.logger.warning(f"Skipping unreadable technique summary {summary_file}: {exc}")
+            return []
+        return self._techniques_from_summary(summary, str(summary_file))
+
     def _node_id(self, prefix: str, name: str) -> str:
         slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "_", str(name)).strip("_")
         if not slug:
@@ -1040,6 +1061,36 @@ class GraphBuilderAgent(BaseAgent):
             graph.nodes.append(node)
             node_by_name[suspense_name] = node.node_id
 
+    def _append_technique_nodes(
+        self,
+        graph: KnowledgeGraph,
+        build_request: GraphBuildRequest,
+        techniques: List[Dict[str, Any]],
+        node_by_name: Dict[str, str]
+    ):
+        if not build_request.include_skills:
+            return
+        for technique in techniques:
+            name = str(technique.get("name") or "").strip()
+            if not name or name in node_by_name:
+                continue
+            node = GraphNode(
+                node_id=technique.get("technique_id") or self._node_id("technique", name),
+                node_type="technique",
+                name=name,
+                properties={
+                    "source": "sample_technique_summary",
+                    "categories": technique.get("categories", []),
+                    "total_count": technique.get("total_count", 0),
+                    "counts_by_category": technique.get("counts_by_category", {}),
+                    "source_path": technique.get("source_path", "")
+                },
+                first_mentioned=1,
+                last_updated=1
+            )
+            graph.nodes.append(node)
+            node_by_name[name] = node.node_id
+
     def _append_outline_edges(
         self,
         graph: KnowledgeGraph,
@@ -1121,6 +1172,11 @@ class GraphBuilderAgent(BaseAgent):
                     if target_id:
                         graph.edges.append(self._edge(chapter_id, target_id, "advances_plot", chapter_number, chapter_number))
 
+                for technique_name in self._match_known_names(chapter, names_by_type.get("technique", set())):
+                    target_id = node_by_name.get(technique_name)
+                    if target_id:
+                        graph.edges.append(self._edge(chapter_id, target_id, "uses_technique", chapter_number, chapter_number))
+
     def _append_chapter_content_edges(
         self,
         graph: KnowledgeGraph,
@@ -1192,6 +1248,11 @@ class GraphBuilderAgent(BaseAgent):
                 if target_id:
                     graph.edges.append(self._edge(chapter_id, target_id, "mentions_plot", chapter_number, chapter_number))
 
+            for technique_name in self._match_known_names(content, names_by_type.get("technique", set())):
+                target_id = node_by_name.get(technique_name)
+                if target_id:
+                    graph.edges.append(self._edge(chapter_id, target_id, "uses_technique", chapter_number, chapter_number))
+
     def _node_names_by_type(self, graph: KnowledgeGraph) -> Dict[str, Set[str]]:
         names_by_type: Dict[str, Set[str]] = defaultdict(set)
         setting_types = {"location", "organization", "item", "skill", "rule", "setting"}
@@ -1217,6 +1278,40 @@ class GraphBuilderAgent(BaseAgent):
             for key in ["new_suspense", "resolved_suspense", "ongoing_suspense"]:
                 names.extend(self._string_values(volume.get(key)))
         return self._unique_non_empty(names)
+
+    def _techniques_from_summary(self, summary: Dict[str, Any], source_path: str) -> List[Dict[str, Any]]:
+        sections = {
+            "scene_techniques": "scene",
+            "prose_techniques": "prose",
+            "outline_techniques": "outline",
+        }
+        by_name: Dict[str, Dict[str, Any]] = {}
+        for section, category in sections.items():
+            values = summary.get(section) or {}
+            if not isinstance(values, dict):
+                continue
+            for name, count in values.items():
+                technique_name = str(name).strip()
+                if not technique_name:
+                    continue
+                item = by_name.setdefault(technique_name, {
+                    "name": technique_name,
+                    "categories": [],
+                    "total_count": 0,
+                    "counts_by_category": {},
+                    "source_path": source_path
+                })
+                item["categories"].append(category)
+                safe_count = self._safe_int(count, 0)
+                item["counts_by_category"][category] = safe_count
+                item["total_count"] += safe_count
+
+        for item in by_name.values():
+            item["categories"] = self._unique_non_empty(item["categories"])
+        return sorted(
+            by_name.values(),
+            key=lambda item: (-self._safe_int(item.get("total_count"), 0), item.get("name", ""))
+        )
 
     def _outline_chapter_node_id(self, volume_number: int, chapter_number: int) -> str:
         return f"outline_chapter_{volume_number}_{chapter_number}"

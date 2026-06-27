@@ -83,6 +83,8 @@ const ChapterWriter: React.FC = () => {
   const [diffModalVisible, setDiffModalVisible] = useState(false);
   const [chapterDiff, setChapterDiff] = useState<any>(null);
   const [diffLoading, setDiffLoading] = useState(false);
+  const [selectedChapterKeys, setSelectedChapterKeys] = useState<React.Key[]>([]);
+  const [selectedChapters, setSelectedChapters] = useState<Chapter[]>([]);
   const [form] = Form.useForm();
   const [revisionForm] = Form.useForm();
   const [reviewForm] = Form.useForm();
@@ -153,6 +155,8 @@ const ChapterWriter: React.FC = () => {
       const data = await chapterApi.getList(projectId, effectiveBookId);
       const packs = await retrievalApi.getContextPacks(projectId).catch(() => []);
       setChapters(data || []);
+      setSelectedChapterKeys([]);
+      setSelectedChapters([]);
       setContextPacks(packs || []);
       await handleChapterDeepLink(data || [], effectiveBookId, packs || []);
     } catch (error) {
@@ -478,6 +482,47 @@ const ChapterWriter: React.FC = () => {
     }
   };
 
+  const canFinalizeChapter = (chapter: Chapter) =>
+    chapter.status === 'completed' && !chapter.isFinal;
+
+  const handleBatchFinalize = async () => {
+    if (!projectId || selectedChapters.length === 0) return;
+
+    const publishable = selectedChapters.filter(canFinalizeChapter);
+    if (publishable.length === 0) {
+      message.warning('请选择可发布的草稿章节');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const bookId = selectedBookId === 'default' ? (books[0]?.bookId || 'default') : selectedBookId;
+      const result: any = await chapterApi.batchFinalize(projectId, bookId, {
+        chapters: publishable.map((chapter) => ({
+          volumeNumber: chapter.volumeNumber,
+          chapterNumber: chapter.chapterNumber,
+        })),
+        triggerMemoryExtraction: true,
+        overwrite: true,
+        createVersionSnapshot: true,
+        continueOnError: true,
+        skipFinal: true,
+        finalizer: 'human',
+        finalizeNote: '前端批量发布终稿',
+      });
+      message.success(
+        `批量发布完成：成功 ${result?.finalizedCount || 0}，跳过 ${result?.skippedCount || 0}，失败 ${result?.failedCount || 0}`
+      );
+      setSelectedChapterKeys([]);
+      setSelectedChapters([]);
+      await loadChapters();
+    } catch (error) {
+      message.error('批量发布终稿失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const columns = [
     {
       title: '卷号',
@@ -634,12 +679,31 @@ const ChapterWriter: React.FC = () => {
     },
   ];
 
+  const selectedPublishableCount = selectedChapters.filter(canFinalizeChapter).length;
+
   return (
     <div>
       <Card
         title="章节创作"
         extra={
           <Space>
+            <Popconfirm
+              title="批量发布终稿"
+              description={`将发布 ${selectedPublishableCount} 个可发布草稿章节，已终稿或不可发布章节会被忽略。`}
+              okText="发布"
+              cancelText="取消"
+              onConfirm={handleBatchFinalize}
+              disabled={selectedPublishableCount === 0}
+            >
+              <Button
+                icon={<SendOutlined />}
+                disabled={selectedPublishableCount === 0}
+                loading={loading}
+              >
+                批量发布终稿
+                {selectedPublishableCount > 0 ? ` (${selectedPublishableCount})` : ''}
+              </Button>
+            </Popconfirm>
             {books.length > 0 && (
               <Select
                 value={selectedBookId}
@@ -670,6 +734,16 @@ const ChapterWriter: React.FC = () => {
             dataSource={chapters}
             loading={loading}
             rowKey="id"
+            rowSelection={{
+              selectedRowKeys: selectedChapterKeys,
+              onChange: (keys, rows) => {
+                setSelectedChapterKeys(keys);
+                setSelectedChapters(rows as Chapter[]);
+              },
+              getCheckboxProps: (record: Chapter) => ({
+                disabled: !canFinalizeChapter(record),
+              }),
+            }}
           />
         )}
       </Card>

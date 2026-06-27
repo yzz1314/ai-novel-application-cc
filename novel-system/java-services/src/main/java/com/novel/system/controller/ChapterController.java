@@ -96,6 +96,17 @@ public class ChapterController {
     /**
      * 文档中的简写章节人工审查入口：默认使用最新书籍、第1卷。
      */
+    @PostMapping("/api/projects/{projectId}/chapters/finalize")
+    public ResponseEntity<Map<String, Object>> finalizeDefaultChapters(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.finalizeChapters(
+            projectId,
+            "default",
+            request
+        ));
+    }
+
     @PostMapping("/api/projects/{projectId}/chapters/{chapterNumber}/review")
     public ResponseEntity<Map<String, Object>> reviewDefaultChapter(
             @PathVariable String projectId,

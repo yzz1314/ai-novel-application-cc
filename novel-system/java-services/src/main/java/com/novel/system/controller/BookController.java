@@ -178,6 +178,18 @@ public class BookController {
         return ResponseEntity.ok(chapterArtifactService.syncChaptersFromWorkspace(projectId, bookId));
     }
 
+    @PostMapping("/{bookId}/chapters/finalize")
+    public ResponseEntity<Map<String, Object>> finalizeChapters(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.finalizeChapters(
+            projectId,
+            bookId,
+            request
+        ));
+    }
+
     @GetMapping("/{bookId}/chapters/{volumeNumber}/{chapterNumber}")
     public ResponseEntity<Map<String, Object>> getChapter(
             @PathVariable String projectId,

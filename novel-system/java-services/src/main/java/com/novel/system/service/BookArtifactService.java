@@ -31,6 +31,7 @@ public class BookArtifactService {
     private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9_-]+$");
     private static final DateTimeFormatter SNAPSHOT_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
     private record ChapterComparison(String kind, String stage, String versionId, Path path, Map<String, Object> chapter) {}
+    private record ChapterTarget(int volumeNumber, int chapterNumber) {}
 
     private final ProjectService projectService;
     private final TaskExecutorService taskExecutorService;
@@ -650,6 +651,105 @@ public class BookArtifactService {
         response.put("memoryTaskId", memoryTask != null ? memoryTask.getId() : null);
         response.put("memoryTaskStatus", memoryTask != null ? memoryTask.getStatus().name() : null);
         response.put("finalizedAt", finalizedAt);
+        return response;
+    }
+
+    public Map<String, Object> finalizeChapters(
+            String projectId,
+            String bookId,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        List<ChapterTarget> targets = resolveBatchFinalizeTargets(options);
+        if (targets.isEmpty()) {
+            throw new IllegalArgumentException("chapters or a valid chapter range is required");
+        }
+
+        boolean continueOnError = booleanOption(options, "continueOnError", true);
+        boolean skipFinal = booleanOption(options, "skipFinal", true);
+        Map<String, Object> singleOptions = new LinkedHashMap<>(options);
+        singleOptions.remove("chapters");
+        singleOptions.remove("chapterNumbers");
+        singleOptions.remove("range");
+        singleOptions.remove("volumeNumber");
+        singleOptions.remove("volume_number");
+        singleOptions.remove("fromChapter");
+        singleOptions.remove("from_chapter");
+        singleOptions.remove("toChapter");
+        singleOptions.remove("to_chapter");
+        singleOptions.remove("continueOnError");
+        singleOptions.remove("continue_on_error");
+        singleOptions.remove("skipFinal");
+        singleOptions.remove("skip_final");
+        singleOptions.putIfAbsent("finalizer", stringValue(valueOf(options, "finalizer", "finalizer"), "batch"));
+        singleOptions.putIfAbsent("finalizeNote", stringValue(valueOf(options, "finalize_note", "finalizeNote"), "batch finalize"));
+
+        List<Map<String, Object>> results = new ArrayList<>();
+        for (ChapterTarget target : targets) {
+            Path finalFile = finalChapterFile(projectId, resolvedBookId, target.volumeNumber(), target.chapterNumber());
+            if (skipFinal && Files.exists(finalFile)) {
+                Map<String, Object> skipped = batchFinalizeResult(target, "skipped");
+                skipped.put("reason", "already_finalized");
+                skipped.put("finalPath", relative(projectId, finalFile));
+                results.add(skipped);
+                continue;
+            }
+
+            try {
+                Map<String, Object> finalized = finalizeChapter(
+                    projectId,
+                    resolvedBookId,
+                    target.volumeNumber(),
+                    target.chapterNumber(),
+                    singleOptions
+                );
+                Map<String, Object> item = batchFinalizeResult(target, "finalized");
+                item.put("finalPath", finalized.get("finalPath"));
+                item.put("sourceDraftPath", finalized.get("sourceDraftPath"));
+                item.put("previousFinalSnapshotPath", finalized.get("previousFinalSnapshotPath"));
+                item.put("reportPath", finalized.get("reportPath"));
+                item.put("versionBefore", finalized.get("versionBefore"));
+                item.put("versionAfter", finalized.get("versionAfter"));
+                item.put("memoryTaskId", finalized.get("memoryTaskId"));
+                item.put("memoryTaskStatus", finalized.get("memoryTaskStatus"));
+                item.put("finalizedAt", finalized.get("finalizedAt"));
+                results.add(item);
+            } catch (RuntimeException e) {
+                Map<String, Object> failed = batchFinalizeResult(target, "failed");
+                failed.put("error", e.getMessage());
+                results.add(failed);
+                if (!continueOnError) {
+                    break;
+                }
+            }
+        }
+
+        long finalizedCount = results.stream().filter(item -> "finalized".equals(item.get("status"))).count();
+        long skippedCount = results.stream().filter(item -> "skipped".equals(item.get("status"))).count();
+        long failedCount = results.stream().filter(item -> "failed".equals(item.get("status"))).count();
+        Path reportPath = writeBatchFinalizeReport(
+            projectId,
+            resolvedBookId,
+            options,
+            results,
+            finalizedCount,
+            skippedCount,
+            failedCount
+        );
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("bookId", resolvedBookId);
+        response.put("requestedCount", targets.size());
+        response.put("finalizedCount", finalizedCount);
+        response.put("skippedCount", skippedCount);
+        response.put("failedCount", failedCount);
+        response.put("continueOnError", continueOnError);
+        response.put("skipFinal", skipFinal);
+        response.put("reportPath", relative(projectId, reportPath));
+        response.put("results", results);
+        response.put("createdAt", LocalDateTime.now().toString());
         return response;
     }
 
@@ -1631,6 +1731,106 @@ public class BookArtifactService {
         report.put("finalized_at", valueOf(after, "finalized_at", "finalizedAt"));
         writeJson(reportFile, report);
         return reportFile;
+    }
+
+    private Path writeBatchFinalizeReport(
+            String projectId,
+            String bookId,
+            Map<String, Object> options,
+            List<Map<String, Object>> results,
+            long finalizedCount,
+            long skippedCount,
+            long failedCount) {
+        Path reviewsDir = projectRoot(projectId).resolve("novel").resolve("reviews")
+            .resolve(bookId).resolve("batch");
+        String timestamp = LocalDateTime.now().format(SNAPSHOT_TIMESTAMP);
+        Path reportFile = reviewsDir.resolve("chapter_batch_finalize_" + timestamp + ".json");
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("review_type", "chapter_batch_finalize");
+        report.put("book_id", bookId);
+        report.put("created_at", LocalDateTime.now().toString());
+        report.put("finalizer", stringValue(valueOf(options, "finalizer", "finalizer"), "batch"));
+        report.put("finalize_note", stringValue(valueOf(options, "finalize_note", "finalizeNote"), ""));
+        report.put("requested_count", results.size());
+        report.put("finalized_count", finalizedCount);
+        report.put("skipped_count", skippedCount);
+        report.put("failed_count", failedCount);
+        report.put("results", results);
+        writeJson(reportFile, report);
+        return reportFile;
+    }
+
+    private List<ChapterTarget> resolveBatchFinalizeTargets(Map<String, Object> options) {
+        List<ChapterTarget> targets = new ArrayList<>();
+        Object chaptersValue = valueOf(options, "chapters", "chapters");
+        if (chaptersValue instanceof List<?> chapters) {
+            for (Object chapterValue : chapters) {
+                if (chapterValue instanceof Map<?, ?> rawMap) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> chapter = (Map<String, Object>) rawMap;
+                    int volume = intValue(valueOf(chapter, "volume_number", "volumeNumber"));
+                    int chapterNumber = intValue(valueOf(chapter, "chapter_number", "chapterNumber"));
+                    addBatchFinalizeTarget(targets, volume, chapterNumber);
+                } else {
+                    int volume = intOption(options, "volumeNumber", 1);
+                    addBatchFinalizeTarget(targets, volume, intValue(chapterValue));
+                }
+            }
+        }
+
+        Object chapterNumbersValue = valueOf(options, "chapter_numbers", "chapterNumbers");
+        if (chapterNumbersValue instanceof List<?> chapterNumbers) {
+            int volume = intOption(options, "volumeNumber", 1);
+            for (Object chapterNumber : chapterNumbers) {
+                addBatchFinalizeTarget(targets, volume, intValue(chapterNumber));
+            }
+        }
+
+        int fromChapter = intOption(options, "fromChapter", 0);
+        int toChapter = intOption(options, "toChapter", 0);
+        if (fromChapter > 0 && toChapter >= fromChapter) {
+            int volume = intOption(options, "volumeNumber", 1);
+            for (int chapterNumber = fromChapter; chapterNumber <= toChapter; chapterNumber += 1) {
+                addBatchFinalizeTarget(targets, volume, chapterNumber);
+            }
+        }
+
+        Object rangeValue = valueOf(options, "range", "range");
+        if (rangeValue instanceof Map<?, ?> rawRange) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> range = (Map<String, Object>) rawRange;
+            int volume = intValue(valueOf(range, "volume_number", "volumeNumber"));
+            if (volume < 1) {
+                volume = intOption(options, "volumeNumber", 1);
+            }
+            int start = intValue(valueOf(range, "from_chapter", "fromChapter"));
+            int end = intValue(valueOf(range, "to_chapter", "toChapter"));
+            if (start > 0 && end >= start) {
+                for (int chapterNumber = start; chapterNumber <= end; chapterNumber += 1) {
+                    addBatchFinalizeTarget(targets, volume, chapterNumber);
+                }
+            }
+        }
+
+        return targets;
+    }
+
+    private void addBatchFinalizeTarget(List<ChapterTarget> targets, int volumeNumber, int chapterNumber) {
+        if (volumeNumber < 1 || chapterNumber < 1) {
+            return;
+        }
+        ChapterTarget target = new ChapterTarget(volumeNumber, chapterNumber);
+        if (!targets.contains(target)) {
+            targets.add(target);
+        }
+    }
+
+    private Map<String, Object> batchFinalizeResult(ChapterTarget target, String status) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("volumeNumber", target.volumeNumber());
+        item.put("chapterNumber", target.chapterNumber());
+        item.put("status", status);
+        return item;
     }
 
     private Path writeHumanReviewReport(

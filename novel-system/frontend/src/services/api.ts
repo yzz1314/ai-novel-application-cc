@@ -181,6 +181,13 @@ export const chapterApi = {
         data || {}
       )
     ),
+  batchFinalize: (projectId: string, bookId: string, data?: any) =>
+    request(
+      api.post(
+        `/projects/${projectId}/books/${bookId}/chapters/finalize`,
+        data || {}
+      )
+    ),
   revise: (
     projectId: string,
     bookId: string,

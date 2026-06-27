@@ -352,6 +352,75 @@ class BookArtifactServiceTest {
             .containsEntry("changedLines", 1L);
     }
 
+    @Test
+    void batchFinalizeChaptersSkipsExistingFinalAndContinuesFailures() throws Exception {
+        writeChapterFile("novel/chapters/drafts/book_1/volume_1/chapter_1.json", """
+            {
+              "book_id": "book_1",
+              "volume_number": 1,
+              "chapter_number": 1,
+              "chapter_id": "chapter_1",
+              "chapter_title": "Draft One",
+              "stage": "draft",
+              "version": 1,
+              "word_count": 9,
+              "content": "chapter one"
+            }
+            """);
+        writeChapterFile("novel/chapters/final/book_1/volume_1/chapter_2.json", """
+            {
+              "book_id": "book_1",
+              "volume_number": 1,
+              "chapter_number": 2,
+              "chapter_id": "chapter_2",
+              "chapter_title": "Final Two",
+              "stage": "final",
+              "version": 2,
+              "word_count": 9,
+              "content": "chapter two"
+            }
+            """);
+        when(chapterArtifactService.syncChapterFromWorkspace(eq(PROJECT_ID), eq(BOOK_ID), eq(1), eq(1), eq("final")))
+            .thenReturn(Map.of("status", "synced"));
+
+        Map<String, Object> response = bookArtifactService.finalizeChapters(
+            PROJECT_ID,
+            BOOK_ID,
+            Map.of(
+                "chapters",
+                List.of(
+                    Map.of("volumeNumber", 1, "chapterNumber", 1),
+                    Map.of("volumeNumber", 1, "chapterNumber", 2),
+                    Map.of("volumeNumber", 1, "chapterNumber", 3)
+                ),
+                "triggerMemoryExtraction", false,
+                "continueOnError", true,
+                "skipFinal", true,
+                "finalizer", "batch-test",
+                "finalizeNote", "batch publish"
+            )
+        );
+
+        assertThat(response)
+            .containsEntry("requestedCount", 3)
+            .containsEntry("finalizedCount", 1L)
+            .containsEntry("skippedCount", 1L)
+            .containsEntry("failedCount", 1L);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> results = (List<Map<String, Object>>) response.get("results");
+        assertThat(results).extracting(item -> item.get("status"))
+            .containsExactly("finalized", "skipped", "failed");
+        assertThat(Files.exists(projectRoot().resolve("novel/chapters/final/book_1/volume_1/chapter_1.json"))).isTrue();
+        assertThat(String.valueOf(response.get("reportPath"))).startsWith("novel/reviews/book_1/batch/chapter_batch_finalize_");
+        String report = Files.readString(projectRoot().resolve(String.valueOf(response.get("reportPath"))));
+        assertThat(report)
+            .contains("\"review_type\" : \"chapter_batch_finalize\"")
+            .contains("\"finalized_count\" : 1")
+            .contains("\"skipped_count\" : 1")
+            .contains("\"failed_count\" : 1");
+    }
+
     private Path projectRoot() {
         return tempDir.resolve("projects").resolve(PROJECT_ID);
     }

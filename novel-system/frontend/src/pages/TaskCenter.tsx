@@ -33,7 +33,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { taskApi } from '../services/api'
+import { apiUrl, taskApi } from '../services/api'
 
 const { Paragraph, Text, Title } = Typography
 
@@ -100,10 +100,49 @@ const TaskCenter: React.FC = () => {
   const [approvalTask, setApprovalTask] = useState<any>(null)
   const [approvalDecision, setApprovalDecision] = useState<'approve' | 'reject'>('approve')
   const [approvalSubmitting, setApprovalSubmitting] = useState(false)
+  const [logStreamStatus, setLogStreamStatus] = useState<'idle' | 'connecting' | 'live' | 'closed' | 'error'>('idle')
 
   useEffect(() => {
     loadTasks()
   }, [])
+
+  useEffect(() => {
+    const taskId = taskIdentity(taskDrawer)
+    if (!taskId) {
+      setLogStreamStatus('idle')
+      return
+    }
+    if (typeof EventSource === 'undefined') {
+      setLogStreamStatus('error')
+      return
+    }
+
+    setLogStreamStatus('connecting')
+    const source = new EventSource(apiUrl(`/tasks/${taskId}/logs/stream?tailLines=120`))
+    const applySnapshot = (event: MessageEvent) => {
+      const next = JSON.parse(event.data)
+      setTaskDrawer(next)
+      setTasks((current) => current.map((task) => (
+        taskIdentity(task) === taskId ? { ...task, ...next, id: taskId } : task
+      )))
+      setLogStreamStatus('live')
+    }
+    source.addEventListener('snapshot', applySnapshot)
+    source.addEventListener('complete', (event) => {
+      applySnapshot(event as MessageEvent)
+      setLogStreamStatus('closed')
+      source.close()
+    })
+    source.onerror = () => {
+      setLogStreamStatus('error')
+      source.close()
+    }
+
+    return () => {
+      source.close()
+      setLogStreamStatus('idle')
+    }
+  }, [taskDrawer?.taskId])
 
   const stats = useMemo(() => {
     const counts = statusOptions.reduce((acc: any, status) => {
@@ -472,6 +511,24 @@ const TaskCenter: React.FC = () => {
 
       <Drawer
         title={taskDrawer?.taskId || '任务详情'}
+        extra={
+          <Tag color={
+            logStreamStatus === 'live' ? 'success'
+              : logStreamStatus === 'connecting' ? 'processing'
+                : logStreamStatus === 'error' ? 'error'
+                  : 'default'
+          }>
+            {logStreamStatus === 'live'
+              ? '实时日志'
+              : logStreamStatus === 'connecting'
+                ? '连接中'
+                : logStreamStatus === 'closed'
+                  ? '日志已结束'
+                  : logStreamStatus === 'error'
+                    ? '实时连接断开'
+                    : '未连接'}
+          </Tag>
+        }
         width={920}
         open={!!taskDrawer}
         onClose={() => setTaskDrawer(null)}

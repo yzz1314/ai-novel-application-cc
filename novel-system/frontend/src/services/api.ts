@@ -6,6 +6,9 @@ const api = axios.create({
   timeout: 60000,
 })
 
+export const apiBaseUrl = api.defaults.baseURL || '/api'
+export const apiUrl = (path: string) => `${apiBaseUrl.replace(/\/$/, '')}${path.startsWith('/') ? path : `/${path}`}`
+
 api.interceptors.response.use(
   (response) => response.data,
   (error) => {

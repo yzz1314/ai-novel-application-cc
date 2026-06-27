@@ -5,8 +5,12 @@ import com.novel.system.entity.Task;
 import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.service.TaskExecutorService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -100,5 +104,48 @@ public class TaskController {
             @PathVariable String taskId,
             @RequestParam(defaultValue = "80") int tailLines) {
         return ResponseEntity.ok(taskExecutorService.getTaskLogs(taskId, tailLines));
+    }
+
+    @GetMapping(value = "/{taskId}/logs/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamTaskLogs(
+            @PathVariable String taskId,
+            @RequestParam(defaultValue = "80") int tailLines) {
+        SseEmitter emitter = new SseEmitter(5 * 60 * 1000L);
+        Thread streamThread = new Thread(() -> streamTaskLogSnapshots(emitter, taskId, tailLines));
+        streamThread.setName("task-log-stream-" + taskId);
+        streamThread.setDaemon(true);
+        streamThread.start();
+        return emitter;
+    }
+
+    private void streamTaskLogSnapshots(SseEmitter emitter, String taskId, int tailLines) {
+        try {
+            while (true) {
+                Map<String, Object> logs = taskExecutorService.getTaskLogs(taskId, tailLines);
+                emitter.send(SseEmitter.event().name("snapshot").data(logs));
+                if (isTerminalStatus(logs.get("status"))) {
+                    emitter.send(SseEmitter.event().name("complete").data(logs));
+                    emitter.complete();
+                    return;
+                }
+                Thread.sleep(1000L);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            emitter.complete();
+        } catch (IOException e) {
+            emitter.completeWithError(e);
+        } catch (Exception e) {
+            try {
+                emitter.send(SseEmitter.event().name("error").data(Map.of("message", e.getMessage())));
+            } catch (IOException ignored) {
+                // Client disconnected before the error event could be delivered.
+            }
+            emitter.completeWithError(e);
+        }
+    }
+
+    private boolean isTerminalStatus(Object status) {
+        return status != null && List.of("SUCCESS", "FAILED", "CANCELLED").contains(status.toString());
     }
 }

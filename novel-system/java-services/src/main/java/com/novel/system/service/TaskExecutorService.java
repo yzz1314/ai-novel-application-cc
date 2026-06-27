@@ -35,6 +35,11 @@ public class TaskExecutorService {
 
     private static final int MAX_TASK_EVENTS = 200;
     private static final String TASK_EVENT_LOG = "logs/task_events.jsonl";
+    private static final int DEFAULT_MAX_RETRIES = 3;
+    private static final int MAX_CONFIGURABLE_RETRIES = 10;
+    private static final long DEFAULT_RETRY_INITIAL_DELAY_MS = 2_000L;
+    private static final long DEFAULT_RETRY_MAX_DELAY_MS = 10_000L;
+    private static final double DEFAULT_RETRY_MULTIPLIER = 2.0d;
 
     private final TaskRepository taskRepository;
     private final PythonClientService pythonClientService;
@@ -75,11 +80,14 @@ public class TaskExecutorService {
         task.setInputRefs(inputRefs);
         task.setParameters(resolvedParameters);
         task.setStatus(TaskStatus.PENDING);
+        task.setRetryCount(0);
+        task.setMaxRetries(resolveMaxRetries(resolvedParameters));
 
         Task saved = taskRepository.save(task);
         appendTaskEvent(saved, "created", Map.of(
             "inputRefs", inputRefs != null ? inputRefs : Map.of(),
-            "parameters", resolvedParameters
+            "parameters", resolvedParameters,
+            "retryPolicy", retryPolicyDetails(saved, 0)
         ));
         return saved;
     }
@@ -135,7 +143,7 @@ public class TaskExecutorService {
             task.setResult(asJsonMap(response.get("structured_output")));
             task.setErrors(asJsonMap(response.get("errors")));
             task.setWarnings(asJsonMap(response.get("warnings")));
-            task.setMetrics(asJsonMap(response.get("metrics")));
+            task.setMetrics(mergeMetrics(task.getMetrics(), asJsonMap(response.get("metrics"))));
             task.setCheckpointRef((String) response.get("checkpoint_ref"));
             task.setFinishedAt(LocalDateTime.now());
 
@@ -176,13 +184,21 @@ public class TaskExecutorService {
             ));
 
             // 检查是否需要重试
-            if (task.getRetryCount() < task.getMaxRetries() && isRetryable(e)) {
-                task.setRetryCount(task.getRetryCount() + 1);
+            if (canAutoRetry(task, e)) {
+                int nextRetryCount = safeInt(task.getRetryCount()) + 1;
+                Map<String, Object> retryPolicy = retryPolicyDetails(task, nextRetryCount);
+                task.setRetryCount(nextRetryCount);
                 task.setStatus(TaskStatus.PENDING);
+                task.setMetrics(mergeMetrics(task.getMetrics(), Map.of("retry_policy", retryPolicy)));
                 taskRepository.save(task);
-                appendTaskEvent(task, "auto_retry_scheduled", Map.of("retryCount", task.getRetryCount()));
+                appendTaskEvent(task, "auto_retry_scheduled", retryPolicy);
 
-                log.info("Retrying task: {} (attempt {})", taskId, task.getRetryCount());
+                log.info(
+                    "Retrying task: {} (attempt {}, planned delay {} ms)",
+                    taskId,
+                    task.getRetryCount(),
+                    retryPolicy.get("delayMs")
+                );
                 return executeTaskAsync(taskId);
             }
         }
@@ -197,6 +213,113 @@ public class TaskExecutorService {
                e instanceof java.net.ConnectException ||
                message.contains("rate limit") ||
                message.contains("timeout");
+    }
+
+    private boolean canAutoRetry(Task task, Exception e) {
+        return safeInt(task.getRetryCount()) < resolveMaxRetries(task) && isRetryable(e);
+    }
+
+    private int resolveMaxRetries(Task task) {
+        return task.getMaxRetries() != null ? clamp(task.getMaxRetries(), 0, MAX_CONFIGURABLE_RETRIES) : DEFAULT_MAX_RETRIES;
+    }
+
+    @SuppressWarnings("unchecked")
+    private int resolveMaxRetries(Map<String, Object> parameters) {
+        Object retryPolicy = parameters != null ? parameters.get("retry_policy") : null;
+        if (retryPolicy instanceof Map<?, ?> policyMap && policyMap.get("max_retries") != null) {
+            return clamp(toInteger(policyMap.get("max_retries")), 0, MAX_CONFIGURABLE_RETRIES, DEFAULT_MAX_RETRIES);
+        }
+        if (retryPolicy instanceof Map<?, ?> policyMap && policyMap.get("maxRetries") != null) {
+            return clamp(toInteger(policyMap.get("maxRetries")), 0, MAX_CONFIGURABLE_RETRIES, DEFAULT_MAX_RETRIES);
+        }
+        Object maxRetries = parameters != null ? firstValue(parameters, "max_retries", "maxRetries") : null;
+        Integer parsed = toInteger(maxRetries);
+        return parsed != null ? clamp(parsed, 0, MAX_CONFIGURABLE_RETRIES) : DEFAULT_MAX_RETRIES;
+    }
+
+    private Map<String, Object> retryPolicyDetails(Task task, int nextRetryCount) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        int maxRetries = resolveMaxRetries(task);
+        long delayMs = retryDelayMs(task.getParameters(), nextRetryCount);
+        details.put("retryCount", nextRetryCount);
+        details.put("maxRetries", maxRetries);
+        details.put("remainingRetries", Math.max(0, maxRetries - nextRetryCount));
+        details.put("delayMs", delayMs);
+        details.put("delaySeconds", delayMs / 1000.0d);
+        details.put("initialDelayMs", retryInitialDelayMs(task.getParameters()));
+        details.put("maxDelayMs", retryMaxDelayMs(task.getParameters()));
+        details.put("multiplier", retryMultiplier(task.getParameters()));
+        return details;
+    }
+
+    private long retryDelayMs(Map<String, Object> parameters, int nextRetryCount) {
+        if (nextRetryCount <= 0) {
+            return 0L;
+        }
+        long initial = retryInitialDelayMs(parameters);
+        long max = retryMaxDelayMs(parameters);
+        double multiplier = retryMultiplier(parameters);
+        double computed = initial * Math.pow(multiplier, Math.max(0, nextRetryCount - 1));
+        return Math.min(max, Math.max(0L, Math.round(computed)));
+    }
+
+    private long retryInitialDelayMs(Map<String, Object> parameters) {
+        Long parsed = retryLong(parameters, "initial_delay_ms", "initialDelayMs", "delay_ms", "delayMs");
+        return parsed != null ? clamp(parsed, 0L, 300_000L) : DEFAULT_RETRY_INITIAL_DELAY_MS;
+    }
+
+    private long retryMaxDelayMs(Map<String, Object> parameters) {
+        Long parsed = retryLong(parameters, "max_delay_ms", "maxDelayMs");
+        return parsed != null ? clamp(parsed, 0L, 600_000L) : DEFAULT_RETRY_MAX_DELAY_MS;
+    }
+
+    private double retryMultiplier(Map<String, Object> parameters) {
+        Object value = retryPolicyValue(parameters, "multiplier");
+        if (value == null) {
+            value = retryPolicyValue(parameters, "backoff_multiplier");
+        }
+        if (value == null) {
+            value = retryPolicyValue(parameters, "backoffMultiplier");
+        }
+        if (value instanceof Number number) {
+            return clamp(number.doubleValue(), 1.0d, 10.0d);
+        }
+        if (value != null) {
+            try {
+                return clamp(Double.parseDouble(value.toString()), 1.0d, 10.0d);
+            } catch (NumberFormatException ignored) {
+                return DEFAULT_RETRY_MULTIPLIER;
+            }
+        }
+        return DEFAULT_RETRY_MULTIPLIER;
+    }
+
+    private Long retryLong(Map<String, Object> parameters, String... keys) {
+        Object value = retryPolicyValue(parameters, keys);
+        Integer parsed = toInteger(value);
+        return parsed != null ? parsed.longValue() : null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object retryPolicyValue(Map<String, Object> parameters, String... keys) {
+        if (parameters == null) {
+            return null;
+        }
+        Object retryPolicy = parameters.get("retry_policy");
+        if (retryPolicy instanceof Map<?, ?> policyMap) {
+            for (String key : keys) {
+                if (policyMap.containsKey(key)) {
+                    return policyMap.get(key);
+                }
+            }
+        }
+        return firstValue(parameters, keys);
+    }
+
+    private Map<String, Object> mergeMetrics(Map<String, Object> metrics, Map<String, Object> updates) {
+        Map<String, Object> merged = metrics != null ? new LinkedHashMap<>(metrics) : new LinkedHashMap<>();
+        merged.putAll(updates);
+        return merged;
     }
 
     private void handleSuccessfulTaskSideEffects(Task task) {
@@ -593,6 +716,7 @@ public class TaskExecutorService {
         logs.put("progress", getTaskProgress(task));
         logs.put("checkpointRef", task.getCheckpointRef());
         logs.put("retryCount", task.getRetryCount());
+        logs.put("maxRetries", task.getMaxRetries());
         logs.put("createdAt", task.getCreatedAt());
         logs.put("startedAt", task.getStartedAt());
         logs.put("finishedAt", task.getFinishedAt());
@@ -626,6 +750,26 @@ public class TaskExecutorService {
         } catch (Exception e) {
             log.warn("Failed to append task event for task {}: {}", task.getId(), e.getMessage(), e);
         }
+    }
+
+    private int safeInt(Integer value) {
+        return value != null ? value : 0;
+    }
+
+    private int clamp(Integer value, int min, int max, int fallback) {
+        return value != null ? clamp(value, min, max) : fallback;
+    }
+
+    private int clamp(int value, int min, int max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private long clamp(long value, long min, long max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    private double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     private List<Map<String, Object>> readTaskEvents(Task task) {

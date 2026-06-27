@@ -86,6 +86,7 @@ const isWaitingForHuman = (task: any) =>
   task?.status === 'PARTIAL' && !!task?.result?.waiting_for_human?.node_id
 
 const taskIdentity = (task: any) => task?.id || task?.taskId
+const retryPolicy = (task: any) => task?.metrics?.retry_policy || task?.metrics?.retryPolicy || {}
 
 const TaskCenter: React.FC = () => {
   const navigate = useNavigate()
@@ -290,7 +291,19 @@ const TaskCenter: React.FC = () => {
       title: '重试',
       dataIndex: 'retryCount',
       key: 'retryCount',
-      width: 80,
+      width: 130,
+      render: (_: any, record: any) => {
+        const policy = retryPolicy(record)
+        const maxRetries = record.maxRetries ?? policy.maxRetries ?? '-'
+        return (
+          <Space direction="vertical" size={0}>
+            <Text>{record.retryCount ?? 0}/{maxRetries}</Text>
+            {policy.delaySeconds ? (
+              <Text type="secondary">{policy.delaySeconds}s 退避</Text>
+            ) : null}
+          </Space>
+        )
+      },
     },
     {
       title: '创建时间',
@@ -470,6 +483,12 @@ const TaskCenter: React.FC = () => {
               <Descriptions.Item label="任务类型">{taskDrawer.taskType}</Descriptions.Item>
               <Descriptions.Item label="Agent">{taskDrawer.agentName}</Descriptions.Item>
               <Descriptions.Item label="Checkpoint" span={2}>{taskDrawer.checkpointRef || '-'}</Descriptions.Item>
+              <Descriptions.Item label="重试策略">
+                {(taskDrawer.retryCount ?? 0)}/{taskDrawer.maxRetries ?? retryPolicy(taskDrawer).maxRetries ?? '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="下次退避">
+                {retryPolicy(taskDrawer).delaySeconds ? `${retryPolicy(taskDrawer).delaySeconds}s` : '-'}
+              </Descriptions.Item>
               <Descriptions.Item label="Progress" span={2}>
                 <Space direction="vertical" size={2} style={{ width: '100%' }}>
                   <Progress percent={taskPercent(taskDrawer)} size="small" />

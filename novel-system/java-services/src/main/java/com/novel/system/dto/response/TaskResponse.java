@@ -22,6 +22,7 @@ public class TaskResponse {
     private Map<String, Object> progress;
     private String checkpointRef;
     private Integer retryCount;
+    private Integer maxRetries;
     private LocalDateTime createdAt;
     private LocalDateTime startedAt;
     private LocalDateTime finishedAt;
@@ -42,6 +43,7 @@ public class TaskResponse {
         response.setProgress(null);
         response.setCheckpointRef(task.getCheckpointRef());
         response.setRetryCount(task.getRetryCount());
+        response.setMaxRetries(task.getMaxRetries());
         response.setCreatedAt(task.getCreatedAt());
         response.setStartedAt(task.getStartedAt());
         response.setFinishedAt(task.getFinishedAt());

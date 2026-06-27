@@ -20,6 +20,8 @@ test('renders global workbench pages with mocked backend data', async ({ page })
   await page.goto('/tasks')
   await expect(page.getByRole('heading', { name: '任务中心' })).toBeVisible()
   await expect(page.getByText('task-retrieval')).toBeVisible()
+  await expect(page.getByText('1/3')).toBeVisible()
+  await expect(page.getByText('2s 退避')).toBeVisible()
 
   await page.goto('/models')
   await expect(page.getByRole('heading', { name: '模型配置' })).toBeVisible()
@@ -123,10 +125,15 @@ function taskFixtures() {
       taskType: 'retrieval_index',
       agentName: 'retrieval_index',
       status: 'SUCCESS',
-      retryCount: 0,
+      retryCount: 1,
+      maxRetries: 3,
       createdAt: '2026-06-26T10:20:00',
       finishedAt: '2026-06-26T10:21:00',
-      metrics: { duration_ms: 1234, model_profile_id: 'mock-default' },
+      metrics: {
+        duration_ms: 1234,
+        model_profile_id: 'mock-default',
+        retry_policy: { retryCount: 1, maxRetries: 3, delaySeconds: 2 },
+      },
       progress: { percent: 100, label: 'complete' },
     },
     {
@@ -136,6 +143,7 @@ function taskFixtures() {
       agentName: 'workflow',
       status: 'PARTIAL',
       retryCount: 0,
+      maxRetries: 3,
       createdAt: '2026-06-26T10:10:00',
       checkpointRef: 'checkpoint/workflow.json',
       result: {

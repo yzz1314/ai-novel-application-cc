@@ -262,6 +262,45 @@ class TaskExecutorServiceCancellationTest {
             .contains("manual_retry_requested", "finished");
     }
 
+    @Test
+    void getTaskProgressDiscoversLatestCheckpointWhenTaskRefIsEmpty() throws Exception {
+        Task task = task("task_import_progress", TaskStatus.RUNNING);
+        task.setTaskType("sample_import");
+        Path checkpointDir = tempDir
+            .resolve("projects")
+            .resolve(task.getProjectId())
+            .resolve("checkpoints");
+        Files.createDirectories(checkpointDir);
+        Path checkpointPath = checkpointDir.resolve("task_import_progress_sample_import_latest.json");
+        Files.writeString(checkpointPath, """
+            {
+              "task_id": "task_import_progress",
+              "project_id": "project_cancel_test",
+              "state": {
+                "task_type": "sample_import",
+                "stage": "save_chunks",
+                "stage_label": "Save chunks",
+                "total_steps": 8,
+                "processed_steps": 6,
+                "progress_unit": "steps"
+              }
+            }
+            """);
+
+        Map<String, Object> progress = taskExecutorService.getTaskProgress(task);
+
+        assertThat(progress)
+            .containsEntry("source", "checkpoint")
+            .containsEntry("percent", 75)
+            .containsEntry("processed", 6)
+            .containsEntry("total", 8)
+            .containsEntry("stage", "save_chunks")
+            .containsEntry("stageLabel", "Save chunks")
+            .containsEntry("unit", "steps");
+        assertThat(progress.get("label")).isEqualTo("Save chunks (6/8 steps)");
+        assertThat(progress.get("checkpointRef").toString()).endsWith("task_import_progress_sample_import_latest.json");
+    }
+
     private Task task(String taskId, TaskStatus status) {
         Task task = new Task();
         task.setId(taskId);

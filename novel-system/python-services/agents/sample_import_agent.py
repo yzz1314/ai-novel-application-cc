@@ -13,14 +13,28 @@ from schemas.agent_response import AgentResponse
 from text_processing import TextNormalizer, ChapterDetector, Chunker, CoverageValidator
 from config import settings
 from utils.logger import get_logger
+from utils.checkpoint_manager import CheckpointManager
 
 class SampleImportAgent(BaseAgent):
     """样本导入Agent"""
+
+    IMPORT_STEPS = [
+        ("read_raw", "Read raw sample"),
+        ("normalize", "Normalize text"),
+        ("save_normalized", "Save normalized text"),
+        ("detect_chapters", "Detect chapters"),
+        ("chunk_text", "Chunk text"),
+        ("validate_coverage", "Validate coverage"),
+        ("save_chunks", "Save chunks"),
+        ("save_manifest", "Save manifest"),
+        ("done", "Completed"),
+    ]
 
     def __init__(self):
         super().__init__("SampleImportAgent")
         self.supported_tasks = ["sample_import"]
         self.logger = get_logger("SampleImportAgent")
+        self.checkpoints = CheckpointManager()
         self.normalizer = TextNormalizer()
         self.chapter_detector = ChapterDetector()
         self.chunker = Chunker(
@@ -52,17 +66,38 @@ class SampleImportAgent(BaseAgent):
             sample_id = request.input_refs.get("sample_id") or request.parameters.get("sample_id")
 
             self.logger.info(f"Importing sample: {sample_id}")
+            checkpoint_ref = self._save_import_checkpoint(request, sample_id, "read_raw")
 
             # 2. 读取原始文件
             raw_text = await self._read_raw_sample(project_id, sample_id)
+            checkpoint_ref = self._save_import_checkpoint(
+                request,
+                sample_id,
+                "normalize",
+                total_chars=len(raw_text)
+            )
 
             # 3. 文本规范化
             self.logger.info("Normalizing text...")
             normalized_text, norm_stats = self.normalizer.normalize(raw_text)
             title = self.normalizer.detect_title(normalized_text)
+            checkpoint_ref = self._save_import_checkpoint(
+                request,
+                sample_id,
+                "save_normalized",
+                total_chars=len(normalized_text),
+                title=title
+            )
 
             # 保存规范化文本
             await self._save_normalized_text(project_id, sample_id, normalized_text)
+            checkpoint_ref = self._save_import_checkpoint(
+                request,
+                sample_id,
+                "detect_chapters",
+                total_chars=len(normalized_text),
+                title=title
+            )
 
             # 4. 检测章节
             self.logger.info("Detecting chapters...")
@@ -70,6 +105,14 @@ class SampleImportAgent(BaseAgent):
 
             has_chapters = len(chapters) > 0
             self.logger.info(f"Detected {len(chapters)} chapters")
+            checkpoint_ref = self._save_import_checkpoint(
+                request,
+                sample_id,
+                "chunk_text",
+                total_chars=len(normalized_text),
+                total_chapters=len(chapters),
+                title=title
+            )
 
             # 5. 文本分块
             self.logger.info("Chunking text...")
@@ -79,6 +122,15 @@ class SampleImportAgent(BaseAgent):
                 chunks = self.chunker.chunk_without_chapters(normalized_text)
 
             self.logger.info(f"Created {len(chunks)} chunks")
+            checkpoint_ref = self._save_import_checkpoint(
+                request,
+                sample_id,
+                "validate_coverage",
+                total_chars=len(normalized_text),
+                total_chapters=len(chapters) if has_chapters else 0,
+                total_chunks=len(chunks),
+                title=title
+            )
 
             # 6. 验证覆盖率
             coverage = self.coverage_validator.validate(len(normalized_text), chunks)
@@ -96,9 +148,30 @@ class SampleImportAgent(BaseAgent):
 
                 # 重新验证
                 coverage = self.coverage_validator.validate(len(normalized_text), chunks)
+            checkpoint_ref = self._save_import_checkpoint(
+                request,
+                sample_id,
+                "save_chunks",
+                total_chars=len(normalized_text),
+                total_chapters=len(chapters) if has_chapters else 0,
+                total_chunks=len(chunks),
+                coverage_ratio=coverage["coverage_ratio"],
+                title=title
+            )
 
             # 7. 保存chunks
             chunks_dir = await self._save_chunks(project_id, sample_id, chunks)
+            checkpoint_ref = self._save_import_checkpoint(
+                request,
+                sample_id,
+                "save_manifest",
+                total_chars=len(normalized_text),
+                total_chapters=len(chapters) if has_chapters else 0,
+                total_chunks=len(chunks),
+                coverage_ratio=coverage["coverage_ratio"],
+                chunks_dir=str(chunks_dir),
+                title=title
+            )
 
             # 8. 保存manifest
             manifest = {
@@ -113,6 +186,16 @@ class SampleImportAgent(BaseAgent):
                 "created_at": datetime.now().isoformat()
             }
             await self._save_manifest(project_id, sample_id, manifest)
+            checkpoint_ref = self._save_import_checkpoint(
+                request,
+                sample_id,
+                "done",
+                total_chars=len(normalized_text),
+                total_chapters=len(chapters) if has_chapters else 0,
+                total_chunks=len(chunks),
+                coverage_ratio=coverage["coverage_ratio"],
+                title=title
+            )
 
             # 9. 构建响应
             output_refs = [
@@ -127,15 +210,21 @@ class SampleImportAgent(BaseAgent):
                 "total_chapters": len(chapters) if has_chapters else 0,
                 "total_chunks": len(chunks),
                 "coverage_ratio": coverage["coverage_ratio"],
-                "is_complete": coverage["is_complete"]
+                "is_complete": coverage["is_complete"],
+                "progress": 1.0,
+                "progress_percent": 100,
+                "progress_stage": "done",
+                "checkpoint_ref": checkpoint_ref
             }
 
-            return self._build_response(
+            response = self._build_response(
                 request=request,
                 status="success",
                 output_refs=output_refs,
                 structured_output=structured_output
             )
+            response.checkpoint_ref = checkpoint_ref
+            return response
 
         except Exception as e:
             self.logger.error(f"Sample import failed: {str(e)}", exc_info=True)
@@ -148,6 +237,45 @@ class SampleImportAgent(BaseAgent):
                     "retryable": True
                 }]
             )
+
+    def _save_import_checkpoint(
+            self,
+            request: AgentRequest,
+            sample_id: str,
+            stage: str,
+            **details: Any) -> str:
+        """Persist staged import progress for task list polling."""
+        step_index = next(
+            (index for index, (step_stage, _) in enumerate(self.IMPORT_STEPS) if step_stage == stage),
+            0
+        )
+        stage_label = self.IMPORT_STEPS[step_index][1]
+        total_steps = len(self.IMPORT_STEPS) - 1
+        processed_steps = min(step_index, total_steps)
+        progress = processed_steps / total_steps if total_steps else 1.0
+        state = {
+            "task_type": "sample_import",
+            "task_id": request.task_id,
+            "project_id": request.project_id,
+            "sample_id": sample_id,
+            "stage": stage,
+            "stage_label": stage_label,
+            "total_steps": total_steps,
+            "processed_steps": processed_steps,
+            "progress": progress,
+            "progress_percent": round(progress * 100),
+            "progress_unit": "steps",
+            "updated_at": datetime.now().isoformat(),
+        }
+        state.update({key: value for key, value in details.items() if value is not None})
+        checkpoint_ref = self.checkpoints.save(
+            request.project_id,
+            request.task_id,
+            "sample_import",
+            state
+        )
+        self.logger.info(f"Saved sample_import checkpoint: {checkpoint_ref}")
+        return checkpoint_ref
 
     async def _read_raw_sample(self, project_id: str, sample_id: str) -> str:
         """读取原始样本文件"""

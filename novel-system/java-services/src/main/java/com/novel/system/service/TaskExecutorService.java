@@ -894,6 +894,9 @@ public class TaskExecutorService {
     private Map<String, Object> progressFromCheckpoint(Task task) {
         String checkpointRef = task.getCheckpointRef();
         if (checkpointRef == null || checkpointRef.isBlank()) {
+            checkpointRef = latestCheckpointRef(task);
+        }
+        if (checkpointRef == null || checkpointRef.isBlank()) {
             return Map.of();
         }
 
@@ -912,8 +915,15 @@ public class TaskExecutorService {
                 ? new HashMap<>((Map<String, Object>) stateMap)
                 : payload;
 
-            Integer total = toInteger(state.get("total_chunks"));
-            Integer processed = toInteger(state.get("processed_chunks"));
+            Integer total = toInteger(firstValue(state, "total_chunks", "total_steps", "total_nodes", "total_items"));
+            Integer processed = toInteger(firstValue(
+                state,
+                "analyzed_chunks",
+                "processed_chunks",
+                "processed_steps",
+                "completed_nodes",
+                "completed_items"
+            ));
             if (processed == null && state.get("completed_chunk_ids") instanceof Collection<?> completed) {
                 processed = completed.size();
             }
@@ -923,7 +933,7 @@ public class TaskExecutorService {
             }
 
             if (total != null && total > 0 && processed != null) {
-                return progressMap(
+                Map<String, Object> progress = progressMap(
                     "checkpoint",
                     processed,
                     total,
@@ -931,6 +941,15 @@ public class TaskExecutorService {
                     task.getStatus(),
                     checkpointRef
                 );
+                applyProgressMetadata(progress, state);
+                return progress;
+            }
+
+            Map<String, Object> progress = progressFromMap(state, "checkpoint");
+            if (!progress.isEmpty()) {
+                progress.put("checkpointRef", checkpointRef);
+                applyProgressMetadata(progress, state);
+                return progress;
             }
         } catch (Exception e) {
             log.debug("Unable to read progress checkpoint for task {}: {}", task.getId(), e.getMessage());
@@ -972,6 +991,50 @@ public class TaskExecutorService {
         return progress;
     }
 
+    private String latestCheckpointRef(Task task) {
+        Path checkpointDir = projectRoot(task.getProjectId()).resolve("checkpoints");
+        if (!Files.isDirectory(checkpointDir)) {
+            return null;
+        }
+
+        try (var stream = Files.list(checkpointDir)) {
+            return stream
+                .filter(path -> Files.isRegularFile(path))
+                .filter(path -> path.getFileName().toString().startsWith(task.getId() + "_"))
+                .filter(path -> path.getFileName().toString().endsWith("_latest.json"))
+                .max((left, right) -> Long.compare(lastModifiedMillis(left), lastModifiedMillis(right)))
+                .map(Path::toString)
+                .orElse(null);
+        } catch (IOException e) {
+            log.debug("Unable to locate latest checkpoint for task {}: {}", task.getId(), e.getMessage());
+            return null;
+        }
+    }
+
+    private long lastModifiedMillis(Path path) {
+        try {
+            return Files.getLastModifiedTime(path).toMillis();
+        } catch (IOException e) {
+            return 0L;
+        }
+    }
+
+    private void applyProgressMetadata(Map<String, Object> progress, Map<String, Object> state) {
+        Object stage = firstValue(state, "stage", "current_stage", "status");
+        Object stageLabel = firstValue(state, "stage_label", "stageLabel", "current_stage_label");
+        Object unit = firstValue(state, "progress_unit", "unit");
+        if (stage != null) {
+            progress.put("stage", stage);
+        }
+        if (stageLabel != null) {
+            progress.put("stageLabel", stageLabel);
+        }
+        if (unit != null) {
+            progress.put("unit", unit);
+        }
+        progress.put("label", progressLabel(progress));
+    }
+
     private Map<String, Object> progressFromStatus(Task task) {
         double ratio = switch (task.getStatus()) {
             case SUCCESS, FAILED, CANCELLED -> 1.0;
@@ -985,6 +1048,32 @@ public class TaskExecutorService {
         progress.put("percent", (int) Math.round(ratio * 100.0));
         progress.put("label", task.getStatus().name());
         return progress;
+    }
+
+    private String progressLabel(Map<String, Object> progress) {
+        Object stageLabel = progress.get("stageLabel");
+        Object processed = progress.get("processed");
+        Object total = progress.get("total");
+        Object unit = progress.get("unit");
+        if (stageLabel != null && processed != null && total != null) {
+            return stageLabel + " (" + processed + "/" + total + " " + progressUnitLabel(unit) + ")";
+        }
+        if (stageLabel != null) {
+            return stageLabel + " " + progress.get("percent") + "%";
+        }
+        return progress.get("label") != null ? progress.get("label").toString() : progress.get("percent") + "%";
+    }
+
+    private String progressUnitLabel(Object unit) {
+        if (unit == null) {
+            return "chunks";
+        }
+        return switch (unit.toString()) {
+            case "steps" -> "steps";
+            case "nodes" -> "nodes";
+            case "items" -> "items";
+            default -> "chunks";
+        };
     }
 
     private Map<String, Object> progressMap(

@@ -110,6 +110,35 @@ const coverageIssueChunkIds = (report: any) => Array.from(new Set(
 
 const coverageRepairQueue = (report: any) => report?.repairQueue || report?.repair_queue || {}
 
+const taskPercent = (task: any) => {
+  if (task?.status === 'SUCCESS') return 100
+  const backendPercent = Number(task?.progress?.percent)
+  if (Number.isFinite(backendPercent) && backendPercent >= 0) {
+    return Math.max(0, Math.min(100, Math.round(backendPercent)))
+  }
+  const metricsPercent = Number(task?.metrics?.progress ?? task?.result?.progress ?? task?.result?.progress_percent)
+  if (Number.isFinite(metricsPercent) && metricsPercent >= 0) {
+    return Math.max(0, Math.min(100, metricsPercent <= 1 ? Math.round(metricsPercent * 100) : Math.round(metricsPercent)))
+  }
+  if (task?.status === 'FAILED' || task?.status === 'CANCELLED') return 100
+  if (task?.status === 'RUNNING') return 45
+  if (task?.status === 'PENDING') return 5
+  if (task?.status === 'PARTIAL') return 70
+  return 0
+}
+
+const sampleFallbackPercent = (sample: Sample, status: string) => {
+  if (sample.chunkCount) {
+    return Math.round(((sample.analysisCount || 0) / sample.chunkCount) * 100)
+  }
+  return status === 'ANALYZED' ? 100 : 0
+}
+
+const taskProgressLabel = (task: any) =>
+  task?.progress?.label
+  || task?.progress?.stageLabel
+  || `${taskPercent(task)}%`
+
 const SampleManagement: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>()
   const [samples, setSamples] = useState<Sample[]>([])
@@ -524,16 +553,17 @@ const SampleManagement: React.FC = () => {
         const activeTask = activeTaskForSample(record.sampleId || record.id)
         const effectiveStatus = activeTask?.status || status
         const statusInfo = statusMap[effectiveStatus] || { color: 'default', text: effectiveStatus }
-        const percent = record.chunkCount
-          ? Math.round(((record.analysisCount || 0) / record.chunkCount) * 100)
-          : effectiveStatus === 'ANALYZED'
-            ? 100
-            : 0
+        const percent = activeTask ? taskPercent(activeTask) : sampleFallbackPercent(record, effectiveStatus)
 
         return (
           <Space direction="vertical" size="small">
             <Tag color={statusInfo.color}>{statusInfo.text}</Tag>
-            {activeTask && <Progress percent={percent} size="small" />}
+            {activeTask && (
+              <Space direction="vertical" size={0} style={{ minWidth: 160 }}>
+                <Progress percent={percent} size="small" />
+                <Text type="secondary" style={{ fontSize: 12 }}>{taskProgressLabel(activeTask)}</Text>
+              </Space>
+            )}
           </Space>
         )
       },

@@ -101,10 +101,13 @@ class GraphBuilderAgent(BaseAgent):
             "world_settings": [],
             "plots": [],
             "suspenses": [],
-            "timeline": []
+            "timeline": [],
+            "outline": {}
         }
 
-        for memory_type in memories.keys():
+        for memory_type in ["characters", "world_settings", "plots", "suspenses", "timeline"]:
+            if not build_request.use_memory_data:
+                break
             candidates = [
                 project_memory_dir / f"{memory_type}.json",
                 book_memory_dir / f"{memory_type}.json"
@@ -112,6 +115,9 @@ class GraphBuilderAgent(BaseAgent):
             memory_file = next((path for path in candidates if path.exists()), None)
             if memory_file:
                 memories[memory_type] = await self._load_json_list(memory_file)
+
+        if build_request.use_outline_data:
+            memories["outline"] = await self._load_outline(build_request)
 
         return memories
 
@@ -123,6 +129,7 @@ class GraphBuilderAgent(BaseAgent):
         )
 
         node_by_name: Dict[str, str] = {}
+        outline = memories.get("outline") or {}
 
         # 添加人物节点
         for char in memories.get("characters", []):
@@ -233,6 +240,9 @@ class GraphBuilderAgent(BaseAgent):
             graph.nodes.append(node)
             node_by_name[title] = node.node_id
 
+        if outline:
+            self._append_outline_entity_nodes(graph, build_request, outline, node_by_name)
+
         # 添加人物关系边
         for char in memories.get("characters", []):
             source_id = node_by_name.get(char.get("name", ""))
@@ -308,6 +318,9 @@ class GraphBuilderAgent(BaseAgent):
             source_id = node_by_name.get(event.get("title", ""))
             if source_id:
                 self._append_involvement_edges(graph, source_id, event, node_by_name, event.get("chapter", 1))
+
+        if outline:
+            self._append_outline_edges(graph, outline, node_by_name)
 
         graph.node_count = len(graph.nodes)
         graph.edge_count = len(graph.edges)
@@ -809,6 +822,34 @@ class GraphBuilderAgent(BaseAgent):
             data = json.load(f)
         return data if isinstance(data, list) else []
 
+    async def _load_outline(self, build_request: GraphBuildRequest) -> Dict[str, Any]:
+        project_root = Path(settings.PROJECT_BASE_PATH) / "projects" / build_request.project_id
+        outline_dirs = [
+            project_root / "novel" / "outline",
+            project_root / "outlines",
+        ]
+        candidates: List[Path] = []
+        if build_request.book_id:
+            candidates.extend(directory / f"{build_request.book_id}_outline.json" for directory in outline_dirs)
+
+        for candidate in candidates:
+            if candidate.exists():
+                with open(candidate, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return data if isinstance(data, dict) else {}
+
+        outline_files: List[Path] = []
+        for directory in outline_dirs:
+            if directory.exists():
+                outline_files.extend(directory.glob("*_outline.json"))
+        if not outline_files:
+            return {}
+
+        latest = max(outline_files, key=lambda path: path.stat().st_mtime)
+        with open(latest, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+
     def _node_id(self, prefix: str, name: str) -> str:
         slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "_", str(name)).strip("_")
         if not slug:
@@ -875,6 +916,240 @@ class GraphBuilderAgent(BaseAgent):
             target_id = node_by_name.get(setting_name)
             if target_id:
                 graph.edges.append(self._edge(source_id, target_id, "involves_setting", chapter, chapter))
+
+    def _append_outline_entity_nodes(
+        self,
+        graph: KnowledgeGraph,
+        build_request: GraphBuildRequest,
+        outline: Dict[str, Any],
+        node_by_name: Dict[str, str]
+    ):
+        for character in outline.get("characters") or []:
+            if not build_request.include_characters or not isinstance(character, dict):
+                continue
+            name = str(character.get("name") or "").strip()
+            if not name or name in node_by_name:
+                continue
+            first_chapter = self._safe_int(character.get("introduction_chapter"), 1)
+            node = GraphNode(
+                node_id=self._node_id("char", name),
+                node_type="character",
+                name=name,
+                properties={
+                    "role": character.get("role", ""),
+                    "description": character.get("description", ""),
+                    "attributes": character.get("attributes", {}),
+                    "relationships": character.get("relationships", []),
+                    "source": "outline"
+                },
+                first_mentioned=first_chapter,
+                last_updated=first_chapter
+            )
+            graph.nodes.append(node)
+            node_by_name[name] = node.node_id
+            graph.character_count += 1
+
+        for setting in outline.get("world_settings") or []:
+            if not isinstance(setting, dict):
+                continue
+            name = str(setting.get("name") or "").strip()
+            node_type = self._normalize_setting_type(setting.get("category", "location"))
+            if not name or name in node_by_name or not self._include_setting(build_request, node_type):
+                continue
+            node = GraphNode(
+                node_id=self._node_id(node_type, name),
+                node_type=node_type,
+                name=name,
+                properties={
+                    "category": setting.get("category", ""),
+                    "description": setting.get("description", ""),
+                    "related_entities": setting.get("related_entities", []),
+                    "source": "outline"
+                },
+                first_mentioned=1,
+                last_updated=1
+            )
+            graph.nodes.append(node)
+            node_by_name[name] = node.node_id
+            if node_type == "location":
+                graph.location_count += 1
+            elif node_type == "organization":
+                graph.organization_count += 1
+            elif node_type == "item":
+                graph.item_count += 1
+            elif node_type == "skill":
+                graph.skill_count += 1
+
+        for suspense_name in self._outline_suspense_names(outline):
+            if suspense_name in node_by_name:
+                continue
+            node = GraphNode(
+                node_id=self._node_id("suspense", suspense_name),
+                node_type="foreshadowing",
+                name=suspense_name,
+                properties={
+                    "status": "outlined",
+                    "source": "outline"
+                },
+                first_mentioned=1,
+                last_updated=1
+            )
+            graph.nodes.append(node)
+            node_by_name[suspense_name] = node.node_id
+
+    def _append_outline_edges(
+        self,
+        graph: KnowledgeGraph,
+        outline: Dict[str, Any],
+        node_by_name: Dict[str, str]
+    ):
+        names_by_type = self._node_names_by_type(graph)
+
+        for setting in outline.get("world_settings") or []:
+            if not isinstance(setting, dict):
+                continue
+            source_id = node_by_name.get(str(setting.get("name") or "").strip())
+            if not source_id:
+                continue
+            for entity_name in self._string_values(setting.get("related_entities")):
+                target_id = node_by_name.get(entity_name)
+                if target_id and target_id != source_id:
+                    graph.edges.append(self._edge(source_id, target_id, "related_entity", 1, 1))
+
+        previous_chapter_id: Optional[str] = None
+        for volume_index, volume in enumerate(outline.get("volumes") or [], start=1):
+            if not isinstance(volume, dict):
+                continue
+            volume_number = self._safe_int(volume.get("volume_number"), volume_index)
+            for chapter_index, chapter in enumerate(volume.get("chapters") or [], start=1):
+                if not isinstance(chapter, dict):
+                    continue
+                chapter_number = self._safe_int(chapter.get("chapter_number"), chapter_index)
+                chapter_id = self._outline_chapter_node_id(volume_number, chapter_number)
+                chapter_title = str(chapter.get("chapter_title") or f"第{chapter_number}章").strip()
+                graph.nodes.append(GraphNode(
+                    node_id=chapter_id,
+                    node_type="chapter_outline",
+                    name=chapter_title,
+                    properties={
+                        "source": "outline",
+                        "volume_number": volume_number,
+                        "chapter_number": chapter_number,
+                        "plot_goal": chapter.get("plot_goal", ""),
+                        "character_development": chapter.get("character_development", ""),
+                        "info_reveal": chapter.get("info_reveal", ""),
+                        "conflict": chapter.get("conflict", ""),
+                        "appeal_point": chapter.get("appeal_point", ""),
+                        "suspense": chapter.get("suspense", ""),
+                        "core_goal": chapter.get("core_goal", ""),
+                        "must_write": chapter.get("must_write", []),
+                        "allowed_progress": chapter.get("allowed_progress", []),
+                        "must_not_write": chapter.get("must_not_write", []),
+                        "reserved_for_future": chapter.get("reserved_for_future", {}),
+                        "stop_point": chapter.get("stop_point", ""),
+                        "ending_hook": chapter.get("ending_hook", "")
+                    },
+                    first_mentioned=chapter_number,
+                    last_updated=chapter_number
+                ))
+                node_by_name[chapter_title] = chapter_id
+
+                if previous_chapter_id:
+                    graph.edges.append(self._edge(previous_chapter_id, chapter_id, "next_chapter", chapter_number, chapter_number))
+                previous_chapter_id = chapter_id
+
+                for character_name in self._match_known_names(chapter, names_by_type.get("character", set())):
+                    target_id = node_by_name.get(character_name)
+                    if target_id:
+                        graph.edges.append(self._edge(chapter_id, target_id, "involves_character", chapter_number, chapter_number))
+
+                for setting_name in self._match_known_names(chapter, names_by_type.get("setting", set())):
+                    target_id = node_by_name.get(setting_name)
+                    if target_id:
+                        graph.edges.append(self._edge(chapter_id, target_id, "involves_setting", chapter_number, chapter_number))
+
+                for suspense_name in self._match_known_names(chapter, names_by_type.get("foreshadowing", set())):
+                    target_id = node_by_name.get(suspense_name)
+                    if target_id:
+                        graph.edges.append(self._edge(chapter_id, target_id, "sets_up_foreshadowing", chapter_number, chapter_number))
+
+                for plot_name in self._match_known_names(chapter, names_by_type.get("plot", set())):
+                    target_id = node_by_name.get(plot_name)
+                    if target_id:
+                        graph.edges.append(self._edge(chapter_id, target_id, "advances_plot", chapter_number, chapter_number))
+
+    def _node_names_by_type(self, graph: KnowledgeGraph) -> Dict[str, Set[str]]:
+        names_by_type: Dict[str, Set[str]] = defaultdict(set)
+        setting_types = {"location", "organization", "item", "skill", "rule", "setting"}
+        for node in graph.nodes:
+            if not node.name:
+                continue
+            names_by_type[node.node_type].add(node.name)
+            if node.node_type in setting_types:
+                names_by_type["setting"].add(node.name)
+            if node.node_type == "character":
+                for alias in node.properties.get("aliases", []):
+                    alias_name = str(alias).strip()
+                    if alias_name:
+                        names_by_type["character"].add(alias_name)
+        return names_by_type
+
+    def _outline_suspense_names(self, outline: Dict[str, Any]) -> List[str]:
+        names: List[str] = []
+        names.extend(self._string_values(outline.get("long_term_suspense")))
+        for volume in outline.get("volumes") or []:
+            if not isinstance(volume, dict):
+                continue
+            for key in ["new_suspense", "resolved_suspense", "ongoing_suspense"]:
+                names.extend(self._string_values(volume.get(key)))
+        return self._unique_non_empty(names)
+
+    def _outline_chapter_node_id(self, volume_number: int, chapter_number: int) -> str:
+        return f"outline_chapter_{volume_number}_{chapter_number}"
+
+    def _match_known_names(self, data: Any, known_names: Set[str]) -> Set[str]:
+        text = " ".join(self._string_values(data))
+        matched: Set[str] = set()
+        for name in known_names:
+            normalized = str(name).strip()
+            if len(normalized) >= 2 and normalized in text:
+                matched.add(normalized)
+        return matched
+
+    def _string_values(self, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            stripped = value.strip()
+            return [stripped] if stripped else []
+        if isinstance(value, dict):
+            values: List[str] = []
+            for item in value.values():
+                values.extend(self._string_values(item))
+            return values
+        if isinstance(value, (list, tuple, set)):
+            values: List[str] = []
+            for item in value:
+                values.extend(self._string_values(item))
+            return values
+        text = str(value).strip()
+        return [text] if text else []
+
+    def _unique_non_empty(self, values: List[str]) -> List[str]:
+        result: List[str] = []
+        seen: Set[str] = set()
+        for value in values:
+            normalized = str(value).strip()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                result.append(normalized)
+        return result
+
+    def _safe_int(self, value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     def _as_list(self, value: Any) -> List[Any]:
         if value is None:

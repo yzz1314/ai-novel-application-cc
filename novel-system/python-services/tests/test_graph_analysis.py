@@ -14,8 +14,11 @@ from schemas.agent_request import AgentRequest
 @pytest.mark.asyncio
 async def test_graph_build_writes_advanced_analysis(tmp_path):
     project_id = "proj_graph_analysis"
+    project_root = tmp_path / "projects" / project_id
     memory_dir = tmp_path / "projects" / project_id / "memory"
     memory_dir.mkdir(parents=True)
+    outline_dir = project_root / "novel" / "outline"
+    outline_dir.mkdir(parents=True)
 
     (memory_dir / "characters.json").write_text(
         json.dumps([
@@ -102,6 +105,71 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
         ], ensure_ascii=False),
         encoding="utf-8",
     )
+    (outline_dir / "default_outline.json").write_text(
+        json.dumps({
+            "book_id": "default",
+            "project_id": project_id,
+            "book_title": "天火试炼",
+            "genre": "玄幻",
+            "target_word_count": 100000,
+            "core_concept": "林墨在天火城追查旧谜",
+            "world_view": "玄门与天火城并立",
+            "main_conflict": "林墨必须在玄门试炼中揭开天火旧谜",
+            "characters": [
+                {
+                    "name": "林墨",
+                    "role": "主角",
+                    "description": "追查天火旧谜的少年",
+                    "introduction_chapter": 1,
+                }
+            ],
+            "world_settings": [
+                {
+                    "name": "天火城",
+                    "category": "地点",
+                    "description": "旧谜发生地",
+                    "related_entities": ["林墨"],
+                }
+            ],
+            "long_term_suspense": ["天火旧谜"],
+            "volumes": [
+                {
+                    "volume_number": 1,
+                    "volume_title": "玄门初试",
+                    "main_goal": "进入玄门",
+                    "character_growth": "林墨学会承担旧谜代价",
+                    "external_conflict": "玄门试炼与天火城异变交叠",
+                    "resolution": "通过试炼",
+                    "chapters": [
+                        {
+                            "chapter_number": 1,
+                            "chapter_title": "旧谜入城",
+                            "target_word_count": 3000,
+                            "plot_goal": "林墨进入天火城，发现天火旧谜与玄门试炼相关",
+                            "character_development": "林墨开始主动追查",
+                            "info_reveal": "天火城藏有旧谜线索",
+                            "scenes": [{"scene_name": "天火城门", "description": "林墨抵达天火城"}],
+                            "conflict": "林墨被玄门巡使盘问",
+                            "appeal_point": "以弱破局",
+                            "suspense": "天火旧谜为何指向玄门试炼",
+                            "connect_previous": "",
+                            "lead_to_next": "林墨决定参加玄门试炼",
+                            "core_goal": "建立天火旧谜与玄门试炼的联系",
+                            "must_write": ["林墨抵达天火城", "天火旧谜露出线索"],
+                            "allowed_progress": ["玄门试炼只露出报名入口"],
+                            "must_not_write": ["不得揭开天火旧谜真相"],
+                            "reserved_for_future": {"chapter_2": "正式进入玄门试炼"},
+                            "stop_point": "停在报名试炼前",
+                            "ending_hook": "试炼令牌浮现天火纹",
+                        }
+                    ],
+                }
+            ],
+            "total_volumes": 1,
+            "total_chapters": 1,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     original_base_path = settings.PROJECT_BASE_PATH
     settings.PROJECT_BASE_PATH = str(tmp_path)
@@ -147,6 +215,33 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
         edge["source_id"] == "suspense_fire_secret"
         and edge["target_id"] == "char_linmo"
         and edge["edge_type"] == "involves_character"
+        for edge in graph["edges"]
+    )
+    nodes_by_id = {node["node_id"]: node for node in graph["nodes"]}
+    assert "outline_chapter_1_1" in nodes_by_id
+    assert nodes_by_id["outline_chapter_1_1"]["node_type"] == "chapter_outline"
+    assert any(
+        edge["source_id"] == "outline_chapter_1_1"
+        and edge["target_id"] == "char_linmo"
+        and edge["edge_type"] == "involves_character"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["source_id"] == "outline_chapter_1_1"
+        and edge["target_id"] == "loc_tianhuo"
+        and edge["edge_type"] == "involves_setting"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["source_id"] == "outline_chapter_1_1"
+        and edge["target_id"] == "suspense_fire_secret"
+        and edge["edge_type"] == "sets_up_foreshadowing"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["source_id"] == "outline_chapter_1_1"
+        and edge["target_id"] == "plot_trial"
+        and edge["edge_type"] == "advances_plot"
         for edge in graph["edges"]
     )
 

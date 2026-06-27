@@ -30,6 +30,15 @@ public class BookArtifactService {
 
     private static final Pattern SAFE_ID = Pattern.compile("^[A-Za-z0-9_-]+$");
     private static final DateTimeFormatter SNAPSHOT_TIMESTAMP = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
+    private static final List<String> REQUIRED_OUTLINE_BOUNDARY_FIELDS = List.of(
+        "core_goal",
+        "must_write",
+        "allowed_progress",
+        "must_not_write",
+        "reserved_for_future",
+        "stop_point",
+        "ending_hook"
+    );
     private record ChapterComparison(String kind, String stage, String versionId, Path path, Map<String, Object> chapter) {}
     private record ChapterTarget(int volumeNumber, int chapterNumber) {}
 
@@ -289,10 +298,13 @@ public class BookArtifactService {
                 governance.put("unlockNote", note);
             }
             case "approve" -> {
+                Map<String, Object> approvalCheck = validateOutlineApproval(projectId, resolvedBookId, options);
                 governance.put("approvalStatus", "approved");
                 governance.put("approvedBy", actor);
                 governance.put("approvedAt", now);
                 governance.put("approvalNote", note);
+                governance.put("approvalCheck", approvalCheck);
+                governance.put("approvalOverride", approvalCheck.get("override"));
                 if (booleanOption(options, "lock", true)) {
                     governance.put("locked", true);
                     governance.put("lockedBy", actor);
@@ -311,6 +323,56 @@ public class BookArtifactService {
         response.put("governance", readOutlineGovernance(projectId, resolvedBookId));
         response.put("outline", getOutline(projectId, resolvedBookId));
         return response;
+    }
+
+    private Map<String, Object> validateOutlineApproval(
+            String projectId,
+            String bookId,
+            Map<String, Object> options) {
+        boolean override = booleanOption(options, "overrideOutlineApproval", false)
+            || booleanOption(options, "overrideApproval", false);
+        Map<String, Object> outline = readJson(resolveOutlineFile(projectId, bookId));
+        List<Map<String, Object>> chapters = outlineChapters(outline);
+        List<Map<String, Object>> issues = new ArrayList<>();
+
+        if (chapters.isEmpty()) {
+            Map<String, Object> issue = new LinkedHashMap<>();
+            issue.put("code", "missing_chapters");
+            issue.put("message", "Outline approval requires at least one chapter.");
+            issues.add(issue);
+        }
+
+        for (Map<String, Object> chapter : chapters) {
+            List<String> missingFields = REQUIRED_OUTLINE_BOUNDARY_FIELDS.stream()
+                .filter(field -> isBlankBoundaryValue(valueOf(chapter, field, toCamelCase(field))))
+                .toList();
+            if (!missingFields.isEmpty()) {
+                Map<String, Object> issue = new LinkedHashMap<>();
+                issue.put("code", "missing_boundary_fields");
+                issue.put("chapterNumber", valueOf(chapter, "chapter_number", "chapterNumber"));
+                issue.put("chapterTitle", valueOf(chapter, "chapter_title", "chapterTitle"));
+                issue.put("missingFields", missingFields);
+                issues.add(issue);
+            }
+        }
+
+        boolean passed = issues.isEmpty();
+        if (!passed && !override) {
+            throw new IllegalArgumentException(
+                "Outline approval requires complete chapter boundary fields: " + issues
+            );
+        }
+
+        Map<String, Object> check = new LinkedHashMap<>();
+        check.put("status", passed ? "passed" : "override");
+        check.put("boundaryComplete", passed);
+        check.put("override", override && !passed);
+        check.put("checkedAt", LocalDateTime.now().toString());
+        check.put("totalChapters", chapters.size());
+        check.put("issueCount", issues.size());
+        check.put("requiredFields", REQUIRED_OUTLINE_BOUNDARY_FIELDS);
+        check.put("issues", issues);
+        return check;
     }
 
     public List<Map<String, Object>> listOutlineVersions(String projectId, String bookId) {
@@ -2075,6 +2137,52 @@ public class BookArtifactService {
             case "reject", "rejected", "fail", "failed" -> "rejected";
             default -> throw new IllegalArgumentException("人工审查决策仅支持 approved/needs_revision/rejected");
         };
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> outlineChapters(Map<String, Object> outline) {
+        List<Map<String, Object>> chapters = new ArrayList<>();
+        Object directChapters = valueOf(outline, "chapters", "chapters");
+        if (directChapters instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> chapter) {
+                    chapters.add((Map<String, Object>) chapter);
+                }
+            }
+        }
+
+        Object volumesValue = valueOf(outline, "volumes", "volumes");
+        if (volumesValue instanceof List<?> volumes) {
+            for (Object volumeValue : volumes) {
+                if (volumeValue instanceof Map<?, ?> volume) {
+                    Object volumeChapters = ((Map<String, Object>) volume).get("chapters");
+                    if (volumeChapters instanceof List<?> list) {
+                        for (Object item : list) {
+                            if (item instanceof Map<?, ?> chapter) {
+                                chapters.add((Map<String, Object>) chapter);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return chapters;
+    }
+
+    private boolean isBlankBoundaryValue(Object value) {
+        if (value == null) {
+            return true;
+        }
+        if (value instanceof String text) {
+            return text.isBlank();
+        }
+        if (value instanceof List<?> list) {
+            return list.isEmpty();
+        }
+        if (value instanceof Map<?, ?> map) {
+            return map.isEmpty();
+        }
+        return false;
     }
 
     @SuppressWarnings("unchecked")

@@ -145,7 +145,25 @@ class BookArtifactServiceTest {
               "target_word_count": 100000,
               "total_volumes": 1,
               "total_chapters": 1,
-              "volumes": []
+              "volumes": [
+                {
+                  "volume_number": 1,
+                  "volume_title": "Volume One",
+                  "chapters": [
+                    {
+                      "chapter_number": 1,
+                      "chapter_title": "Boundary Ready",
+                      "core_goal": "Open the case",
+                      "must_write": ["trial gate"],
+                      "allowed_progress": ["find the token"],
+                      "must_not_write": ["final culprit"],
+                      "reserved_for_future": ["city conspiracy"],
+                      "stop_point": "door opens",
+                      "ending_hook": "a hidden lamp burns"
+                    }
+                  ]
+                }
+              ]
             }
             """);
         when(outlineArtifactService.syncOutlineFromWorkspace(eq(PROJECT_ID), eq(BOOK_ID)))
@@ -217,6 +235,67 @@ class BookArtifactServiceTest {
         assertThat(meta)
             .contains("\"approval_status\" : \"pending_review\"")
             .contains("\"last_edited_by\" : \"tester\"");
+    }
+
+    @Test
+    void outlineApprovalRequiresBoundaryFieldsUnlessOverridden() throws Exception {
+        writeProjectFile("novel/outline/book_1_outline.json", """
+            {
+              "project_id": "project_soul_restore",
+              "book_id": "book_1",
+              "book_title": "Incomplete Boundary Outline",
+              "genre": "xuanhuan",
+              "target_word_count": 100000,
+              "total_volumes": 1,
+              "total_chapters": 1,
+              "volumes": [
+                {
+                  "volume_number": 1,
+                  "chapters": [
+                    {
+                      "chapter_number": 1,
+                      "chapter_title": "Missing Boundary",
+                      "core_goal": "Open the case"
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+        assertThatThrownBy(() -> bookArtifactService.updateOutlineGovernance(
+            PROJECT_ID,
+            BOOK_ID,
+            "approve",
+            Map.of("actor", "tester", "lock", false)
+        ))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("boundary");
+
+        Map<String, Object> approved = bookArtifactService.updateOutlineGovernance(
+            PROJECT_ID,
+            BOOK_ID,
+            "approve",
+            Map.of("actor", "tester", "lock", false, "overrideOutlineApproval", true)
+        );
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> governance = (Map<String, Object>) approved.get("governance");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> approvalCheck = (Map<String, Object>) governance.get("approvalCheck");
+        assertThat(governance)
+            .containsEntry("approvalStatus", "approved")
+            .containsEntry("approvalOverride", true)
+            .containsEntry("locked", false);
+        assertThat(approvalCheck)
+            .containsEntry("status", "override")
+            .containsEntry("boundaryComplete", false)
+            .containsEntry("issueCount", 1);
+
+        String meta = Files.readString(projectRoot().resolve("novel/outline/book_1_outline_meta.json"));
+        assertThat(meta)
+            .contains("\"approval_override\" : true")
+            .contains("\"missing_boundary_fields\"");
     }
 
     @Test

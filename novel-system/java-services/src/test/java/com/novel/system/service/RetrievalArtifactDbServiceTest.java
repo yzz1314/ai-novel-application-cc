@@ -119,6 +119,23 @@ class RetrievalArtifactDbServiceTest {
               "recommendations": ["Keep index freshness under review."]
             }
             """);
+        writeProjectFile("indexes/retrieval_benchmark_report.json", """
+            {
+              "project_id": "project_retrieval_db_quality",
+              "status": "passed",
+              "case_count": 3,
+              "passed_count": 2,
+              "hit_count": 3,
+              "hit_rate": 1.0,
+              "mean_reciprocal_rank": 0.833333,
+              "average_quality_score": 78.5,
+              "cases": [
+                {"id": "jade_token", "passed": true},
+                {"id": "scene_skill", "passed": true},
+                {"id": "canon_query", "passed": false}
+              ]
+            }
+            """);
         writeProjectFile("indexes/bm25/context_packs/book_a_v1_c2.json", """
             {
               "book_id": "book_a",
@@ -142,7 +159,13 @@ class RetrievalArtifactDbServiceTest {
             .containsEntry("contextPackCount", 1)
             .containsEntry("qualityReportPath", "indexes/retrieval_quality_report.json")
             .containsEntry("qualityScore", 86)
-            .containsEntry("qualityStatus", "good");
+            .containsEntry("qualityStatus", "good")
+            .containsEntry("benchmarkReportPath", "indexes/retrieval_benchmark_report.json")
+            .containsEntry("benchmarkStatus", "passed")
+            .containsEntry("benchmarkCaseCount", 3)
+            .containsEntry("benchmarkPassedCount", 2)
+            .containsEntry("benchmarkHitRate", 1.0)
+            .containsEntry("benchmarkMeanReciprocalRank", 0.833333);
 
         Map<String, Object> qualityReport = (Map<String, Object>) response.get("qualityReport");
         assertThat(qualityReport)
@@ -152,14 +175,31 @@ class RetrievalArtifactDbServiceTest {
         assertThat(checks).hasSize(1);
         assertThat(checks.get(0)).containsEntry("key", "quality_score");
 
+        Map<String, Object> benchmarkReport = (Map<String, Object>) response.get("benchmarkReport");
+        assertThat(benchmarkReport)
+            .containsEntry("status", "passed")
+            .containsEntry("case_count", 3)
+            .containsEntry("passed_count", 2)
+            .containsEntry("hit_rate", 1.0);
+        List<Map<String, Object>> cases = (List<Map<String, Object>>) benchmarkReport.get("cases");
+        assertThat(cases).hasSize(3);
+        assertThat(cases.get(0)).containsEntry("id", "jade_token");
+
         Map<String, Object> retrievalMetadata = (Map<String, Object>) response.get("retrievalMetadata");
         assertThat(retrievalMetadata)
             .containsEntry("latestQualityScore", 86)
-            .containsEntry("latestQualityStatus", "good");
+            .containsEntry("latestQualityStatus", "good")
+            .containsEntry("latestBenchmarkStatus", "passed")
+            .containsEntry("latestBenchmarkCaseCount", 3)
+            .containsEntry("latestBenchmarkPassedCount", 2)
+            .containsEntry("latestBenchmarkHitRate", 1.0)
+            .containsEntry("latestBenchmarkMeanReciprocalRank", 0.833333);
         Map<String, Object> latestQualityReport = (Map<String, Object>) retrievalMetadata.get("latestQualityReport");
+        Map<String, Object> latestBenchmarkReport = (Map<String, Object>) retrievalMetadata.get("latestBenchmarkReport");
         Map<String, Object> latestQualityEvaluation = (Map<String, Object>) retrievalMetadata.get("latestQualityEvaluation");
         Map<String, Object> latestCitationBudget = (Map<String, Object>) retrievalMetadata.get("latestCitationBudget");
         assertThat(latestQualityReport).containsEntry("score", 86);
+        assertThat(latestBenchmarkReport).containsEntry("status", "passed");
         assertThat(latestQualityEvaluation).containsEntry("score", 82);
         assertThat(latestCitationBudget).containsKey("usage");
 
@@ -168,13 +208,21 @@ class RetrievalArtifactDbServiceTest {
         assertThat(saved.getQualityReport())
             .containsEntry("score", 86)
             .containsEntry("status", "good");
+        assertThat(saved.getBenchmarkReportPath()).isEqualTo("indexes/retrieval_benchmark_report.json");
+        assertThat(saved.getBenchmarkReport())
+            .containsEntry("status", "passed")
+            .containsEntry("case_count", 3);
 
         when(retrievalArtifactRepository.findByProjectIdOrderByUpdatedAtDesc(PROJECT_ID)).thenReturn(List.of(saved));
         Map<String, Object> summary = retrievalArtifactDbService.listRetrieval(PROJECT_ID).get(0);
         assertThat(summary)
             .containsEntry("qualityReportPath", "indexes/retrieval_quality_report.json")
             .containsEntry("qualityScore", 86)
-            .containsEntry("qualityStatus", "good");
+            .containsEntry("qualityStatus", "good")
+            .containsEntry("benchmarkReportPath", "indexes/retrieval_benchmark_report.json")
+            .containsEntry("benchmarkStatus", "passed")
+            .containsEntry("benchmarkCaseCount", 3)
+            .containsEntry("benchmarkPassedCount", 2);
     }
 
     private Path projectRoot() {

@@ -56,6 +56,9 @@ public class RetrievalArtifact {
     @Column(name = "quality_report_path", length = 700)
     private String qualityReportPath;
 
+    @Column(name = "benchmark_report_path", length = 700)
+    private String benchmarkReportPath;
+
     @Type(JsonType.class)
     @Column(columnDefinition = "jsonb")
     private Map<String, Object> config = new LinkedHashMap<>();
@@ -79,6 +82,10 @@ public class RetrievalArtifact {
     @Type(JsonType.class)
     @Column(name = "quality_report", columnDefinition = "jsonb")
     private Map<String, Object> qualityReport = new LinkedHashMap<>();
+
+    @Type(JsonType.class)
+    @Column(name = "benchmark_report", columnDefinition = "jsonb")
+    private Map<String, Object> benchmarkReport = new LinkedHashMap<>();
 
     @Type(JsonType.class)
     @Column(name = "context_packs", columnDefinition = "jsonb")
@@ -113,6 +120,7 @@ public class RetrievalArtifact {
         hybridSummary = hybridSummary == null ? new LinkedHashMap<>() : hybridSummary;
         rebuildReport = rebuildReport == null ? new LinkedHashMap<>() : rebuildReport;
         qualityReport = qualityReport == null ? new LinkedHashMap<>() : qualityReport;
+        benchmarkReport = benchmarkReport == null ? new LinkedHashMap<>() : benchmarkReport;
         contextPacks = contextPacks == null ? new ArrayList<>() : contextPacks;
         latestTasks = latestTasks == null ? new ArrayList<>() : latestTasks;
         retrievalMetadata = retrievalMetadata == null ? new LinkedHashMap<>() : retrievalMetadata;

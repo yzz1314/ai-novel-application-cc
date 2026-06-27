@@ -51,6 +51,8 @@ public class RetrievalArtifactDbService {
         Map<String, Object> rebuildReport = readOptionalJson(reportFile);
         Path qualityReportFile = qualityReportFile(projectId);
         Map<String, Object> qualityReport = readOptionalJson(qualityReportFile);
+        Path benchmarkReportFile = benchmarkReportFile(projectId);
+        Map<String, Object> benchmarkReport = readOptionalJson(benchmarkReportFile);
         List<Map<String, Object>> contextPacks = listContextPacks(projectId);
 
         boolean hasRetrievalArtifacts = !bm25Summary.isEmpty()
@@ -58,6 +60,7 @@ public class RetrievalArtifactDbService {
             || !hybridSummary.isEmpty()
             || !rebuildReport.isEmpty()
             || !qualityReport.isEmpty()
+            || !benchmarkReport.isEmpty()
             || !contextPacks.isEmpty();
 
         RetrievalArtifact entity = retrievalArtifactRepository.findByProjectId(projectId)
@@ -72,15 +75,17 @@ public class RetrievalArtifactDbService {
         entity.setConfigPath(relative(projectId, configFile(projectId)));
         entity.setRebuildReportPath(relative(projectId, reportFile));
         entity.setQualityReportPath(relative(projectId, qualityReportFile));
+        entity.setBenchmarkReportPath(relative(projectId, benchmarkReportFile));
         entity.setConfig(config);
         entity.setBm25Summary(bm25Summary);
         entity.setVectorSummary(vectorSummary);
         entity.setHybridSummary(hybridSummary);
         entity.setRebuildReport(rebuildReport);
         entity.setQualityReport(qualityReport);
+        entity.setBenchmarkReport(benchmarkReport);
         entity.setContextPacks(contextPacks);
         entity.setLatestTasks(latestRetrievalTasks(projectId));
-        entity.setRetrievalMetadata(metadata(projectId, bm25Summary, vectorSummary, hybridSummary, rebuildReport, qualityReport, contextPacks));
+        entity.setRetrievalMetadata(metadata(projectId, bm25Summary, vectorSummary, hybridSummary, rebuildReport, qualityReport, benchmarkReport, contextPacks));
         entity.setSyncedAt(LocalDateTime.now());
 
         RetrievalArtifact saved = retrievalArtifactRepository.save(entity);
@@ -116,6 +121,7 @@ public class RetrievalArtifactDbService {
         result.put("hybridSummary", entity.getHybridSummary());
         result.put("rebuildReport", entity.getRebuildReport());
         result.put("qualityReport", entity.getQualityReport());
+        result.put("benchmarkReport", entity.getBenchmarkReport());
         result.put("contextPacks", entity.getContextPacks());
         result.put("latestTasks", entity.getLatestTasks());
         result.put("retrievalMetadata", entity.getRetrievalMetadata());
@@ -134,8 +140,14 @@ public class RetrievalArtifactDbService {
         result.put("configPath", entity.getConfigPath());
         result.put("rebuildReportPath", entity.getRebuildReportPath());
         result.put("qualityReportPath", entity.getQualityReportPath());
+        result.put("benchmarkReportPath", entity.getBenchmarkReportPath());
         result.put("qualityScore", qualityMetric(entity, "score", "latestQualityScore"));
         result.put("qualityStatus", qualityMetric(entity, "status", "latestQualityStatus"));
+        result.put("benchmarkStatus", benchmarkMetric(entity, "status", "latestBenchmarkStatus"));
+        result.put("benchmarkCaseCount", benchmarkMetric(entity, "case_count", "latestBenchmarkCaseCount"));
+        result.put("benchmarkPassedCount", benchmarkMetric(entity, "passed_count", "latestBenchmarkPassedCount"));
+        result.put("benchmarkHitRate", benchmarkMetric(entity, "hit_rate", "latestBenchmarkHitRate"));
+        result.put("benchmarkMeanReciprocalRank", benchmarkMetric(entity, "mean_reciprocal_rank", "latestBenchmarkMeanReciprocalRank"));
         result.put("syncedAt", entity.getSyncedAt());
         result.put("createdAt", entity.getCreatedAt());
         result.put("updatedAt", entity.getUpdatedAt());
@@ -149,6 +161,7 @@ public class RetrievalArtifactDbService {
             Map<String, Object> hybridSummary,
             Map<String, Object> rebuildReport,
             Map<String, Object> qualityReport,
+            Map<String, Object> benchmarkReport,
             List<Map<String, Object>> contextPacks) {
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("projectId", projectId);
@@ -166,6 +179,7 @@ public class RetrievalArtifactDbService {
             rebuildReport.get("citation_budget")
         ));
         metadata.put("latestQualityReport", qualityReport);
+        metadata.put("latestBenchmarkReport", benchmarkReport);
         metadata.put("latestQualityScore", firstPresent(
             qualityReport.get("score"),
             valueFromMap(hybridSummary, "quality_evaluation", "score"),
@@ -175,6 +189,31 @@ public class RetrievalArtifactDbService {
             qualityReport.get("status"),
             valueFromMap(hybridSummary, "quality_evaluation", "status"),
             valueFromMap(rebuildReport, "quality_evaluation", "status")
+        ));
+        metadata.put("latestBenchmarkStatus", firstPresent(
+            benchmarkReport.get("status"),
+            valueFromMap(hybridSummary, "benchmark", "status"),
+            valueFromMap(rebuildReport, "benchmark", "status")
+        ));
+        metadata.put("latestBenchmarkCaseCount", firstPresent(
+            benchmarkReport.get("case_count"),
+            valueFromMap(hybridSummary, "benchmark", "case_count"),
+            valueFromMap(rebuildReport, "benchmark", "case_count")
+        ));
+        metadata.put("latestBenchmarkPassedCount", firstPresent(
+            benchmarkReport.get("passed_count"),
+            valueFromMap(hybridSummary, "benchmark", "passed_count"),
+            valueFromMap(rebuildReport, "benchmark", "passed_count")
+        ));
+        metadata.put("latestBenchmarkHitRate", firstPresent(
+            benchmarkReport.get("hit_rate"),
+            valueFromMap(hybridSummary, "benchmark", "hit_rate"),
+            valueFromMap(rebuildReport, "benchmark", "hit_rate")
+        ));
+        metadata.put("latestBenchmarkMeanReciprocalRank", firstPresent(
+            benchmarkReport.get("mean_reciprocal_rank"),
+            valueFromMap(hybridSummary, "benchmark", "mean_reciprocal_rank"),
+            valueFromMap(rebuildReport, "benchmark", "mean_reciprocal_rank")
         ));
         metadata.put("latestTasksCount", latestRetrievalTasks(projectId).size());
         return metadata;
@@ -264,6 +303,10 @@ public class RetrievalArtifactDbService {
         return projectRoot(projectId).resolve("indexes").resolve("retrieval_quality_report.json");
     }
 
+    private Path benchmarkReportFile(String projectId) {
+        return projectRoot(projectId).resolve("indexes").resolve("retrieval_benchmark_report.json");
+    }
+
     private Map<String, Object> readOptionalJson(Path path) {
         if (!Files.exists(path)) {
             return new LinkedHashMap<>();
@@ -301,6 +344,16 @@ public class RetrievalArtifactDbService {
     private Object qualityMetric(RetrievalArtifact entity, String reportKey, String metadataKey) {
         if (entity.getQualityReport() != null && entity.getQualityReport().get(reportKey) != null) {
             return entity.getQualityReport().get(reportKey);
+        }
+        if (entity.getRetrievalMetadata() != null) {
+            return entity.getRetrievalMetadata().get(metadataKey);
+        }
+        return null;
+    }
+
+    private Object benchmarkMetric(RetrievalArtifact entity, String reportKey, String metadataKey) {
+        if (entity.getBenchmarkReport() != null && entity.getBenchmarkReport().get(reportKey) != null) {
+            return entity.getBenchmarkReport().get(reportKey);
         }
         if (entity.getRetrievalMetadata() != null) {
             return entity.getRetrievalMetadata().get(metadataKey);

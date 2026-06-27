@@ -91,6 +91,7 @@ const ProjectDetail: React.FC = () => {
   const [skillConflicts, setSkillConflicts] = useState<any>(null);
   const [skillConflictReportLoading, setSkillConflictReportLoading] = useState(false);
   const [skillRegenerating, setSkillRegenerating] = useState(false);
+  const [skillGenerationDrawer, setSkillGenerationDrawer] = useState<any>(null);
   const [skillEditOpen, setSkillEditOpen] = useState(false);
   const [skillSaving, setSkillSaving] = useState(false);
   const [editingSkill, setEditingSkill] = useState<any>(null);
@@ -980,6 +981,9 @@ const ProjectDetail: React.FC = () => {
                   {latestSkillGenerationTask.errorMessage && (
                     <Text type="danger">{latestSkillGenerationTask.errorMessage}</Text>
                   )}
+                  <Button type="link" size="small" onClick={() => setSkillGenerationDrawer(latestSkillGenerationTask)}>
+                    查看生成结果
+                  </Button>
                 </Space>
               }
             />
@@ -1174,6 +1178,65 @@ const ProjectDetail: React.FC = () => {
           )}
           <Paragraph style={{ whiteSpace: 'pre-wrap' }}>{skillDrawer?.content}</Paragraph>
         </Space>
+      </Drawer>
+
+      <Drawer
+        title="Skill生成结果"
+        width={880}
+        open={!!skillGenerationDrawer}
+        onClose={() => setSkillGenerationDrawer(null)}
+      >
+        {skillGenerationDrawer ? (
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <Descriptions bordered column={2} size="small">
+              <Descriptions.Item label="任务ID">{skillGenerationDrawer.id || skillGenerationDrawer.taskId}</Descriptions.Item>
+              <Descriptions.Item label="状态">
+                <Tag color={taskStatusColor(skillGenerationDrawer.status)}>{skillGenerationDrawer.status}</Tag>
+              </Descriptions.Item>
+              <Descriptions.Item label="Agent">{skillGenerationDrawer.agentName || '-'}</Descriptions.Item>
+              <Descriptions.Item label="创建时间">{skillGenerationDrawer.createdAt || '-'}</Descriptions.Item>
+              <Descriptions.Item label="生成数量">{skillGenerationDrawer.result?.skill_count ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label="样本数量">{skillGenerationDrawer.result?.sample_count ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label="enabled.yaml" span={2}>{skillGenerationDrawer.result?.enabled_yaml || '-'}</Descriptions.Item>
+            </Descriptions>
+
+            <Table
+              size="small"
+              pagination={false}
+              rowKey={(record: any) => record.skill_name || record.relative_path || record.file_path}
+              dataSource={skillGenerationDrawer.result?.generated_skills || []}
+              columns={[
+                { title: '类型', dataIndex: 'skill_type', key: 'skill_type', width: 110, render: (value: string) => <Tag>{value}</Tag> },
+                { title: '名称', dataIndex: 'skill_name', key: 'skill_name', width: 160 },
+                { title: '路径', dataIndex: 'relative_path', key: 'relative_path', ellipsis: true },
+                {
+                  title: '启用',
+                  dataIndex: 'enabled',
+                  key: 'enabled',
+                  width: 80,
+                  render: (enabled: boolean) => <Tag color={enabled ? 'success' : 'default'}>{enabled ? '是' : '否'}</Tag>,
+                },
+              ]}
+              locale={{ emptyText: '暂无生成Skill明细' }}
+            />
+
+            {(skillGenerationDrawer.outputRefs || []).length > 0 && (
+              <Card title="输出引用" size="small">
+                <List
+                  size="small"
+                  dataSource={skillGenerationDrawer.outputRefs || []}
+                  renderItem={(item: string) => <List.Item>{item}</List.Item>}
+                />
+              </Card>
+            )}
+
+            <Card title="原始结果" size="small">
+              <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+                {JSON.stringify(skillGenerationDrawer.result || {}, null, 2)}
+              </Paragraph>
+            </Card>
+          </Space>
+        ) : null}
       </Drawer>
 
       <Modal

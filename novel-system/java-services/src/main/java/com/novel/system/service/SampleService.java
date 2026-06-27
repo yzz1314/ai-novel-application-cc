@@ -278,13 +278,28 @@ public class SampleService {
             entity.setHeadingPath(stringValue(chunk.get("heading_path")));
             entity.setFilePath(chunksDir.relativize(path).toString().replace("\\", "/"));
             Path analysisPath = Paths.get(basePath, "projects", projectId, "analysis", "per_chunk", sampleId, chunkId + "_analysis.json");
-            entity.setProcessed(Files.exists(analysisPath));
-            entity.setAnalysisPath(Files.exists(analysisPath)
+            boolean hasAnalysis = Files.exists(analysisPath);
+            entity.setProcessed(hasAnalysis && isSuccessfulAnalysis(analysisPath));
+            entity.setAnalysisPath(hasAnalysis
                 ? Paths.get(basePath, "projects", projectId).relativize(analysisPath).toString().replace("\\", "/")
                 : null);
             return entity;
         } catch (IOException e) {
             throw new RuntimeException("读取样本分块失败: " + path.getFileName(), e);
+        }
+    }
+
+    private boolean isSuccessfulAnalysis(Path analysisPath) {
+        try {
+            Map<String, Object> analysis = objectMapper.readValue(analysisPath.toFile(), new TypeReference<>() {});
+            Object error = analysis.get("error");
+            if (error != null && !error.toString().isBlank()) {
+                return false;
+            }
+            Object status = analysis.get("status");
+            return status == null || !List.of("failed", "failure", "error").contains(status.toString().toLowerCase());
+        } catch (IOException e) {
+            return false;
         }
     }
 

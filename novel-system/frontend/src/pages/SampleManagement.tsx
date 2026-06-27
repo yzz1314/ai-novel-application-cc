@@ -103,6 +103,8 @@ const coverageIssueChunkIds = (report: any) => Array.from(new Set(
   coverageIssueRows(report).map((item: any) => item.chunkId).filter(Boolean)
 ))
 
+const coverageRepairQueue = (report: any) => report?.repairQueue || report?.repair_queue || {}
+
 const SampleManagement: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>()
   const [samples, setSamples] = useState<Sample[]>([])
@@ -281,6 +283,21 @@ const SampleManagement: React.FC = () => {
       await loadData(true)
     } catch (error) {
       message.error('启动覆盖率校验失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const autoRepairCoverage = async (sampleId: string) => {
+    if (!projectId) return
+
+    try {
+      setLoading(true)
+      await analysisApi.checkCoverage(projectId, sampleId, { auto_repair: true })
+      message.success('覆盖率校验与自动修复任务已启动')
+      await loadData(true)
+    } catch (error) {
+      message.error('启动覆盖率自动修复失败')
     } finally {
       setLoading(false)
     }
@@ -548,6 +565,14 @@ const SampleManagement: React.FC = () => {
             type="link"
             icon={<ReloadOutlined />}
             disabled={!record.chunkCount}
+            onClick={() => autoRepairCoverage(record.sampleId || record.id)}
+          >
+            自动修复
+          </Button>
+          <Button
+            type="link"
+            icon={<ReloadOutlined />}
+            disabled={!record.chunkCount}
             onClick={() => repairAnalysis(record.sampleId || record.id)}
           >
             修复
@@ -601,6 +626,7 @@ const SampleManagement: React.FC = () => {
   const selectedCoverageReport = coverageReport || sampleArtifacts?.coverageReport
   const coverageIssues = coverageIssueRows(selectedCoverageReport)
   const coverageIssueIds = coverageIssueChunkIds(selectedCoverageReport)
+  const repairQueue = coverageRepairQueue(selectedCoverageReport)
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
@@ -808,20 +834,35 @@ const SampleManagement: React.FC = () => {
                       <Descriptions.Item label="失败分析块">
                         {selectedCoverageReport.analysisCoverage?.failedChunkCount ?? 0}
                       </Descriptions.Item>
+                      <Descriptions.Item label="修复队列">
+                        {repairQueue.totalCount ?? repairQueue.total_count ?? coverageIssues.length}
+                      </Descriptions.Item>
+                      <Descriptions.Item label="自动修复">
+                        {selectedCoverageReport.autoRepair?.status || selectedCoverageReport.auto_repair?.status || '-'}
+                      </Descriptions.Item>
                     </Descriptions>
                     {coverageIssues.length > 0 ? (
                       <Card
                         size="small"
                         title="待修复分块"
                         extra={
-                          <Button
-                            type="primary"
-                            icon={<ReloadOutlined />}
-                            loading={loading}
-                            onClick={() => selectedSample && repairAnalysis(selectedSample.sampleId || selectedSample.id, coverageIssueIds)}
-                          >
-                            定向修复 {coverageIssueIds.length} 块
-                          </Button>
+                          <Space>
+                            <Button
+                              icon={<FileSearchOutlined />}
+                              loading={loading}
+                              onClick={() => selectedSample && autoRepairCoverage(selectedSample.sampleId || selectedSample.id)}
+                            >
+                              校验并自动修复
+                            </Button>
+                            <Button
+                              type="primary"
+                              icon={<ReloadOutlined />}
+                              loading={loading}
+                              onClick={() => selectedSample && repairAnalysis(selectedSample.sampleId || selectedSample.id, coverageIssueIds)}
+                            >
+                              定向修复 {coverageIssueIds.length} 块
+                            </Button>
+                          </Space>
                         }
                       >
                         <Table

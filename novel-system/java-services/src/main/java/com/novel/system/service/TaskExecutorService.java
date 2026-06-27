@@ -301,6 +301,12 @@ public class TaskExecutorService {
                 analysisResultService.syncAnalysisResultsFromWorkspace(projectId, sampleId.toString());
                 sampleService.updateSampleStatus(sampleId.toString(), com.novel.system.entity.Sample.SampleStatus.ANALYZED);
             }
+        } else if ("coverage_check".equals(taskType)) {
+            Object sampleId = taskValue(inputRefs, parameters, "sample_id");
+            if (sampleId != null) {
+                sampleService.syncSampleStructureFromWorkspace(projectId, sampleId.toString());
+                analysisResultService.syncAnalysisResultsFromWorkspace(projectId, sampleId.toString());
+            }
         } else if ("skill_generation".equals(taskType)) {
             skillService.syncSkillProfile(projectId);
         } else if ("outline_generation".equals(taskType) || "outline_review".equals(taskType)) {

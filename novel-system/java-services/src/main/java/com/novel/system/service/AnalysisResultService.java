@@ -100,18 +100,23 @@ public class AnalysisResultService {
             }
 
             Map<String, Object> analysis = mapValue(raw.get("analysis"));
+            boolean failed = hasFailure(raw);
+            Integer chunkIndex = toInteger(raw.get("chunk_index"));
+            if (chunkIndex == null) {
+                chunkIndex = parseChunkIndex(chunkId);
+            }
 
             AnalysisResult entity = new AnalysisResult();
             entity.setId(sampleId + "_" + chunkId);
             entity.setProjectId(projectId);
             entity.setSampleId(sampleId);
             entity.setChunkId(chunkId);
-            entity.setChunkIndex(toInteger(raw.get("chunk_index")));
+            entity.setChunkIndex(chunkIndex);
             entity.setStartPos(toInteger(raw.get("start_pos")));
             entity.setEndPos(toInteger(raw.get("end_pos")));
             entity.setChapterRange(stringValue(raw.get("chapter_range")));
-            entity.setStatus("SUCCESS");
-            entity.setSummary(stringValue(analysis.get("summary")));
+            entity.setStatus(failed ? "FAILED" : "SUCCESS");
+            entity.setSummary(failed ? stringValue(raw.get("error")) : stringValue(analysis.get("summary")));
             entity.setPlotFunction(stringValue(analysis.get("plot_function")));
             entity.setReaderHook(stringValue(analysis.get("reader_hook")));
             entity.setCharacterCount(listSize(analysis.get("characters")));
@@ -125,7 +130,22 @@ public class AnalysisResultService {
             entity.setAnalyzedAt(parseDateTime(raw.get("analyzed_at")));
             return entity;
         } catch (IOException e) {
-            throw new RuntimeException("读取逐块分析结果失败: " + sourceDir.relativize(path), e);
+            String chunkId = stripSuffix(path.getFileName().toString(), "_analysis.json");
+            AnalysisResult entity = new AnalysisResult();
+            entity.setId(sampleId + "_" + chunkId);
+            entity.setProjectId(projectId);
+            entity.setSampleId(sampleId);
+            entity.setChunkId(chunkId);
+            entity.setChunkIndex(parseChunkIndex(chunkId));
+            entity.setStatus("FAILED");
+            entity.setSummary("读取逐块分析结果失败: " + e.getMessage());
+            entity.setAnalysis(new LinkedHashMap<>());
+            entity.setRawResult(Map.of(
+                "error", e.getMessage() != null ? e.getMessage() : "unreadable analysis file",
+                "path", relative(projectId, path)
+            ));
+            entity.setAnalysisPath(relative(projectId, path));
+            return entity;
         }
     }
 
@@ -174,6 +194,26 @@ public class AnalysisResultService {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    private Integer parseChunkIndex(String chunkId) {
+        if (chunkId == null) {
+            return null;
+        }
+        int pos = chunkId.lastIndexOf('_');
+        if (pos < 0 || pos == chunkId.length() - 1) {
+            return null;
+        }
+        return toInteger(chunkId.substring(pos + 1));
+    }
+
+    private boolean hasFailure(Map<String, Object> raw) {
+        Object error = raw.get("error");
+        if (error != null && !error.toString().isBlank()) {
+            return true;
+        }
+        Object status = raw.get("status");
+        return status != null && List.of("failed", "failure", "error").contains(status.toString().toLowerCase());
     }
 
     private LocalDateTime parseDateTime(Object value) {

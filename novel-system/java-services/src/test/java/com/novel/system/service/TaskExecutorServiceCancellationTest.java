@@ -107,6 +107,36 @@ class TaskExecutorServiceCancellationTest {
             .contains("python unavailable");
     }
 
+    @Test
+    void coverageCheckCompletionSyncsCoverageDiagnosticsToDb() {
+        Task task = task("task_coverage_sync", TaskStatus.PENDING);
+        task.setTaskType("coverage_check");
+        task.setAgentName("coverage_check");
+        when(taskRepository.findById(task.getId())).thenReturn(Optional.of(task));
+        when(taskRepository.save(any(Task.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(pythonClientService.buildAgentRequest(
+            task.getId(),
+            task.getProjectId(),
+            task.getTaskType(),
+            task.getInputRefs(),
+            task.getParameters()
+        )).thenReturn(Map.of());
+        when(pythonClientService.callAgent("coverage_check", Map.of())).thenReturn(Map.of(
+            "status", "partial",
+            "structured_output", Map.of(
+                "sample_id", "sample_1",
+                "repair_queue_count", 1
+            )
+        ));
+
+        Task result = taskExecutorService.executeTaskAsync(task.getId()).join();
+
+        assertThat(result.getStatus()).isEqualTo(TaskStatus.PARTIAL);
+        verify(sampleService).syncSampleStructureFromWorkspace(task.getProjectId(), "sample_1");
+        verify(analysisResultService).syncAnalysisResultsFromWorkspace(task.getProjectId(), "sample_1");
+        verify(sampleService, never()).updateSampleStatus(any(), any());
+    }
+
     private Task task(String taskId, TaskStatus status) {
         Task task = new Task();
         task.setId(taskId);

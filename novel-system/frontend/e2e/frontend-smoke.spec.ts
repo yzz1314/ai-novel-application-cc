@@ -37,6 +37,12 @@ test('renders project production pages with fixed API fixtures', async ({ page }
   await page.goto(`/projects/${projectId}/samples`)
   await expect(page.getByText('样本管理')).toBeVisible()
   await expect(page.getByText('样本一')).toBeVisible()
+  await page.getByRole('row', { name: /样本一/ }).getByRole('button', { name: /查看/ }).click()
+  await page.getByRole('tab', { name: '覆盖率' }).click()
+  await expect(page.getByText('修复队列')).toBeVisible()
+  await expect(page.getByRole('button', { name: '校验并自动修复' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '定向修复 1 块' })).toBeVisible()
+  await page.keyboard.press('Escape')
 
   await page.goto(`/projects/${projectId}/retrieval`)
   await expect(page.getByRole('heading', { name: '检索与上下文' })).toBeVisible()
@@ -84,6 +90,10 @@ function fixtureFor(path: string): unknown {
   if (path === `/projects/${projectId}/skills`) return skillFixtures()
   if (path === `/projects/${projectId}/skills/conflicts`) return { conflictCount: 0, conflicts: [] }
   if (path === `/projects/${projectId}/analysis/status`) return analysisStatusFixture()
+  if (path === `/projects/${projectId}/analysis/samples/sample-1/artifacts`) return sampleArtifactsFixture()
+  if (path === `/projects/${projectId}/analysis/samples/sample-1/chunks`) return sampleChunksFixture()
+  if (path === `/projects/${projectId}/analysis/samples/sample-1/book-report`) return sampleBookReportFixture()
+  if (path === `/projects/${projectId}/analysis/samples/sample-1/coverage`) return sampleCoverageFixture()
   if (path === `/projects/${projectId}/retrieval`) return retrievalFixture()
   if (path === `/projects/${projectId}/artifacts`) return artifactOverviewFixture()
   if (path === `/projects/${projectId}/artifacts/list`) return artifactListFixture()
@@ -322,6 +332,72 @@ function analysisStatusFixture() {
         hasBookReport: true,
       },
     ],
+  }
+}
+
+function sampleArtifactsFixture() {
+  return {
+    sampleId: 'sample-1',
+    title: '样本一',
+    status: 'ANALYZED',
+    totalChars: 12000,
+    totalChapters: 8,
+    chunkCount: 4,
+    analysisCount: 3,
+    coverageReportPath: 'analysis/coverage/sample-1_coverage.json',
+    manifest: {
+      title: '样本一',
+      total_chars: 12000,
+      chapters: [{ chapter_index: 1, title: '第一章' }],
+    },
+    analysisSummary: { analyzed_chunks: 3, total_chunks: 4 },
+    coverageReport: sampleCoverageFixture(),
+    latestTasks: taskFixtures(),
+  }
+}
+
+function sampleCoverageFixture() {
+  return {
+    sampleId: 'sample-1',
+    status: 'needs_attention',
+    path: 'analysis/coverage/sample-1_coverage.json',
+    textCoverage: { coverageRatio: 1, isComplete: true },
+    analysisCoverage: {
+      totalChunks: 4,
+      analyzedChunks: 3,
+      coverageRatio: 0.75,
+      isComplete: false,
+      missingAnalysisCount: 1,
+      missingAnalysisChunks: ['chunk_4'],
+      failedChunkCount: 0,
+      failedChunks: [],
+    },
+    repairQueue: {
+      status: 'ready',
+      totalCount: 1,
+      chunkIds: ['chunk_4'],
+      recommendedTask: 'analysis_repair',
+    },
+    autoRepair: null,
+  }
+}
+
+function sampleChunksFixture() {
+  return [
+    {
+      id: 'chunk_1',
+      path: 'samples/chunks/sample-1/chunk_1.json',
+      preview: '第一章片段',
+      updatedAt: '2026-06-26T10:00:00',
+    },
+  ]
+}
+
+function sampleBookReportFixture() {
+  return {
+    path: 'analysis/per_book/sample-1_report.md',
+    content: '# 单书报告\n样本一拆解结果。',
+    length: 16,
   }
 }
 

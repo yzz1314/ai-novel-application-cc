@@ -81,6 +81,7 @@ services:
       SPRING_DATASOURCE_PASSWORD: novel_pass
       SPRING_REDIS_HOST: redis
       SPRING_REDIS_PORT: 6379
+      SPRING_JPA_HIBERNATE_DDL_AUTO: validate
       PYTHON_SERVICE_URL: http://python-ai:8000
       MODEL_PROFILE_ENCRYPTION_KEY: ${MODEL_PROFILE_ENCRYPTION_KEY:-novel-system-local-dev-key}
     volumes:

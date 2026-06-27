@@ -13,6 +13,8 @@ Thumbs.db
 target/
 build/
 dist/
+test-results/
+playwright-report/
 *.egg-info/
 __pycache__/
 *.pyc

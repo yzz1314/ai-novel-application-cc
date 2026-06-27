@@ -90,6 +90,7 @@ const ProjectDetail: React.FC = () => {
   const [skillDrawer, setSkillDrawer] = useState<any>(null);
   const [skillConflicts, setSkillConflicts] = useState<any>(null);
   const [skillConflictReportLoading, setSkillConflictReportLoading] = useState(false);
+  const [skillRegenerating, setSkillRegenerating] = useState(false);
   const [skillEditOpen, setSkillEditOpen] = useState(false);
   const [skillSaving, setSkillSaving] = useState(false);
   const [editingSkill, setEditingSkill] = useState<any>(null);
@@ -212,6 +213,13 @@ const ProjectDetail: React.FC = () => {
   const recentTasks = [...tasks]
     .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))
     .slice(0, 8);
+  const latestSkillGenerationTask = [...tasks]
+    .filter((task) => task.agentName === 'skill_generation' || task.taskType === 'skill_generation')
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0];
+  const analyzedSampleIds = samples
+    .filter((sample) => sample.status === 'ANALYZED')
+    .map((sample) => sample.id || sample.sampleId)
+    .filter(Boolean);
   const waitingApprovalTasks = tasks.filter((task) => isWaitingForHuman(task));
   const hasRunningTasks = tasks.some((task) => ['PENDING', 'RUNNING'].includes(task.status));
 
@@ -234,6 +242,27 @@ const ProjectDetail: React.FC = () => {
       message.error('生成Skill冲突报告失败');
     } finally {
       setSkillConflictReportLoading(false);
+    }
+  };
+
+  const regenerateSkills = async () => {
+    if (!projectId) return;
+    try {
+      setSkillRegenerating(true);
+      await skillsApi.generate(projectId, {
+        project_id: projectId,
+        regenerate: true,
+        skill_types: ['writing', 'outline', 'review'],
+        sample_ids: analyzedSampleIds,
+        previous_skill_count: skills.length,
+        requested_by: 'ProjectDetail',
+      });
+      message.success('Skill重新生成任务已创建');
+      await loadProjectData();
+    } catch (error) {
+      message.error('创建Skill重新生成任务失败');
+    } finally {
+      setSkillRegenerating(false);
     }
   };
 
@@ -905,9 +934,18 @@ const ProjectDetail: React.FC = () => {
     {
       key: 'skills',
       label: <span><CheckCircleOutlined /> Skills</span>,
-      children: skills.length ? (
+      children: (
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <Space wrap>
+            <Button
+              type="primary"
+              icon={<ReloadOutlined />}
+              loading={skillRegenerating}
+              disabled={!hasCrossBook}
+              onClick={regenerateSkills}
+            >
+              重新生成Skills
+            </Button>
             <Button icon={<HistoryOutlined />} onClick={openSkillConfigVersions}>
               启用配置版本
             </Button>
@@ -919,6 +957,33 @@ const ProjectDetail: React.FC = () => {
               生成冲突报告
             </Button>
           </Space>
+          {!hasCrossBook && (
+            <Alert
+              type="info"
+              showIcon
+              message="需要先完成跨书归纳，才能生成或重新生成项目 Skills。"
+            />
+          )}
+          {latestSkillGenerationTask && (
+            <Alert
+              type={latestSkillGenerationTask.status === 'FAILED' ? 'error' : latestSkillGenerationTask.status === 'SUCCESS' ? 'success' : 'info'}
+              showIcon
+              message="最近一次Skill生成任务"
+              description={
+                <Space size="small" wrap>
+                  <Tag color={taskStatusColor(latestSkillGenerationTask.status)}>{latestSkillGenerationTask.status}</Tag>
+                  <Text>{latestSkillGenerationTask.id}</Text>
+                  {latestSkillGenerationTask.createdAt && <Text type="secondary">{latestSkillGenerationTask.createdAt}</Text>}
+                  {latestSkillGenerationTask.result?.skill_count !== undefined && (
+                    <Text type="secondary">生成 {latestSkillGenerationTask.result.skill_count} 个 Skill</Text>
+                  )}
+                  {latestSkillGenerationTask.errorMessage && (
+                    <Text type="danger">{latestSkillGenerationTask.errorMessage}</Text>
+                  )}
+                </Space>
+              }
+            />
+          )}
           {skillConflicts && (
             conflictCount > 0 ? (
               <Alert
@@ -962,10 +1027,12 @@ const ProjectDetail: React.FC = () => {
               />
             )
           )}
-          <Table columns={skillColumns} dataSource={skills} rowKey="name" pagination={false} />
+          {skills.length ? (
+            <Table columns={skillColumns} dataSource={skills} rowKey="name" pagination={false} />
+          ) : (
+            <Empty description="暂无项目Skill" />
+          )}
         </Space>
-      ) : (
-        <Empty description="暂无项目Skill" />
       ),
     },
     {

@@ -82,7 +82,7 @@ export const taskApi = {
 
 export const skillsApi = {
   generate: (projectId: string, config: any) =>
-    taskApi.execute(projectId, { agentName: 'skill_generation', config }),
+    taskApi.execute(projectId, { agentName: 'skill_generation', config, parameters: config }),
   getList: (projectId: string) => request<any[]>(api.get(`/projects/${projectId}/skills`)),
   getContent: (projectId: string, skillName: string) =>
     request(api.get(`/projects/${projectId}/skills/${skillName}`)),

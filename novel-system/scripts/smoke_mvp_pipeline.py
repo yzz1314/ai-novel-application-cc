@@ -134,6 +134,33 @@ def _assert_paths(project_root: Path, paths: Iterable[str]) -> None:
         raise AssertionError(f"Missing expected artifacts: {missing}")
 
 
+def _assert_sample_pipeline_state(sample_id: str, imported, analyzed, coverage_report: Dict[str, Any]) -> Dict[str, Any]:
+    imported_chunks = int(imported.structured_output.get("total_chunks") or 0)
+    analyzed_total = int(analyzed.structured_output.get("total_chunks") or 0)
+    analyzed_chunks = int(analyzed.structured_output.get("analyzed_chunks") or 0)
+    failed_chunks = int(analyzed.structured_output.get("failed_chunks") or 0)
+    coverage_complete = bool(coverage_report.get("analysis_coverage", {}).get("is_complete"))
+
+    if imported_chunks <= 0:
+        raise AssertionError(f"{sample_id} did not reach CHUNKED semantic state: no chunks imported")
+    if analyzed_total <= 0 or analyzed_chunks != analyzed_total or failed_chunks:
+        raise AssertionError(
+            f"{sample_id} did not reach ANALYZED semantic state: "
+            f"{analyzed_chunks}/{analyzed_total} chunks analyzed, failed={failed_chunks}"
+        )
+    if not coverage_complete:
+        raise AssertionError(f"{sample_id} coverage report is not complete")
+
+    return {
+        "after_import": "CHUNKED",
+        "after_analysis": "ANALYZED",
+        "imported_chunks": imported_chunks,
+        "analyzed_chunks": analyzed_chunks,
+        "failed_chunks": failed_chunks,
+        "coverage_complete": coverage_complete,
+    }
+
+
 async def run_smoke(workspace: Path, project_id: str = "smoke_mvp_project") -> Dict[str, Any]:
     workspace = workspace.resolve()
     sample_paths = _write_raw_samples(workspace, project_id)
@@ -187,12 +214,14 @@ async def run_smoke(workspace: Path, project_id: str = "smoke_mvp_project") -> D
 
             manifest = _read_json(project_root / "samples" / "manifests" / f"{sample_id}_manifest.json")
             coverage_report = _read_json(project_root / "analysis" / "coverage" / f"{sample_id}_coverage.json")
+            pipeline_state = _assert_sample_pipeline_state(sample_id, imported, analyzed, coverage_report)
             sample_summaries.append({
                 "sample_id": sample_id,
                 "title": manifest["title"],
                 "total_chunks": manifest["total_chunks"],
                 "coverage_status": coverage_report["status"],
                 "analysis_coverage_ratio": coverage_report["analysis_coverage"]["coverage_ratio"],
+                "pipeline_state": pipeline_state,
             })
 
         synthesized = await synthesis_agent.run(_request(
@@ -242,6 +271,16 @@ async def run_smoke(workspace: Path, project_id: str = "smoke_mvp_project") -> D
         "sample_count": len(SAMPLE_TEXTS),
         "samples": sample_summaries,
         "artifact_checks": expected_paths,
+        "pipeline_checks": {
+            "sample_import": "CHUNKED",
+            "full_text_analysis": "ANALYZED",
+            "required_artifacts": [
+                "analysis/per_chunk",
+                "analysis/per_book",
+                "analysis/cross_book",
+                "skills/enabled.yaml",
+            ],
+        },
         "skill_count": skills.structured_output.get("skill_count"),
     }
 

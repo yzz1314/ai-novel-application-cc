@@ -339,6 +339,12 @@ export const graphApi = {
     request(api.get(`/projects/${projectId}/books/${bookId}/graph/db`)),
   syncDb: (projectId: string, bookId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/books/${bookId}/graph/sync`, data || {})),
+  getVersions: (projectId: string, bookId: string) =>
+    request<any[]>(api.get(`/projects/${projectId}/books/${bookId}/graph/versions`)),
+  createVersion: (projectId: string, bookId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/books/${bookId}/graph/versions`, data || {})),
+  getVersion: (projectId: string, bookId: string, versionId: string) =>
+    request(api.get(`/projects/${projectId}/books/${bookId}/graph/versions/${versionId}`)),
 }
 
 export const retrievalApi = {

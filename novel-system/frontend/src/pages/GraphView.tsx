@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Col,
+  Drawer,
   Empty,
   Row,
   Select,
@@ -17,6 +18,7 @@ import {
 import {
   DatabaseOutlined,
   DownloadOutlined,
+  HistoryOutlined,
   PartitionOutlined,
   ReloadOutlined,
   TeamOutlined,
@@ -51,10 +53,14 @@ const GraphView: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [building, setBuilding] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [versionLoading, setVersionLoading] = useState(false)
   const [pathLoading, setPathLoading] = useState(false)
   const [books, setBooks] = useState<any[]>([])
   const [bookId, setBookId] = useState('default')
   const [graph, setGraph] = useState<any>(null)
+  const [versions, setVersions] = useState<any[]>([])
+  const [versionDrawerOpen, setVersionDrawerOpen] = useState(false)
+  const [versionDetail, setVersionDetail] = useState<any>(null)
   const [lastTask, setLastTask] = useState<any>(null)
   const [sourceNode, setSourceNode] = useState<string>()
   const [targetNode, setTargetNode] = useState<string>()
@@ -171,10 +177,25 @@ const GraphView: React.FC = () => {
       setLoading(true)
       const data = await graphApi.get(projectId, bookId || 'default')
       setGraph(data)
+      await loadVersions()
     } catch (error) {
       setGraph(null)
+      setVersions([])
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadVersions = async () => {
+    if (!projectId) return
+    try {
+      setVersionLoading(true)
+      const data = await graphApi.getVersions(projectId, bookId || 'default')
+      setVersions(data || [])
+    } catch (error) {
+      setVersions([])
+    } finally {
+      setVersionLoading(false)
     }
   }
 
@@ -202,7 +223,7 @@ const GraphView: React.FC = () => {
     if (!projectId) return
     try {
       setBuilding(true)
-      const task: any = await graphApi.build(projectId, {
+      const task: any = await graphApi.rebuild(projectId, bookId || 'default', {
         book_id: bookId || 'default',
         use_memory_data: true,
         use_outline_data: true,
@@ -244,11 +265,49 @@ const GraphView: React.FC = () => {
       message.loading({ content: '正在同步图谱数据库', key: 'graph-sync' })
       const data = await graphApi.syncDb(projectId, bookId || 'default', { book_id: bookId || 'default' })
       setGraph(data)
+      await loadVersions()
       message.success({ content: '图谱数据库已同步', key: 'graph-sync' })
     } catch (error) {
       message.error({ content: '同步图谱数据库失败', key: 'graph-sync' })
     } finally {
       setSyncing(false)
+    }
+  }
+
+  const createGraphVersion = async () => {
+    if (!projectId || !graph) return
+    try {
+      setVersionLoading(true)
+      const version: any = await graphApi.createVersion(projectId, bookId || 'default', {
+        reason: 'manual_graph_snapshot',
+        actor: 'human',
+        note: 'Manual graph snapshot from GraphView',
+      })
+      message.success(`图谱版本已创建：${version.id}`)
+      await loadVersions()
+    } catch (error) {
+      message.error('创建图谱版本失败')
+    } finally {
+      setVersionLoading(false)
+    }
+  }
+
+  const openVersionDrawer = async () => {
+    setVersionDrawerOpen(true)
+    setVersionDetail(null)
+    await loadVersions()
+  }
+
+  const openVersionDetail = async (version: any) => {
+    if (!projectId) return
+    try {
+      setVersionLoading(true)
+      const data = await graphApi.getVersion(projectId, bookId || 'default', version.id)
+      setVersionDetail(data)
+    } catch (error) {
+      message.error('加载图谱版本失败')
+    } finally {
+      setVersionLoading(false)
     }
   }
 
@@ -341,6 +400,46 @@ const GraphView: React.FC = () => {
     },
   ]
 
+  const versionColumns = [
+    {
+      title: '版本',
+      dataIndex: 'id',
+      key: 'id',
+      ellipsis: true,
+      render: (value: string) => <Text code>{value}</Text>,
+    },
+    {
+      title: '原因',
+      dataIndex: 'reason',
+      key: 'reason',
+      width: 160,
+      render: (value: string) => value || '-',
+    },
+    {
+      title: '规模',
+      key: 'size',
+      width: 110,
+      render: (_: any, record: any) => `${record.nodeCount ?? 0}/${record.edgeCount ?? 0}`,
+    },
+    {
+      title: '时间',
+      dataIndex: 'createdAt',
+      key: 'createdAt',
+      width: 190,
+      render: (value: string) => value || '-',
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 90,
+      render: (_: any, record: any) => (
+        <Button size="small" onClick={() => openVersionDetail(record)}>
+          查看
+        </Button>
+      ),
+    },
+  ]
+
   const centralityColumns = [
     {
       title: '节点',
@@ -403,6 +502,12 @@ const GraphView: React.FC = () => {
             </Button>
             <Button icon={<DatabaseOutlined />} onClick={syncGraphDb} loading={syncing} disabled={!graph}>
               同步数据库
+            </Button>
+            <Button icon={<HistoryOutlined />} onClick={createGraphVersion} loading={versionLoading} disabled={!graph}>
+              创建版本
+            </Button>
+            <Button icon={<HistoryOutlined />} onClick={openVersionDrawer}>
+              版本 {versions.length}
             </Button>
             <Button type="primary" icon={<PartitionOutlined />} onClick={handleBuild} loading={building}>
               {graph ? '重建图谱' : '构建图谱'}
@@ -706,6 +811,39 @@ const GraphView: React.FC = () => {
           </Empty>
         )}
       </Card>
+      <Drawer
+        title="图谱版本"
+        width={760}
+        open={versionDrawerOpen}
+        onClose={() => setVersionDrawerOpen(false)}
+        extra={<Button icon={<ReloadOutlined />} loading={versionLoading} onClick={loadVersions}>刷新</Button>}
+      >
+        <Table
+          rowKey="id"
+          size="small"
+          loading={versionLoading}
+          columns={versionColumns}
+          dataSource={versions}
+          pagination={{ pageSize: 8 }}
+          locale={{ emptyText: '暂无图谱版本' }}
+        />
+        {versionDetail && (
+          <Card size="small" title={versionDetail.id || '版本详情'} style={{ marginTop: 16 }}>
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <Text type="secondary">
+                {versionDetail.sourcePath || '-'} · {versionDetail.sourceModifiedAt || '-'}
+              </Text>
+              <Text>
+                节点 {versionDetail.nodeCount ?? versionDetail.graph?.nodes?.length ?? 0} / 关系{' '}
+                {versionDetail.edgeCount ?? versionDetail.graph?.edges?.length ?? 0}
+              </Text>
+              <pre style={{ maxHeight: 360, overflow: 'auto' }}>
+                {JSON.stringify(versionDetail, null, 2)}
+              </pre>
+            </Space>
+          </Card>
+        )}
+      </Drawer>
     </Space>
   )
 }

@@ -64,6 +64,25 @@ public class GraphController {
         return ResponseEntity.ok(graphArtifactService.clearQueryCaches(projectId, "default"));
     }
 
+    @GetMapping("/api/projects/{projectId}/graph/versions")
+    public ResponseEntity<java.util.List<Map<String, Object>>> listProjectGraphVersions(@PathVariable String projectId) {
+        return ResponseEntity.ok(graphArtifactService.listGraphVersions(projectId, "default"));
+    }
+
+    @PostMapping("/api/projects/{projectId}/graph/versions")
+    public ResponseEntity<Map<String, Object>> createProjectGraphVersion(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(graphArtifactService.createGraphVersion(projectId, "default", request == null ? Map.of() : request));
+    }
+
+    @GetMapping("/api/projects/{projectId}/graph/versions/{versionId}")
+    public ResponseEntity<Map<String, Object>> getProjectGraphVersion(
+            @PathVariable String projectId,
+            @PathVariable String versionId) {
+        return ResponseEntity.ok(graphArtifactService.getGraphVersion(projectId, "default", versionId));
+    }
+
     @PostMapping("/api/projects/{projectId}/graph/rebuild")
     public ResponseEntity<TaskResponse> rebuildProjectGraph(
             @PathVariable String projectId,
@@ -106,6 +125,29 @@ public class GraphController {
             @PathVariable String projectId,
             @PathVariable String bookId) {
         return ResponseEntity.ok(graphArtifactService.clearQueryCaches(projectId, bookId));
+    }
+
+    @GetMapping("/api/projects/{projectId}/books/{bookId}/graph/versions")
+    public ResponseEntity<java.util.List<Map<String, Object>>> listBookGraphVersions(
+            @PathVariable String projectId,
+            @PathVariable String bookId) {
+        return ResponseEntity.ok(graphArtifactService.listGraphVersions(projectId, bookId));
+    }
+
+    @PostMapping("/api/projects/{projectId}/books/{bookId}/graph/versions")
+    public ResponseEntity<Map<String, Object>> createBookGraphVersion(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(graphArtifactService.createGraphVersion(projectId, bookId, request == null ? Map.of() : request));
+    }
+
+    @GetMapping("/api/projects/{projectId}/books/{bookId}/graph/versions/{versionId}")
+    public ResponseEntity<Map<String, Object>> getBookGraphVersion(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @PathVariable String versionId) {
+        return ResponseEntity.ok(graphArtifactService.getGraphVersion(projectId, bookId, versionId));
     }
 
     @PostMapping("/api/projects/{projectId}/books/{bookId}/graph/rebuild")

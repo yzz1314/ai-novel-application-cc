@@ -141,8 +141,20 @@ public class GraphArtifactService {
     public Task rebuildGraph(String projectId, String bookId, Map<String, Object> request) {
         projectService.getProject(projectId);
         Map<String, Object> parameters = new LinkedHashMap<>(request == null ? Map.of() : request);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Map<String, Object> version = createGraphVersionIfPresent(
+            projectId,
+            resolvedBookId,
+            "before_graph_rebuild",
+            stringValue(parameters, "actor", "system"),
+            stringValue(parameters, "note", "Snapshot before graph rebuild")
+        );
         parameters.put("project_id", projectId);
-        parameters.put("book_id", resolveBookId(projectId, bookId));
+        parameters.put("book_id", resolvedBookId);
+        if (!version.isEmpty()) {
+            parameters.put("previous_graph_version_id", version.get("id"));
+            parameters.put("previous_graph_version_path", version.get("path"));
+        }
 
         Task task = taskExecutorService.createTask(
             projectId,
@@ -153,6 +165,64 @@ public class GraphArtifactService {
         );
         taskExecutorService.executeTaskAsync(task.getId());
         return task;
+    }
+
+    public Map<String, Object> createGraphVersion(String projectId, String bookId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        return createGraphVersion(
+            projectId,
+            resolvedBookId,
+            stringValue(options, "reason", "manual_graph_snapshot"),
+            stringValue(options, "actor", stringValue(options, "user", "human")),
+            stringValue(options, "note", "")
+        );
+    }
+
+    public List<Map<String, Object>> listGraphVersions(String projectId, String bookId) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Path versionsDir = graphVersionsDir(projectId, resolvedBookId);
+        if (!Files.exists(versionsDir)) {
+            return List.of();
+        }
+        List<Map<String, Object>> versions = new ArrayList<>();
+        try (var stream = Files.list(versionsDir)) {
+            stream
+                .filter(path -> Files.isRegularFile(path) && path.getFileName().toString().endsWith(".json"))
+                .forEach(path -> {
+                    try {
+                        versions.add(graphVersionSummary(projectId, path, readJsonMap(path)));
+                    } catch (Exception ignored) {
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("id", stripSuffix(path.getFileName().toString(), ".json"));
+                        item.put("bookId", resolvedBookId);
+                        item.put("path", relative(projectId, path));
+                        item.put("createdAt", modifiedAt(path));
+                        versions.add(item);
+                    }
+                });
+        } catch (IOException e) {
+            throw new RuntimeException("读取图谱版本目录失败", e);
+        }
+        versions.sort(Comparator.comparing(version -> String.valueOf(version.get("createdAt")), Comparator.reverseOrder()));
+        return versions;
+    }
+
+    public Map<String, Object> getGraphVersion(String projectId, String bookId, String versionId) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        validateId(versionId, "versionId");
+        Path versionFile = graphVersionsDir(projectId, resolvedBookId).resolve(versionId + ".json");
+        if (!Files.exists(versionFile)) {
+            throw new ResourceNotFoundException("图谱版本不存在: " + versionId);
+        }
+        Map<String, Object> version = readJsonMap(versionFile);
+        version.put("id", versionId);
+        version.put("path", relative(projectId, versionFile));
+        version.put("updatedAt", modifiedAt(versionFile));
+        return version;
     }
 
     public Map<String, Object> listQueryCaches(String projectId, String bookId) {
@@ -467,6 +537,83 @@ public class GraphArtifactService {
         Map<String, Object> response = mapOf(cache.get("response"));
         item.put("totalFound", response.get("totalFound"));
         item.put("returned", response.get("returned"));
+        return item;
+    }
+
+    private Map<String, Object> createGraphVersionIfPresent(
+            String projectId,
+            String bookId,
+            String reason,
+            String actor,
+            String note) {
+        try {
+            return createGraphVersion(projectId, bookId, reason, actor, note);
+        } catch (ResourceNotFoundException ignored) {
+            return Map.of();
+        }
+    }
+
+    private Map<String, Object> createGraphVersion(
+            String projectId,
+            String bookId,
+            String reason,
+            String actor,
+            String note) {
+        Path graphFile = resolveGraphFile(projectId, bookId);
+        Map<String, Object> graph = readJsonMap(graphFile);
+        Map<String, Object> statistics = statistics(graph);
+        Map<String, Object> analysis = analysis(graph);
+        String timestamp = LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS"));
+        String versionId = "graph_" + bookId + "_" + timestamp;
+        Path versionFile = graphVersionsDir(projectId, bookId).resolve(versionId + ".json");
+
+        Map<String, Object> version = new LinkedHashMap<>();
+        version.put("id", versionId);
+        version.put("projectId", projectId);
+        version.put("bookId", bookId);
+        version.put("reason", reason);
+        version.put("actor", actor);
+        version.put("note", note);
+        version.put("createdAt", LocalDateTime.now().toString());
+        version.put("sourcePath", relative(projectId, graphFile));
+        version.put("sourceModifiedAt", modifiedAt(graphFile));
+        version.put("graphId", graph.get("graph_id"));
+        version.put("nodeCount", listOfMaps(graph.get("nodes")).size());
+        version.put("edgeCount", listOfMaps(graph.get("edges")).size());
+        version.put("statistics", statistics);
+        version.put("analysis", analysis);
+        version.put("graph", graph);
+
+        try {
+            Files.createDirectories(versionFile.getParent());
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(versionFile.toFile(), version);
+        } catch (IOException e) {
+            throw new RuntimeException("写入图谱版本失败", e);
+        }
+
+        Map<String, Object> response = graphVersionSummary(projectId, versionFile, version);
+        response.put("graph", graph);
+        response.put("statistics", statistics);
+        response.put("analysis", analysis);
+        return response;
+    }
+
+    private Map<String, Object> graphVersionSummary(String projectId, Path versionFile, Map<String, Object> version) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", version.getOrDefault("id", stripSuffix(versionFile.getFileName().toString(), ".json")));
+        item.put("projectId", version.get("projectId"));
+        item.put("bookId", version.get("bookId"));
+        item.put("reason", version.get("reason"));
+        item.put("actor", version.get("actor"));
+        item.put("note", version.get("note"));
+        item.put("createdAt", version.getOrDefault("createdAt", modifiedAt(versionFile)));
+        item.put("sourcePath", version.get("sourcePath"));
+        item.put("sourceModifiedAt", version.get("sourceModifiedAt"));
+        item.put("graphId", version.get("graphId"));
+        item.put("nodeCount", version.get("nodeCount"));
+        item.put("edgeCount", version.get("edgeCount"));
+        item.put("path", relative(projectId, versionFile));
+        item.put("updatedAt", modifiedAt(versionFile));
         return item;
     }
 
@@ -799,6 +946,10 @@ public class GraphArtifactService {
 
     private Path queryCacheDir(String projectId) {
         return projectRoot(projectId).resolve("graph").resolve("query_cache");
+    }
+
+    private Path graphVersionsDir(String projectId, String bookId) {
+        return projectRoot(projectId).resolve("graph").resolve("versions").resolve(bookId);
     }
 
     private String relative(String projectId, Path path) {

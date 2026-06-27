@@ -38,6 +38,7 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class SkillService {
 
+    private static final int SKILL_DIFF_LINE_LIMIT = 2000;
     private static final Pattern SAFE_SKILL_NAME = Pattern.compile("^[A-Za-z0-9_-]+$");
     private static final Pattern SAFE_VERSION_ID = Pattern.compile("^[A-Za-z0-9_.-]+$");
     private static final Pattern FRONTMATTER_PATTERN = Pattern.compile("\\A---\\s*\\R(.*?)\\R---\\s*\\R", Pattern.DOTALL);
@@ -348,6 +349,41 @@ public class SkillService {
         resolveSkillFile(projectId, skillName);
         Path versionFile = resolveSkillVersionFile(projectId, skillName, versionId);
         return skillVersionItem(projectId, skillName, versionFile, true);
+    }
+
+    public Map<String, Object> diffSkillVersionWithCurrent(String projectId, String skillName, String versionId) {
+        projectService.getProject(projectId);
+        validateSkillName(skillName);
+        Path skillFile = resolveSkillFile(projectId, skillName);
+        Path versionFile = resolveSkillVersionFile(projectId, skillName, versionId);
+        try {
+            String versionContent = Files.readString(versionFile, StandardCharsets.UTF_8);
+            String currentContent = Files.readString(skillFile, StandardCharsets.UTF_8);
+            List<String> versionLines = limitedLines(versionContent, SKILL_DIFF_LINE_LIMIT);
+            List<String> currentLines = limitedLines(currentContent, SKILL_DIFF_LINE_LIMIT);
+            List<Map<String, Object>> diff = lineDiff(versionLines, currentLines);
+            long added = diff.stream().filter(item -> "added".equals(item.get("type"))).count();
+            long removed = diff.stream().filter(item -> "removed".equals(item.get("type"))).count();
+
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("skillName", skillName);
+            response.put("versionId", versionId);
+            response.put("left", skillVersionItem(projectId, skillName, versionFile, false));
+            response.put("right", skillCurrentItem(projectId, skillFile));
+            response.put("leftLabel", "version:" + versionId);
+            response.put("rightLabel", "current");
+            response.put("lineLimit", SKILL_DIFF_LINE_LIMIT);
+            response.put("leftTruncated", countLines(versionContent) > SKILL_DIFF_LINE_LIMIT);
+            response.put("rightTruncated", countLines(currentContent) > SKILL_DIFF_LINE_LIMIT);
+            response.put("addedLines", added);
+            response.put("removedLines", removed);
+            response.put("changedLines", added + removed);
+            response.put("diff", diff);
+            response.put("comparedAt", LocalDateTime.now().toString());
+            return response;
+        } catch (IOException e) {
+            throw new RuntimeException("对比Skill版本失败: " + versionId, e);
+        }
     }
 
     public Map<String, Object> restoreSkillVersion(
@@ -818,6 +854,25 @@ public class SkillService {
             return item;
         } catch (IOException e) {
             throw new RuntimeException("读取Skill版本失败: " + versionFile.getFileName(), e);
+        }
+    }
+
+    private Map<String, Object> skillCurrentItem(String projectId, Path skillFile) {
+        try {
+            String content = Files.readString(skillFile, StandardCharsets.UTF_8);
+            String skillName = stripExtension(skillFile.getFileName().toString());
+            Map<String, Object> frontmatter = extractFrontmatter(content);
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("id", "current");
+            item.put("skillName", skillName);
+            item.put("path", relative(projectId, skillFile));
+            item.put("title", asString(frontmatter.get("title"), extractFirstHeading(content, skillName)));
+            item.put("description", asString(frontmatter.get("description"), ""));
+            item.put("sizeBytes", Files.size(skillFile));
+            item.put("updatedAt", modifiedAt(skillFile));
+            return item;
+        } catch (IOException e) {
+            throw new RuntimeException("读取当前Skill失败: " + skillFile.getFileName(), e);
         }
     }
 
@@ -1781,6 +1836,71 @@ public class SkillService {
         } catch (Exception e) {
             return "";
         }
+    }
+
+    private List<String> limitedLines(String text, int limit) {
+        String[] lines = text.split("\\R", -1);
+        List<String> result = new ArrayList<>();
+        int safeLimit = Math.max(1, limit);
+        for (int i = 0; i < lines.length && i < safeLimit; i += 1) {
+            result.add(lines[i]);
+        }
+        return result;
+    }
+
+    private int countLines(String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        return text.split("\\R", -1).length;
+    }
+
+    private List<Map<String, Object>> lineDiff(List<String> left, List<String> right) {
+        int[][] lcs = new int[left.size() + 1][right.size() + 1];
+        for (int i = left.size() - 1; i >= 0; i -= 1) {
+            for (int j = right.size() - 1; j >= 0; j -= 1) {
+                if (left.get(i).equals(right.get(j))) {
+                    lcs[i][j] = lcs[i + 1][j + 1] + 1;
+                } else {
+                    lcs[i][j] = Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+                }
+            }
+        }
+
+        List<Map<String, Object>> diff = new ArrayList<>();
+        int i = 0;
+        int j = 0;
+        while (i < left.size() && j < right.size()) {
+            if (left.get(i).equals(right.get(j))) {
+                diff.add(diffLine("unchanged", i + 1, j + 1, left.get(i)));
+                i += 1;
+                j += 1;
+            } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+                diff.add(diffLine("removed", i + 1, null, left.get(i)));
+                i += 1;
+            } else {
+                diff.add(diffLine("added", null, j + 1, right.get(j)));
+                j += 1;
+            }
+        }
+        while (i < left.size()) {
+            diff.add(diffLine("removed", i + 1, null, left.get(i)));
+            i += 1;
+        }
+        while (j < right.size()) {
+            diff.add(diffLine("added", null, j + 1, right.get(j)));
+            j += 1;
+        }
+        return diff;
+    }
+
+    private Map<String, Object> diffLine(String type, Integer leftLine, Integer rightLine, String text) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("type", type);
+        item.put("leftLine", leftLine);
+        item.put("rightLine", rightLine);
+        item.put("text", text);
+        return item;
     }
 
     private long fileSize(Path file) {

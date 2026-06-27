@@ -97,6 +97,8 @@ const ProjectDetail: React.FC = () => {
   const [skillVersionLoading, setSkillVersionLoading] = useState(false);
   const [skillVersions, setSkillVersions] = useState<any[]>([]);
   const [versionSkill, setVersionSkill] = useState<any>(null);
+  const [skillVersionDiff, setSkillVersionDiff] = useState<any>(null);
+  const [skillVersionDiffLoading, setSkillVersionDiffLoading] = useState(false);
   const [skillConfigVersionOpen, setSkillConfigVersionOpen] = useState(false);
   const [skillConfigVersionLoading, setSkillConfigVersionLoading] = useState(false);
   const [skillConfigVersions, setSkillConfigVersions] = useState<any[]>([]);
@@ -599,6 +601,20 @@ const ProjectDetail: React.FC = () => {
       message.error('恢复Skill版本失败');
     } finally {
       setSkillVersionLoading(false);
+    }
+  };
+
+  const diffSkillVersion = async (versionId: string) => {
+    if (!projectId || !versionSkill) return;
+    try {
+      setSkillVersionDiffLoading(true);
+      setSkillVersionDiff(null);
+      const result = await skillsApi.diffVersion(projectId, versionSkill.name, versionId);
+      setSkillVersionDiff(result);
+    } catch (error) {
+      message.error('加载Skill版本差异失败');
+    } finally {
+      setSkillVersionDiffLoading(false);
     }
   };
 
@@ -1149,6 +1165,7 @@ const ProjectDetail: React.FC = () => {
           setSkillVersionOpen(false);
           setVersionSkill(null);
           setSkillVersions([]);
+          setSkillVersionDiff(null);
         }}
       >
         <Table
@@ -1164,11 +1181,16 @@ const ProjectDetail: React.FC = () => {
             {
               title: '操作',
               key: 'action',
-              width: 90,
+              width: 170,
               render: (_: any, record: any) => (
-                <Button type="link" onClick={() => restoreSkillVersion(record.id)}>
-                  恢复
-                </Button>
+                <Space size="small">
+                  <Button type="link" onClick={() => diffSkillVersion(record.id)}>
+                    对比当前
+                  </Button>
+                  <Button type="link" onClick={() => restoreSkillVersion(record.id)}>
+                    恢复
+                  </Button>
+                </Space>
               ),
             },
           ]}
@@ -1215,6 +1237,55 @@ const ProjectDetail: React.FC = () => {
           ]}
           locale={{ emptyText: '暂无启用配置历史版本' }}
         />
+      </Modal>
+
+      <Modal
+        title={`${skillVersionDiff?.skillName || 'Skill'} 版本差异`}
+        open={!!skillVersionDiff}
+        width={980}
+        footer={null}
+        onCancel={() => setSkillVersionDiff(null)}
+      >
+        <Spin spinning={skillVersionDiffLoading}>
+          {skillVersionDiff && (
+            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+              <Descriptions bordered size="small" column={2}>
+                <Descriptions.Item label="历史版本">{skillVersionDiff.versionId}</Descriptions.Item>
+                <Descriptions.Item label="当前版本">{skillVersionDiff.right?.path || 'current'}</Descriptions.Item>
+                <Descriptions.Item label="新增行">{skillVersionDiff.addedLines ?? 0}</Descriptions.Item>
+                <Descriptions.Item label="删除行">{skillVersionDiff.removedLines ?? 0}</Descriptions.Item>
+                <Descriptions.Item label="对比时间">{skillVersionDiff.comparedAt || '-'}</Descriptions.Item>
+                <Descriptions.Item label="截断">
+                  {skillVersionDiff.leftTruncated || skillVersionDiff.rightTruncated ? '是' : '否'}
+                </Descriptions.Item>
+              </Descriptions>
+              <div style={{ maxHeight: 520, overflow: 'auto', border: '1px solid #f0f0f0', borderRadius: 6 }}>
+                <List
+                  size="small"
+                  dataSource={(skillVersionDiff.diff || []).slice(0, 500)}
+                  renderItem={(item: any) => {
+                    const color = item.type === 'added' ? '#f6ffed' : item.type === 'removed' ? '#fff1f0' : '#fff';
+                    const tagColor = item.type === 'added' ? 'success' : item.type === 'removed' ? 'error' : 'default';
+                    return (
+                      <List.Item style={{ background: color, fontFamily: 'monospace', padding: '4px 8px' }}>
+                        <Space size="small" align="start" style={{ width: '100%' }}>
+                          <Tag color={tagColor} style={{ minWidth: 78, textAlign: 'center' }}>{item.type}</Tag>
+                          <Text type="secondary" style={{ minWidth: 90 }}>
+                            {item.leftLine ?? '-'} / {item.rightLine ?? '-'}
+                          </Text>
+                          <Text style={{ whiteSpace: 'pre-wrap' }}>{item.text}</Text>
+                        </Space>
+                      </List.Item>
+                    );
+                  }}
+                />
+              </div>
+              {(skillVersionDiff.diff || []).length > 500 && (
+                <Text type="secondary">仅显示前 500 行差异，可通过产物页查看完整文件。</Text>
+              )}
+            </Space>
+          )}
+        </Spin>
       </Modal>
 
       <Modal

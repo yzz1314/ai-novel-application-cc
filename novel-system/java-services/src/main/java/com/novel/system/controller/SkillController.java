@@ -113,6 +113,14 @@ public class SkillController {
         return ResponseEntity.ok(skillService.getSkillVersion(projectId, skillName, versionId));
     }
 
+    @GetMapping("/{skillName}/versions/{versionId}/diff")
+    public ResponseEntity<Map<String, Object>> diffSkillVersionWithCurrent(
+            @PathVariable String projectId,
+            @PathVariable String skillName,
+            @PathVariable String versionId) {
+        return ResponseEntity.ok(skillService.diffSkillVersionWithCurrent(projectId, skillName, versionId));
+    }
+
     @PostMapping("/{skillName}/versions/{versionId}/restore")
     public ResponseEntity<Map<String, Object>> restoreSkillVersion(
             @PathVariable String projectId,

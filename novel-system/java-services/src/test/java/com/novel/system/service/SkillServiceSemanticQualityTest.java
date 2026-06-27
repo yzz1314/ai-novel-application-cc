@@ -22,6 +22,7 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -50,8 +51,8 @@ class SkillServiceSemanticQualityTest {
         project.setId(PROJECT_ID);
         project.setName("Skill Semantic Test");
         when(projectService.getProject(PROJECT_ID)).thenReturn(project);
-        when(skillProfileRepository.findByProjectIdAndName(PROJECT_ID, "default")).thenReturn(Optional.empty());
-        when(skillProfileRepository.save(any(SkillProfile.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        lenient().when(skillProfileRepository.findByProjectIdAndName(PROJECT_ID, "default")).thenReturn(Optional.empty());
+        lenient().when(skillProfileRepository.save(any(SkillProfile.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         writeProjectFile("skills/local/writing_skill.md", semanticWritingSkill());
         writeProjectFile("skills/enabled.yaml", """
@@ -168,6 +169,52 @@ class SkillServiceSemanticQualityTest {
             .containsEntry("path", reportPath)
             .containsEntry("checkedBy", "unit-test")
             .containsKey("severityCounts");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void diffSkillVersionWithCurrentReturnsLineDiff() throws Exception {
+        writeProjectFile("skills/versions/writing_skill/writing_skill_baseline.md", """
+            ---
+            title: Writing Skill
+            ---
+            # Writing Skill
+            必须保持章节边界。
+            禁止提前揭示伏笔。
+            """);
+        writeProjectFile("skills/local/writing_skill.md", """
+            ---
+            title: Writing Skill
+            ---
+            # Writing Skill
+            必须保持章节边界。
+            允许在章末加强钩子。
+            """);
+
+        Map<String, Object> result = skillService.diffSkillVersionWithCurrent(
+            PROJECT_ID,
+            "writing_skill",
+            "writing_skill_baseline"
+        );
+
+        assertThat(result)
+            .containsEntry("skillName", "writing_skill")
+            .containsEntry("versionId", "writing_skill_baseline")
+            .containsEntry("leftLabel", "version:writing_skill_baseline")
+            .containsEntry("rightLabel", "current")
+            .containsKey("diff");
+        assertThat((Long) result.get("addedLines")).isEqualTo(1L);
+        assertThat((Long) result.get("removedLines")).isEqualTo(1L);
+        assertThat((List<Map<String, Object>>) result.get("diff"))
+            .extracting(item -> item.get("type"))
+            .contains("removed", "added");
+
+        Map<String, Object> left = (Map<String, Object>) result.get("left");
+        Map<String, Object> right = (Map<String, Object>) result.get("right");
+        assertThat(left).containsEntry("id", "writing_skill_baseline");
+        assertThat(right)
+            .containsEntry("id", "current")
+            .containsEntry("path", "skills/local/writing_skill.md");
     }
 
     private String semanticWritingSkill() {

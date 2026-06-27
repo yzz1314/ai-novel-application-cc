@@ -102,6 +102,8 @@ export const skillsApi = {
     request<any[]>(api.get(`/projects/${projectId}/skills/${skillName}/versions`)),
   getVersion: (projectId: string, skillName: string, versionId: string) =>
     request(api.get(`/projects/${projectId}/skills/${skillName}/versions/${versionId}`)),
+  diffVersion: (projectId: string, skillName: string, versionId: string) =>
+    request(api.get(`/projects/${projectId}/skills/${skillName}/versions/${versionId}/diff`)),
   restoreVersion: (projectId: string, skillName: string, versionId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/skills/${skillName}/versions/${versionId}/restore`, data || {})),
   checkQuality: (projectId: string, skillName: string, data?: any) =>

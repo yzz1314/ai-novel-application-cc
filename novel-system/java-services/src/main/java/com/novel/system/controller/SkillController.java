@@ -60,6 +60,13 @@ public class SkillController {
         return ResponseEntity.ok(skillService.detectConflicts(projectId));
     }
 
+    @PostMapping("/conflicts/report")
+    public ResponseEntity<Map<String, Object>> generateConflictReport(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(skillService.generateConflictReport(projectId, request));
+    }
+
     @GetMapping("/{skillName}")
     public ResponseEntity<SkillResponse> getSkill(
             @PathVariable String projectId,

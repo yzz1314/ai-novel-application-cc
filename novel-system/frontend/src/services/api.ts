@@ -92,6 +92,8 @@ export const skillsApi = {
   restoreEnabledVersion: (projectId: string, versionId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/skills/enabled/versions/${versionId}/restore`, data || {})),
   getConflicts: (projectId: string) => request(api.get(`/projects/${projectId}/skills/conflicts`)),
+  generateConflictReport: (projectId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/skills/conflicts/report`, data || {})),
   update: (projectId: string, skillName: string, data: any) =>
     request(api.patch(`/projects/${projectId}/skills/${skillName}`, data || {})),
   updateConfig: (projectId: string, skillName: string, data: any) =>

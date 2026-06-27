@@ -89,6 +89,7 @@ const ProjectDetail: React.FC = () => {
   const [soul, setSoul] = useState<any>(null);
   const [skillDrawer, setSkillDrawer] = useState<any>(null);
   const [skillConflicts, setSkillConflicts] = useState<any>(null);
+  const [skillConflictReportLoading, setSkillConflictReportLoading] = useState(false);
   const [skillEditOpen, setSkillEditOpen] = useState(false);
   const [skillSaving, setSkillSaving] = useState(false);
   const [editingSkill, setEditingSkill] = useState<any>(null);
@@ -219,6 +220,20 @@ const ProjectDetail: React.FC = () => {
   }, [projectId, hasRunningTasks]);
 
   const conflictCount = skillConflicts?.conflictCount || 0;
+
+  const generateSkillConflictReport = async () => {
+    if (!projectId) return;
+    try {
+      setSkillConflictReportLoading(true);
+      const result: any = await skillsApi.generateConflictReport(projectId, { checkedBy: 'human' });
+      setSkillConflicts(result);
+      message.success(`Skill冲突报告已生成：${result.reportPath || '-'}`);
+    } catch (error) {
+      message.error('生成Skill冲突报告失败');
+    } finally {
+      setSkillConflictReportLoading(false);
+    }
+  };
 
   function isWaitingForHuman(task: any) {
     return task?.status === 'PARTIAL' && !!task?.result?.waiting_for_human?.node_id;
@@ -880,6 +895,13 @@ const ProjectDetail: React.FC = () => {
             <Button icon={<HistoryOutlined />} onClick={openSkillConfigVersions}>
               启用配置版本
             </Button>
+            <Button
+              icon={<FileSearchOutlined />}
+              loading={skillConflictReportLoading}
+              onClick={generateSkillConflictReport}
+            >
+              生成冲突报告
+            </Button>
           </Space>
           {skillConflicts && (
             conflictCount > 0 ? (
@@ -888,25 +910,40 @@ const ProjectDetail: React.FC = () => {
                 showIcon
                 message={`检测到 ${conflictCount} 个Skill冲突或路由风险`}
                 description={
-                  <List
-                    size="small"
-                    dataSource={(skillConflicts.conflicts || []).slice(0, 5)}
-                    renderItem={(item: any) => (
-                      <List.Item>
-                        <Space size="small" wrap>
-                          <Tag color={item.severity === 'error' ? 'error' : item.severity === 'warning' ? 'warning' : 'default'}>
-                            {item.severity}
-                          </Tag>
-                          <Text>{item.skillA} / {item.skillB}</Text>
-                          <Text type="secondary">{item.message}</Text>
-                        </Space>
-                      </List.Item>
+                  <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                    {(skillConflicts.reportPath || skillConflicts.latestConflictReportPath) && (
+                      <Text type="secondary">
+                        报告：{skillConflicts.reportPath || skillConflicts.latestConflictReportPath}
+                      </Text>
                     )}
-                  />
+                    <List
+                      size="small"
+                      dataSource={(skillConflicts.conflicts || []).slice(0, 5)}
+                      renderItem={(item: any) => (
+                        <List.Item>
+                          <Space size="small" wrap>
+                            <Tag color={item.severity === 'error' ? 'error' : item.severity === 'warning' ? 'warning' : 'default'}>
+                              {item.severity}
+                            </Tag>
+                            <Text>{item.skillA} / {item.skillB}</Text>
+                            <Text type="secondary">{item.message}</Text>
+                            {item.suggestion && <Text type="secondary">建议：{item.suggestion}</Text>}
+                          </Space>
+                        </List.Item>
+                      )}
+                    />
+                  </Space>
                 }
               />
             ) : (
-              <Alert type="success" showIcon message="当前启用Skill未检测到冲突" />
+              <Alert
+                type="success"
+                showIcon
+                message="当前启用Skill未检测到冲突"
+                description={(skillConflicts.reportPath || skillConflicts.latestConflictReportPath)
+                  ? `报告：${skillConflicts.reportPath || skillConflicts.latestConflictReportPath}`
+                  : undefined}
+              />
             )
           )}
           <Table columns={skillColumns} dataSource={skills} rowKey="name" pagination={false} />

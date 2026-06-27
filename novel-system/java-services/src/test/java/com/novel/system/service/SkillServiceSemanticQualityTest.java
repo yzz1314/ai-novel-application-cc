@@ -115,6 +115,61 @@ class SkillServiceSemanticQualityTest {
             .contains("latest_quality_report_path");
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void generateConflictReportPersistsProfileMetadata() throws Exception {
+        writeProjectFile("skills/local/backup_skill.md", semanticWritingSkill());
+        writeProjectFile("skills/enabled.yaml", """
+            version: 1.0.0
+            project_id: project_skill_semantic
+            skills:
+              - name: writing_skill
+                type: writing
+                path: skills/local/writing_skill.md
+                enabled: true
+                priority: 100
+                scope:
+                  - chapter_writing
+              - name: backup_skill
+                type: writing
+                path: skills/local/backup_skill.md
+                enabled: true
+                priority: 100
+                scope:
+                  - chapter_writing
+            """);
+
+        Map<String, Object> result = skillService.generateConflictReport(
+            PROJECT_ID,
+            Map.of("checkedBy", "unit-test")
+        );
+
+        assertThat(result)
+            .containsEntry("projectId", PROJECT_ID)
+            .containsKey("reportPath")
+            .containsKey("severityCounts");
+        assertThat((Integer) result.get("conflictCount")).isGreaterThanOrEqualTo(2);
+        assertThat((List<Map<String, Object>>) result.get("conflicts"))
+            .allSatisfy(item -> assertThat(item).containsKeys("type", "severity", "skillA", "skillB", "suggestion"));
+
+        String reportPath = String.valueOf(result.get("reportPath"));
+        Map<String, Object> report = jsonMapper.readValue(projectRoot().resolve(reportPath).toFile(), Map.class);
+        assertThat(report)
+            .containsEntry("review_type", "skill_conflict_report")
+            .containsEntry("skill_name", "conflicts")
+            .containsKey("severity_counts");
+
+        Map<String, Object> profile = (Map<String, Object>) result.get("skillProfile");
+        Map<String, Object> metadata = (Map<String, Object>) profile.get("skillMetadata");
+        assertThat(metadata)
+            .containsEntry("latestConflictReportPath", reportPath)
+            .containsKey("latestConflictReport");
+        assertThat((Map<String, Object>) metadata.get("latestConflictReport"))
+            .containsEntry("path", reportPath)
+            .containsEntry("checkedBy", "unit-test")
+            .containsKey("severityCounts");
+    }
+
     private String semanticWritingSkill() {
         String body = """
             ---

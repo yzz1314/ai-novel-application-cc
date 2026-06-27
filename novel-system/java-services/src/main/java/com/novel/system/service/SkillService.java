@@ -181,6 +181,64 @@ public class SkillService {
         response.put("conflictCount", conflicts.size());
         response.put("conflicts", conflicts);
         response.put("checkedAt", LocalDateTime.now().toString());
+        skillProfileRepository.findByProjectIdAndName(projectId, "default")
+            .map(SkillProfile::getSkillMetadata)
+            .map(metadata -> asMap(metadata.get("latestConflictReport")))
+            .filter(metadata -> !metadata.isEmpty())
+            .ifPresent(latest -> {
+                response.put("latestConflictReport", latest);
+                response.put("latestConflictReportPath", latest.getOrDefault("path", ""));
+            });
+        return response;
+    }
+
+    public Map<String, Object> generateConflictReport(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        String checkedBy = asString(options.get("checkedBy"), asString(options.get("checker"), "system"));
+        String checkedAt = LocalDateTime.now().toString();
+        List<SkillResponse> skills = listSkills(projectId);
+        List<Map<String, Object>> conflicts = detectSkillConflicts(projectId, skills);
+        Map<String, Object> severityCounts = conflictSeverityCounts(conflicts);
+
+        Map<String, Object> reportDetails = new LinkedHashMap<>();
+        reportDetails.put("project_id", projectId);
+        reportDetails.put("checked_by", checkedBy);
+        reportDetails.put("checked_at", checkedAt);
+        reportDetails.put("skill_count", skills.size());
+        reportDetails.put("enabled_count", skills.stream().filter(skill -> Boolean.TRUE.equals(skill.getEnabled())).count());
+        reportDetails.put("conflict_count", conflicts.size());
+        reportDetails.put("severity_counts", severityCounts);
+        reportDetails.put("conflicts", conflicts);
+        Path reportPath = writeSkillReport(projectId, "conflicts", "skill_conflict_report", reportDetails);
+        String relativeReportPath = relative(projectId, reportPath);
+
+        SkillProfile profile = syncProjectSkillProfile(projectId);
+        Map<String, Object> metadata = new LinkedHashMap<>(
+            profile.getSkillMetadata() != null ? profile.getSkillMetadata() : Map.of()
+        );
+        Map<String, Object> latestReport = new LinkedHashMap<>();
+        latestReport.put("path", relativeReportPath);
+        latestReport.put("checkedBy", checkedBy);
+        latestReport.put("checkedAt", checkedAt);
+        latestReport.put("conflictCount", conflicts.size());
+        latestReport.put("severityCounts", severityCounts);
+        metadata.put("latestConflictReport", latestReport);
+        metadata.put("latestConflictReportPath", relativeReportPath);
+        metadata.put("conflictCount", conflicts.size());
+        profile.setSkillMetadata(metadata);
+        profile.setUpdatedAt(LocalDateTime.now());
+        skillProfileRepository.save(profile);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("conflictCount", conflicts.size());
+        response.put("severityCounts", severityCounts);
+        response.put("conflicts", conflicts);
+        response.put("reportPath", relativeReportPath);
+        response.put("checkedBy", checkedBy);
+        response.put("checkedAt", checkedAt);
+        response.put("skillProfile", toSkillProfileMap(profile));
         return response;
     }
 
@@ -1631,7 +1689,30 @@ public class SkillService {
         item.put("skillA", left);
         item.put("skillB", right);
         item.put("message", message);
+        item.put("suggestion", conflictSuggestion(type));
         return item;
+    }
+
+    private Map<String, Object> conflictSeverityCounts(List<Map<String, Object>> conflicts) {
+        Map<String, Object> counts = new LinkedHashMap<>();
+        counts.put("error", 0);
+        counts.put("warning", 0);
+        counts.put("info", 0);
+        for (Map<String, Object> conflict : conflicts) {
+            String severity = asString(conflict.get("severity"), "info");
+            counts.put(severity, asInteger(counts.get(severity), 0) + 1);
+        }
+        return counts;
+    }
+
+    private String conflictSuggestion(String type) {
+        return switch (type) {
+            case "explicit_conflict" -> "停用其中一个 Skill，或移除 conflicts_with 并记录人工审批依据。";
+            case "scope_overlap" -> "拆分 scope 或调整类型，避免同一任务同时命中多个同类 Skill。";
+            case "priority_tie" -> "调高主 Skill 优先级，或把备用 Skill 降为更窄 scope。";
+            case "semantic_rule_conflict" -> "统一必须/禁止规则，并在较低优先级 Skill 中标注服从上游规则。";
+            default -> "检查 Skill scope、优先级和审批状态，保留明确的路由依据。";
+        };
     }
 
     private List<String> semanticRuleConflicts(String leftContent, String rightContent) {

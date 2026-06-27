@@ -164,6 +164,15 @@ class DashboardServiceTest {
         assertThat(blockedProjects).hasSize(1);
         assertThat(blockedProjects.get(0).get("blocker")).isEqualTo("FAILED_TASK");
 
+        List<Map<String, Object>> alerts = (List<Map<String, Object>>) dashboard.get("alerts");
+        assertThat(alerts)
+            .extracting(alert -> alert.get("id"))
+            .contains("failed_tasks", "waiting_approvals", "slow_tasks", "high_retry_tasks", "blocked_projects");
+        assertThat(alerts)
+            .filteredOn(alert -> "critical".equals(alert.get("severity")))
+            .extracting(alert -> alert.get("target"))
+            .contains("tasks");
+
         List<Map<String, Object>> nextActions = (List<Map<String, Object>>) dashboard.get("nextActions");
         assertThat(nextActions)
             .extracting(action -> action.get("target"))

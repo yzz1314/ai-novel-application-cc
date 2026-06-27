@@ -112,6 +112,7 @@ const Dashboard: React.FC = () => {
   const performanceSummary = dashboard?.performanceSummary || {}
   const blockedProjects = dashboard?.blockedProjects || []
   const nextActions = dashboard?.nextActions || []
+  const alerts = dashboard?.alerts || []
 
   const activeTasks = Number(taskSummary.PENDING || 0) + Number(taskSummary.RUNNING || 0)
   const failedTasks = Number(taskSummary.FAILED || 0)
@@ -124,6 +125,12 @@ const Dashboard: React.FC = () => {
       status: value?.status || 'UNKNOWN',
     }))
   }, [serviceStatus])
+
+  const alertTagColor = (severity?: string) => {
+    if (severity === 'critical') return 'error'
+    if (severity === 'warning') return 'warning'
+    return 'processing'
+  }
 
   const loadDashboard = async () => {
     try {
@@ -336,6 +343,36 @@ const Dashboard: React.FC = () => {
             </Space>
           }
         />
+      ) : null}
+
+      {alerts.length ? (
+        <Card title="告警中心" loading={loading}>
+          <List
+            dataSource={alerts}
+            renderItem={(item: any) => (
+              <List.Item
+                actions={[
+                  <Button type="link" onClick={() => navigate(actionPath(item.target))}>
+                    处理
+                  </Button>,
+                ]}
+              >
+                <List.Item.Meta
+                  avatar={<WarningOutlined style={{ color: item.severity === 'critical' ? '#cf1322' : '#faad14' }} />}
+                  title={
+                    <Space wrap>
+                      <Text strong>{item.title}</Text>
+                      <Tag color={alertTagColor(item.severity)}>{item.severity}</Tag>
+                    </Space>
+                  }
+                  description={item.message}
+                />
+              </List.Item>
+            )}
+          />
+        </Card>
+      ) : dashboard ? (
+        <Alert type="success" showIcon message="暂无告警" />
       ) : null}
 
       {(performanceSummary.slowTaskCount || performanceSummary.highRetryTaskCount) ? (

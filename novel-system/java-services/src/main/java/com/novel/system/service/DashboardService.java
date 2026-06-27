@@ -60,15 +60,19 @@ public class DashboardService {
         Map<String, Object> taskSummary = taskSummary();
         List<Task> partialTasks = taskRepository.findByStatus(TaskStatus.PARTIAL);
         Map<String, Object> serviceStatus = serviceStatus();
+        Map<String, Object> healthSummary = healthSummary(stats, taskSummary, partialTasks, serviceStatus);
+        Map<String, Object> performanceSummary = performanceSummary(monitoredTasks);
+        List<Map<String, Object>> blockedProjects = blockedProjects(projects);
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("generatedAt", LocalDateTime.now());
         response.put("stats", stats);
         response.put("taskSummary", taskSummary);
-        response.put("healthSummary", healthSummary(stats, taskSummary, partialTasks, serviceStatus));
-        response.put("performanceSummary", performanceSummary(monitoredTasks));
+        response.put("healthSummary", healthSummary);
+        response.put("performanceSummary", performanceSummary);
+        response.put("alerts", alerts(healthSummary, performanceSummary, blockedProjects, serviceStatus));
         response.put("workflowSummary", workflowSummary(recentProjects));
-        response.put("blockedProjects", blockedProjects(projects));
+        response.put("blockedProjects", blockedProjects);
         response.put("nextActions", nextActions(stats, taskSummary, partialTasks, serviceStatus));
         response.put("recentProjects", recentProjects.stream().map(this::projectCard).toList());
         response.put("recentTasks", recentTasks.stream()
@@ -353,6 +357,126 @@ public class DashboardService {
             actions.add(action("推进最近项目", "projects", "从最近项目进入样本分析、Skill、大纲或章节生产"));
         }
         return actions.stream().limit(4).toList();
+    }
+
+    private List<Map<String, Object>> alerts(
+            Map<String, Object> healthSummary,
+            Map<String, Object> performanceSummary,
+            List<Map<String, Object>> blockedProjects,
+            Map<String, Object> serviceStatus) {
+        List<Map<String, Object>> alerts = new ArrayList<>();
+
+        if (!serviceIsUp(serviceStatus.get("python"))) {
+            alerts.add(alert(
+                "python_down",
+                "critical",
+                "Python AI 服务不可用",
+                "新的 Agent 任务可能失败；请优先恢复 python-service。",
+                "python-service",
+                details("service", serviceStatus.get("python"))
+            ));
+        }
+
+        long failedTasks = numberValue(healthSummary.get("failedTasks"));
+        if (failedTasks > 0) {
+            alerts.add(alert(
+                "failed_tasks",
+                "critical",
+                "存在失败任务",
+                "当前有 " + failedTasks + " 个失败任务，需要查看诊断日志并重试或修复输入。",
+                "tasks",
+                details("failedTasks", failedTasks)
+            ));
+        }
+
+        long waitingApprovals = numberValue(healthSummary.get("waitingApprovals"));
+        if (waitingApprovals > 0) {
+            alerts.add(alert(
+                "waiting_approvals",
+                "warning",
+                "工作流等待人工确认",
+                "当前有 " + waitingApprovals + " 个任务停在人工确认节点。",
+                "tasks",
+                details("waitingApprovals", waitingApprovals)
+            ));
+        }
+
+        long slowTaskCount = numberValue(performanceSummary.get("slowTaskCount"));
+        if (slowTaskCount > 0) {
+            alerts.add(alert(
+                "slow_tasks",
+                "warning",
+                "存在慢任务",
+                "最近任务窗口中有 " + slowTaskCount + " 个任务超过慢任务阈值。",
+                "tasks",
+                details(
+                    "slowTaskCount", slowTaskCount,
+                    "thresholdMs", performanceSummary.get("slowTaskThresholdMs"),
+                    "slowestTaskId", performanceSummary.get("slowestTaskId")
+                )
+            ));
+        }
+
+        long highRetryTaskCount = numberValue(performanceSummary.get("highRetryTaskCount"));
+        if (highRetryTaskCount > 0) {
+            alerts.add(alert(
+                "high_retry_tasks",
+                "warning",
+                "存在高重试任务",
+                "最近任务窗口中有 " + highRetryTaskCount + " 个任务达到高重试阈值。",
+                "tasks",
+                details(
+                    "highRetryTaskCount", highRetryTaskCount,
+                    "threshold", performanceSummary.get("highRetryThreshold")
+                )
+            ));
+        }
+
+        if (!blockedProjects.isEmpty()) {
+            alerts.add(alert(
+                "blocked_projects",
+                "warning",
+                "存在阻塞项目",
+                "当前有 " + blockedProjects.size() + " 个项目存在失败、部分完成或待审批任务。",
+                "projects",
+                details("blockedProjectCount", blockedProjects.size())
+            ));
+        }
+
+        return alerts;
+    }
+
+    private Map<String, Object> details(Object... keyValues) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        if (keyValues == null) {
+            return details;
+        }
+        for (int i = 0; i + 1 < keyValues.length; i += 2) {
+            Object key = keyValues[i];
+            Object value = keyValues[i + 1];
+            if (key != null && value != null) {
+                details.put(String.valueOf(key), value);
+            }
+        }
+        return details;
+    }
+
+    private Map<String, Object> alert(
+            String id,
+            String severity,
+            String title,
+            String message,
+            String target,
+            Map<String, Object> details) {
+        Map<String, Object> alert = new LinkedHashMap<>();
+        alert.put("id", id);
+        alert.put("severity", severity);
+        alert.put("title", title);
+        alert.put("message", message);
+        alert.put("target", target);
+        alert.put("details", details != null ? details : Map.of());
+        alert.put("createdAt", LocalDateTime.now());
+        return alert;
     }
 
     private Map<String, Object> action(String title, String target, String description) {

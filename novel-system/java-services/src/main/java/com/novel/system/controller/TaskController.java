@@ -96,7 +96,9 @@ public class TaskController {
      * 获取任务日志和诊断信息
      */
     @GetMapping("/{taskId}/logs")
-    public ResponseEntity<Map<String, Object>> getTaskLogs(@PathVariable String taskId) {
-        return ResponseEntity.ok(taskExecutorService.getTaskLogs(taskId));
+    public ResponseEntity<Map<String, Object>> getTaskLogs(
+            @PathVariable String taskId,
+            @RequestParam(defaultValue = "80") int tailLines) {
+        return ResponseEntity.ok(taskExecutorService.getTaskLogs(taskId, tailLines));
     }
 }

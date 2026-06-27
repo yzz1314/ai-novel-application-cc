@@ -77,7 +77,7 @@ export const taskApi = {
   retry: (taskId: string) => request(api.post(`/tasks/${taskId}/retry`)),
   resume: (taskId: string, data?: any) => request(api.post(`/tasks/${taskId}/resume`, data || {})),
   cancel: (taskId: string) => request(api.post(`/tasks/${taskId}/cancel`)),
-  getLogs: (taskId: string) => request(api.get(`/tasks/${taskId}/logs`)),
+  getLogs: (taskId: string, params?: any) => request(api.get(`/tasks/${taskId}/logs`, { params })),
 }
 
 export const skillsApi = {

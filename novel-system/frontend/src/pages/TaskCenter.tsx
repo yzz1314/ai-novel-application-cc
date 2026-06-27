@@ -87,6 +87,7 @@ const isWaitingForHuman = (task: any) =>
 
 const taskIdentity = (task: any) => task?.id || task?.taskId
 const retryPolicy = (task: any) => task?.metrics?.retry_policy || task?.metrics?.retryPolicy || {}
+const eventLogTail = (task: any) => task?.eventLogTail || {}
 
 const TaskCenter: React.FC = () => {
   const navigate = useNavigate()
@@ -138,7 +139,7 @@ const TaskCenter: React.FC = () => {
 
   const openTaskLogs = async (taskId: string) => {
     try {
-      const data = await taskApi.getLogs(taskId)
+      const data = await taskApi.getLogs(taskId, { tailLines: 120 })
       setTaskDrawer(data)
       const waiting = data?.result?.waiting_for_human
       const resumePayload = waiting?.node_id
@@ -388,6 +389,8 @@ const TaskCenter: React.FC = () => {
   ]
 
   const drawerEvents = Array.isArray(taskDrawer?.events) ? taskDrawer.events : []
+  const drawerEventLogTail = eventLogTail(taskDrawer)
+  const drawerEventLogLines = Array.isArray(drawerEventLogTail.lines) ? drawerEventLogTail.lines : []
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
@@ -550,6 +553,33 @@ const TaskCenter: React.FC = () => {
                 scroll={{ x: 760 }}
                 locale={{ emptyText: <Empty description="暂无事件日志" /> }}
               />
+            </Card>
+
+            <Card
+              title="文件日志 Tail"
+              size="small"
+              extra={
+                <Text type="secondary">
+                  {drawerEventLogTail.path || taskDrawer.eventLogPath || '-'}
+                </Text>
+              }
+            >
+              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                <Space wrap>
+                  <Tag color={drawerEventLogTail.exists === false ? 'default' : 'blue'}>
+                    {drawerEventLogTail.lineCount || 0}/{drawerEventLogTail.totalLines || 0} 行
+                  </Tag>
+                  {drawerEventLogTail.truncated ? <Tag color="warning">已截断</Tag> : <Tag color="success">完整</Tag>}
+                  <Tag>起始行 {drawerEventLogTail.startLine || 0}</Tag>
+                </Space>
+                {drawerEventLogLines.length ? (
+                  <Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0, fontFamily: 'monospace' }}>
+                    {drawerEventLogLines.join('\n')}
+                  </Paragraph>
+                ) : (
+                  <Empty description="暂无文件日志" />
+                )}
+              </Space>
             </Card>
 
             <Card title="诊断 JSON" size="small">

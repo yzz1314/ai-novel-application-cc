@@ -14,6 +14,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -214,6 +215,51 @@ class TaskExecutorServiceCancellationTest {
             .contains("\"eventType\":\"auto_retry_scheduled\"")
             .contains("\"delayMs\":500")
             .contains("\"remainingRetries\":3");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTaskLogsReturnsRawEventTail() {
+        when(modelProfileService.getDefaultProfileId()).thenReturn(null);
+        when(taskRepository.save(any(Task.class))).thenAnswer(invocation -> {
+            Task saved = invocation.getArgument(0);
+            if (saved.getId() == null) {
+                saved.setId("task_log_tail");
+            }
+            return saved;
+        });
+
+        Task task = taskExecutorService.createTask(
+            "project_log_tail",
+            "full_text_analysis",
+            "full_text_analysis",
+            Map.of("sample_id", "sample_1"),
+            Map.of("sample_id", "sample_1")
+        );
+        task.setStatus(TaskStatus.FAILED);
+        task.setErrors(Map.of("message", "boom"));
+        when(taskRepository.findById(task.getId())).thenReturn(Optional.of(task));
+        taskExecutorService.retryTask(task.getId());
+
+        Map<String, Object> logs = taskExecutorService.getTaskLogs(task.getId(), 2);
+        Map<String, Object> tail = (Map<String, Object>) logs.get("eventLogTail");
+        List<String> lines = (List<String>) tail.get("lines");
+        List<Map<String, Object>> events = (List<Map<String, Object>>) logs.get("events");
+
+        assertThat(tail)
+            .containsEntry("path", "logs/tasks/task_log_tail.jsonl")
+            .containsEntry("requestedLines", 2)
+            .containsEntry("totalLines", 4)
+            .containsEntry("startLine", 3)
+            .containsEntry("lineCount", 2)
+            .containsEntry("truncated", true);
+        assertThat(lines).hasSize(2);
+        assertThat(lines.get(0)).contains("\"eventType\":\"started\"");
+        assertThat(lines.get(1))
+            .contains("\"eventType\":\"finished\"")
+            .contains("\"taskId\":\"task_log_tail\"");
+        assertThat(events).extracting(event -> event.get("eventType"))
+            .contains("manual_retry_requested", "finished");
     }
 
     private Task task(String taskId, TaskStatus status) {

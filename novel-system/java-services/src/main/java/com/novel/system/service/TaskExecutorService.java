@@ -34,6 +34,8 @@ import java.util.concurrent.CompletableFuture;
 public class TaskExecutorService {
 
     private static final int MAX_TASK_EVENTS = 200;
+    private static final int DEFAULT_TASK_LOG_TAIL_LINES = 80;
+    private static final int MAX_TASK_LOG_TAIL_LINES = 500;
     private static final String TASK_EVENT_LOG = "logs/task_events.jsonl";
     private static final int DEFAULT_MAX_RETRIES = 3;
     private static final int MAX_CONFIGURABLE_RETRIES = 10;
@@ -699,6 +701,10 @@ public class TaskExecutorService {
     }
 
     public Map<String, Object> getTaskLogs(String taskId) {
+        return getTaskLogs(taskId, DEFAULT_TASK_LOG_TAIL_LINES);
+    }
+
+    public Map<String, Object> getTaskLogs(String taskId, int tailLines) {
         Task task = getTask(taskId);
         Map<String, Object> logs = new HashMap<>();
         logs.put("taskId", task.getId());
@@ -723,6 +729,7 @@ public class TaskExecutorService {
         logs.put("eventLogPath", taskEventLogRef(task));
         logs.put("projectEventLogPath", TASK_EVENT_LOG);
         logs.put("events", readTaskEvents(task));
+        logs.put("eventLogTail", readTaskEventTail(task, tailLines));
         return logs;
     }
 
@@ -797,6 +804,47 @@ public class TaskExecutorService {
         } catch (IOException e) {
             log.warn("Failed to read task events for task {}: {}", task.getId(), e.getMessage(), e);
             return List.of();
+        }
+    }
+
+    private Map<String, Object> readTaskEventTail(Task task, int tailLines) {
+        Path path = taskEventPath(task);
+        int requestedLines = clamp(tailLines, 1, MAX_TASK_LOG_TAIL_LINES, DEFAULT_TASK_LOG_TAIL_LINES);
+        Map<String, Object> tail = new LinkedHashMap<>();
+        tail.put("path", taskEventLogRef(task));
+        tail.put("requestedLines", requestedLines);
+        tail.put("exists", Files.exists(path));
+
+        if (!Files.exists(path)) {
+            tail.put("totalLines", 0);
+            tail.put("startLine", 0);
+            tail.put("lineCount", 0);
+            tail.put("truncated", false);
+            tail.put("lines", List.of());
+            return tail;
+        }
+
+        try {
+            List<String> lines = Files.readAllLines(path, StandardCharsets.UTF_8);
+            int fromIndex = Math.max(0, lines.size() - requestedLines);
+            List<String> rawLines = lines.subList(fromIndex, lines.size()).stream()
+                .map(String::stripTrailing)
+                .toList();
+            tail.put("totalLines", lines.size());
+            tail.put("startLine", rawLines.isEmpty() ? 0 : fromIndex + 1);
+            tail.put("lineCount", rawLines.size());
+            tail.put("truncated", fromIndex > 0);
+            tail.put("lines", rawLines);
+            return tail;
+        } catch (IOException e) {
+            log.warn("Failed to read task event tail for task {}: {}", task.getId(), e.getMessage(), e);
+            tail.put("totalLines", 0);
+            tail.put("startLine", 0);
+            tail.put("lineCount", 0);
+            tail.put("truncated", false);
+            tail.put("error", e.getMessage());
+            tail.put("lines", List.of());
+            return tail;
         }
     }
 

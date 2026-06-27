@@ -32,6 +32,7 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   DatabaseOutlined,
+  DownloadOutlined,
   EditOutlined,
   EyeOutlined,
   FileSearchOutlined,
@@ -45,7 +46,7 @@ import {
   SearchOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useParams } from 'react-router-dom';
-import { bookApi, projectApi, sampleApi, skillsApi, taskApi } from '../services/api';
+import { artifactApi, bookApi, projectApi, sampleApi, skillsApi, taskApi } from '../services/api';
 
 const { Paragraph, Text, Title } = Typography;
 const { TextArea } = Input;
@@ -92,6 +93,8 @@ const ProjectDetail: React.FC = () => {
   const [skillConflictReportLoading, setSkillConflictReportLoading] = useState(false);
   const [skillRegenerating, setSkillRegenerating] = useState(false);
   const [skillGenerationDrawer, setSkillGenerationDrawer] = useState<any>(null);
+  const [skillReportDrawer, setSkillReportDrawer] = useState<any>(null);
+  const [skillReportLoading, setSkillReportLoading] = useState(false);
   const [skillEditOpen, setSkillEditOpen] = useState(false);
   const [skillSaving, setSkillSaving] = useState(false);
   const [editingSkill, setEditingSkill] = useState<any>(null);
@@ -267,6 +270,59 @@ const ProjectDetail: React.FC = () => {
     }
   };
 
+  const openSkillReport = async (reportPath?: string, title = 'Skill报告') => {
+    if (!projectId || !reportPath) {
+      message.info('暂无可预览的Skill报告');
+      return;
+    }
+    try {
+      setSkillReportDrawer(null);
+      setSkillReportLoading(true);
+      const detail = await artifactApi.view(projectId, reportPath);
+      setSkillReportDrawer({ ...detail, title });
+    } catch (error) {
+      message.error('打开Skill报告失败');
+    } finally {
+      setSkillReportLoading(false);
+    }
+  };
+
+  const downloadSkillReport = async (reportPath?: string) => {
+    if (!projectId || !reportPath) {
+      message.info('暂无可下载的Skill报告');
+      return;
+    }
+    try {
+      const blob = await artifactApi.download(projectId, reportPath);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = reportPath.split(/[\\/]/).pop() || 'skill-report.json';
+      link.click();
+      window.URL.revokeObjectURL(url);
+      message.success('Skill报告下载已开始');
+    } catch (error) {
+      message.error('下载Skill报告失败');
+    }
+  };
+
+  const renderSkillReportActions = (reportPath?: string, title = 'Skill报告') => {
+    if (!reportPath) {
+      return <Text type="secondary">暂无报告</Text>;
+    }
+    return (
+      <Space size="small" wrap>
+        <Text type="secondary">{reportPath}</Text>
+        <Button type="link" size="small" icon={<FileSearchOutlined />} onClick={() => openSkillReport(reportPath, title)}>
+          预览
+        </Button>
+        <Button type="link" size="small" icon={<DownloadOutlined />} onClick={() => downloadSkillReport(reportPath)}>
+          下载
+        </Button>
+      </Space>
+    );
+  };
+
   function isWaitingForHuman(task: any) {
     return task?.status === 'PARTIAL' && !!task?.result?.waiting_for_human?.node_id;
   }
@@ -366,6 +422,15 @@ const ProjectDetail: React.FC = () => {
           <Button type="link" icon={<SafetyCertificateOutlined />} onClick={() => checkSkillQuality(record)}>
             校验
           </Button>
+          {(record.latestQualityReportPath || record.latestApprovalReportPath) && (
+            <Button
+              type="link"
+              icon={<FileSearchOutlined />}
+              onClick={() => openSkillReport(record.latestQualityReportPath || record.latestApprovalReportPath, `${record.name} Skill报告`)}
+            >
+              报告
+            </Button>
+          )}
           <Popconfirm
             title="批准这个Skill？"
             description="批准后会保持启用，并记录审批报告。"
@@ -572,13 +637,16 @@ const ProjectDetail: React.FC = () => {
   const approveSkill = async (skill: any) => {
     if (!projectId) return;
     try {
-      await skillsApi.approve(projectId, skill.name, {
+      const result: any = await skillsApi.approve(projectId, skill.name, {
         reviewer: 'human',
         note: 'ProjectDetail批准',
         enabled: true,
       });
       message.success('Skill已批准');
       await loadProjectData();
+      if (result?.reportPath) {
+        await openSkillReport(result.reportPath, `${skill.name} 审批报告`);
+      }
     } catch (error) {
       message.error('批准Skill失败');
     }
@@ -587,13 +655,16 @@ const ProjectDetail: React.FC = () => {
   const rejectSkill = async (skill: any) => {
     if (!projectId) return;
     try {
-      await skillsApi.reject(projectId, skill.name, {
+      const result: any = await skillsApi.reject(projectId, skill.name, {
         reviewer: 'human',
         reason: 'ProjectDetail驳回',
         enabled: false,
       });
       message.success('Skill已驳回并停用');
       await loadProjectData();
+      if (result?.reportPath) {
+        await openSkillReport(result.reportPath, `${skill.name} 驳回报告`);
+      }
     } catch (error) {
       message.error('驳回Skill失败');
     }
@@ -997,9 +1068,7 @@ const ProjectDetail: React.FC = () => {
                 description={
                   <Space direction="vertical" size="small" style={{ width: '100%' }}>
                     {(skillConflicts.reportPath || skillConflicts.latestConflictReportPath) && (
-                      <Text type="secondary">
-                        报告：{skillConflicts.reportPath || skillConflicts.latestConflictReportPath}
-                      </Text>
+                      renderSkillReportActions(skillConflicts.reportPath || skillConflicts.latestConflictReportPath, 'Skill冲突报告')
                     )}
                     <List
                       size="small"
@@ -1026,7 +1095,7 @@ const ProjectDetail: React.FC = () => {
                 showIcon
                 message="当前启用Skill未检测到冲突"
                 description={(skillConflicts.reportPath || skillConflicts.latestConflictReportPath)
-                  ? `报告：${skillConflicts.reportPath || skillConflicts.latestConflictReportPath}`
+                  ? renderSkillReportActions(skillConflicts.reportPath || skillConflicts.latestConflictReportPath, 'Skill冲突报告')
                   : undefined}
               />
             )
@@ -1239,6 +1308,40 @@ const ProjectDetail: React.FC = () => {
         ) : null}
       </Drawer>
 
+      <Drawer
+        title={skillReportDrawer?.title || skillReportDrawer?.name || 'Skill报告预览'}
+        width={860}
+        open={!!skillReportDrawer || skillReportLoading}
+        onClose={() => setSkillReportDrawer(null)}
+      >
+        <Spin spinning={skillReportLoading}>
+          {skillReportDrawer ? (
+            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+              <Descriptions bordered column={2} size="small">
+                <Descriptions.Item label="路径" span={2}>{skillReportDrawer.path}</Descriptions.Item>
+                <Descriptions.Item label="类型">{skillReportDrawer.category || '-'}</Descriptions.Item>
+                <Descriptions.Item label="大小">{skillReportDrawer.size ?? '-'}</Descriptions.Item>
+                <Descriptions.Item label="更新时间" span={2}>{skillReportDrawer.updatedAt || '-'}</Descriptions.Item>
+              </Descriptions>
+              <Space size="small" wrap>
+                {skillReportDrawer.truncated && <Tag color="warning">内容已截断显示</Tag>}
+                {skillReportDrawer.redacted && <Tag color="red">敏感内容已保护</Tag>}
+                <Button
+                  type="link"
+                  icon={<DownloadOutlined />}
+                  onClick={() => downloadSkillReport(skillReportDrawer.path)}
+                >
+                  下载完整报告
+                </Button>
+              </Space>
+              <Paragraph style={{ whiteSpace: 'pre-wrap', maxHeight: 560, overflow: 'auto' }}>
+                {skillReportDrawer.content || '无可预览文本'}
+              </Paragraph>
+            </Space>
+          ) : null}
+        </Spin>
+      </Drawer>
+
       <Modal
         title={editingSkill?.title || editingSkill?.name || '编辑Skill'}
         open={skillEditOpen}
@@ -1438,7 +1541,9 @@ const ProjectDetail: React.FC = () => {
               </Tag>
             </Descriptions.Item>
             <Descriptions.Item label="校验时间">{skillQualityDetail?.checkedAt || '-'}</Descriptions.Item>
-            <Descriptions.Item label="报告路径">{skillQualityDetail?.reportPath || '-'}</Descriptions.Item>
+            <Descriptions.Item label="报告路径">
+              {renderSkillReportActions(skillQualityDetail?.reportPath, `${skillQualityDetail?.skillName || 'Skill'} 质量报告`)}
+            </Descriptions.Item>
           </Descriptions>
 
           <Progress

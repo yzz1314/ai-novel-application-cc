@@ -99,6 +99,7 @@ const ProjectDetail: React.FC = () => {
   const [skillConfigVersionOpen, setSkillConfigVersionOpen] = useState(false);
   const [skillConfigVersionLoading, setSkillConfigVersionLoading] = useState(false);
   const [skillConfigVersions, setSkillConfigVersions] = useState<any[]>([]);
+  const [skillQualityDetail, setSkillQualityDetail] = useState<any>(null);
   const [approvalTask, setApprovalTask] = useState<any>(null);
   const [approvalDecision, setApprovalDecision] = useState<'approve' | 'reject'>('approve');
   const [approvalSubmitting, setApprovalSubmitting] = useState(false);
@@ -238,6 +239,17 @@ const ProjectDetail: React.FC = () => {
     return 'default';
   };
 
+  const showSkillQualityDetail = (skill: any, result?: any) => {
+    setSkillQualityDetail({
+      skillName: skill?.name || result?.skill?.name,
+      status: result?.status || skill?.qualityStatus,
+      score: result?.score ?? skill?.qualityScore,
+      reportPath: result?.reportPath || skill?.latestQualityReportPath,
+      checkedAt: result?.checkedAt || skill?.qualityCheckedAt,
+      semanticQuality: result?.semanticQuality || skill?.semanticQuality || {},
+    });
+  };
+
   const approvalColor = (status?: string) => {
     if (status === 'approved') return 'success';
     if (status === 'rejected') return 'error';
@@ -261,6 +273,11 @@ const ProjectDetail: React.FC = () => {
         <Space size={4} direction="vertical">
           <Tag color={qualityColor(record.qualityStatus)}>{record.qualityStatus || 'unchecked'}</Tag>
           <Text type="secondary">{record.qualityScore !== null && record.qualityScore !== undefined ? `${record.qualityScore}分` : '未校验'}</Text>
+          {record.semanticQuality?.score !== undefined && (
+            <Button type="link" size="small" onClick={() => showSkillQualityDetail(record)}>
+              语义 {record.semanticQuality.score}
+            </Button>
+          )}
         </Space>
       ),
     },
@@ -498,6 +515,7 @@ const ProjectDetail: React.FC = () => {
     try {
       const result: any = await skillsApi.checkQuality(projectId, skill.name, { checkedBy: 'human' });
       message.success(`质量校验完成：${result.status}，${result.score}分`);
+      showSkillQualityDetail(skill, result);
       await loadProjectData();
     } catch (error) {
       message.error('质量校验失败');
@@ -1160,6 +1178,103 @@ const ProjectDetail: React.FC = () => {
           ]}
           locale={{ emptyText: '暂无启用配置历史版本' }}
         />
+      </Modal>
+
+      <Modal
+        title={`${skillQualityDetail?.skillName || 'Skill'} 语义质量详情`}
+        open={!!skillQualityDetail}
+        width={920}
+        footer={null}
+        onCancel={() => setSkillQualityDetail(null)}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Descriptions bordered column={3} size="small">
+            <Descriptions.Item label="质量状态">
+              <Tag color={qualityColor(skillQualityDetail?.status)}>{skillQualityDetail?.status || 'unchecked'}</Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="质量分">{skillQualityDetail?.score ?? '-'}</Descriptions.Item>
+            <Descriptions.Item label="语义分">{skillQualityDetail?.semanticQuality?.score ?? '-'}</Descriptions.Item>
+            <Descriptions.Item label="语义状态">
+              <Tag color={qualityColor(skillQualityDetail?.semanticQuality?.status)}>
+                {skillQualityDetail?.semanticQuality?.status || 'unknown'}
+              </Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="校验时间">{skillQualityDetail?.checkedAt || '-'}</Descriptions.Item>
+            <Descriptions.Item label="报告路径">{skillQualityDetail?.reportPath || '-'}</Descriptions.Item>
+          </Descriptions>
+
+          <Progress
+            percent={Number(skillQualityDetail?.semanticQuality?.score || 0)}
+            status={skillQualityDetail?.semanticQuality?.status === 'failed' ? 'exception' : 'normal'}
+          />
+
+          <Table
+            size="small"
+            pagination={false}
+            rowKey={(record: any) => record.id}
+            dataSource={skillQualityDetail?.semanticQuality?.dimensions || []}
+            columns={[
+              { title: '维度', dataIndex: 'title', key: 'title' },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                key: 'status',
+                width: 120,
+                render: (status: string) => <Tag color={qualityColor(status)}>{status}</Tag>,
+              },
+              { title: '分数', dataIndex: 'score', key: 'score', width: 90 },
+              { title: '说明', dataIndex: 'message', key: 'message' },
+              {
+                title: '指标',
+                dataIndex: 'metrics',
+                key: 'metrics',
+                render: (metrics: any) => (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {metrics ? JSON.stringify(metrics) : '-'}
+                  </Text>
+                ),
+              },
+            ]}
+            locale={{ emptyText: '暂无语义维度' }}
+          />
+
+          {(skillQualityDetail?.semanticQuality?.risks || []).length > 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              message="语义风险"
+              description={
+                <List
+                  size="small"
+                  dataSource={skillQualityDetail.semanticQuality.risks}
+                  renderItem={(risk: any) => (
+                    <List.Item>
+                      <Space size="small" wrap>
+                        <Tag color={risk.severity === 'high' ? 'error' : 'warning'}>{risk.severity}</Tag>
+                        <Text>{risk.message}</Text>
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+              }
+            />
+          )}
+
+          {(skillQualityDetail?.semanticQuality?.recommendations || []).length > 0 && (
+            <Alert
+              type="info"
+              showIcon
+              message="改进建议"
+              description={
+                <List
+                  size="small"
+                  dataSource={skillQualityDetail.semanticQuality.recommendations}
+                  renderItem={(item: string) => <List.Item>{item}</List.Item>}
+                />
+              }
+            />
+          )}
+        </Space>
       </Modal>
 
       <Modal

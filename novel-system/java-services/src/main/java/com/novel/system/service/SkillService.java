@@ -203,6 +203,9 @@ public class SkillService {
         Map<String, Object> entry = findOrCreateSkillEntry(projectId, skillName, skillFile, entries);
         String type = asString(entry.get("type"), inferType(skillName));
         List<Map<String, Object>> checks = buildSkillQualityChecks(projectId, skillName, type, content, frontmatter);
+        List<Map<String, Object>> sourceTrace = buildSourceTrace(projectId, skillName, content, frontmatter, entry);
+        List<Map<String, Object>> evidenceItems = buildEvidenceItems(projectId, skillName, content, frontmatter);
+        Map<String, Object> semanticQuality = buildSemanticQuality(type, content, sourceTrace, evidenceItems, checks);
         int score = calculateQualityScore(checks);
         String status = score >= 80 ? "passed" : score >= 60 ? "needs_review" : "failed";
         long failedRequiredCount = checks.stream()
@@ -221,6 +224,7 @@ public class SkillService {
         reportDetails.put("status", status);
         reportDetails.put("score", score);
         reportDetails.put("checks", checks);
+        reportDetails.put("semantic_quality", semanticQuality);
         reportDetails.put("failed_required_count", failedRequiredCount);
         reportDetails.put("content_size", fileSize(skillFile));
         Path reportPath = writeSkillReport(projectId, skillName, "skill_quality_check", reportDetails);
@@ -233,6 +237,7 @@ public class SkillService {
         entry.put("quality_score", score);
         entry.put("quality_checked_at", checkedAt);
         entry.put("latest_quality_report_path", relative(projectId, reportPath));
+        entry.put("semantic_quality", semanticQuality);
         entry.putIfAbsent("approval_status", "pending");
         config.put("updated_at", LocalDateTime.now().toString());
         writeYaml(enabledFile, config);
@@ -243,6 +248,7 @@ public class SkillService {
         response.put("status", status);
         response.put("score", score);
         response.put("checks", checks);
+        response.put("semanticQuality", semanticQuality);
         response.put("failedRequiredCount", failedRequiredCount);
         response.put("reportPath", relative(projectId, reportPath));
         response.put("configSnapshotPath", snapshotPath != null ? relative(projectId, snapshotPath) : null);
@@ -493,6 +499,7 @@ public class SkillService {
         entry.put("qualityScore", skill.getQualityScore());
         entry.put("qualityCheckedAt", skill.getQualityCheckedAt());
         entry.put("latestQualityReportPath", skill.getLatestQualityReportPath());
+        entry.put("semanticQuality", skill.getSemanticQuality() != null ? skill.getSemanticQuality() : Map.of());
         entry.put("approvalStatus", skill.getApprovalStatus());
         entry.put("approvedAt", skill.getApprovedAt());
         entry.put("approvedBy", skill.getApprovedBy());
@@ -572,6 +579,7 @@ public class SkillService {
                 .qualityScore(asInteger(enabled.get("quality_score"), null))
                 .qualityCheckedAt(asString(enabled.get("quality_checked_at"), ""))
                 .latestQualityReportPath(asString(enabled.get("latest_quality_report_path"), ""))
+                .semanticQuality(asMap(enabled.get("semantic_quality")))
                 .approvalStatus(asString(enabled.get("approval_status"), "pending"))
                 .approvedAt(asString(enabled.get("approved_at"), ""))
                 .approvedBy(asString(enabled.get("approved_by"), ""))
@@ -1348,6 +1356,244 @@ public class SkillService {
         return Math.round((passed * 100.0f) / total);
     }
 
+    private Map<String, Object> buildSemanticQuality(
+            String type,
+            String content,
+            List<Map<String, Object>> sourceTrace,
+            List<Map<String, Object>> evidenceItems,
+            List<Map<String, Object>> checks) {
+        String normalized = content.toLowerCase(Locale.ROOT);
+        List<Map<String, Object>> dimensions = new ArrayList<>();
+        addSemanticDimension(
+            dimensions,
+            "topic_coverage",
+            "主题覆盖",
+            semanticTopicScore(type, normalized),
+            semanticTopicCoverage(type, normalized),
+            "覆盖该 Skill 类型所需的核心语义主题"
+        );
+        addSemanticDimension(
+            dimensions,
+            "rule_specificity",
+            "规则可执行性",
+            ruleSpecificityScore(normalized),
+            Map.of(
+                "mustCount", keywordCount(normalized, "必须", "应当", "需要", "保持"),
+                "avoidCount", keywordCount(normalized, "禁止", "不得", "避免", "不要"),
+                "checklistCount", keywordCount(normalized, "检查清单", "控制要点", "验收", "标准")
+            ),
+            "规则需要可执行，而不仅是抽象风格描述"
+        );
+        addSemanticDimension(
+            dimensions,
+            "evidence_density",
+            "证据密度",
+            evidenceDensityScore(content, sourceTrace, evidenceItems),
+            Map.of(
+                "sourceTraceCount", sourceTrace.size(),
+                "evidenceItemCount", evidenceItems.size(),
+                "exampleCount", keywordCount(normalized, "示例", "引用", "证据"),
+                "frequencyCount", keywordCount(normalized, "出现率", "占比", "percentage")
+            ),
+            "Skill 应可追溯到样本、分析产物或证据片段"
+        );
+        addSemanticDimension(
+            dimensions,
+            "risk_control",
+            "风险控制",
+            riskControlScore(normalized),
+            Map.of(
+                "antiCopy", containsAny(normalized, "复刻", "照搬", "抄袭", "样本文字"),
+                "boundary", containsAny(normalized, "章节边界", "边界控制", "后续章纲", "不得提前"),
+                "conflict", containsAny(normalized, "冲突", "矛盾", "优先级", "scope")
+            ),
+            "控制复刻、越界、冲突和路由不稳定风险"
+        );
+        addSemanticDimension(
+            dimensions,
+            "maintainability",
+            "可维护性",
+            maintainabilityScore(content, checks),
+            Map.of(
+                "headingCount", headingCount(content),
+                "placeholderRemaining", TEMPLATE_PLACEHOLDER_PATTERN.matcher(content).find(),
+                "contentSize", content.length()
+            ),
+            "结构清晰、无模板残留，方便人工审阅和版本维护"
+        );
+
+        int score = Math.round((float) dimensions.stream()
+            .mapToInt(item -> asInteger(item.get("score"), 0))
+            .average()
+            .orElse(0.0));
+        List<Map<String, Object>> risks = semanticRisks(dimensions, normalized);
+        List<String> recommendations = semanticRecommendations(dimensions, type, normalized);
+
+        Map<String, Object> semantic = new LinkedHashMap<>();
+        semantic.put("score", score);
+        semantic.put("status", score >= 80 && risks.isEmpty() ? "passed" : score >= 60 ? "needs_review" : "failed");
+        semantic.put("dimensions", dimensions);
+        semantic.put("risks", risks);
+        semantic.put("recommendations", recommendations);
+        semantic.put("checkedAt", LocalDateTime.now().toString());
+        return semantic;
+    }
+
+    private void addSemanticDimension(
+            List<Map<String, Object>> dimensions,
+            String id,
+            String title,
+            int score,
+            Map<String, ?> metrics,
+            String message) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", id);
+        item.put("title", title);
+        item.put("score", Math.max(0, Math.min(100, score)));
+        item.put("status", score >= 80 ? "passed" : score >= 60 ? "needs_review" : "failed");
+        item.put("metrics", metrics);
+        item.put("message", message);
+        dimensions.add(item);
+    }
+
+    private int semanticTopicScore(String type, String normalized) {
+        Map<String, Boolean> coverage = semanticTopicCoverage(type, normalized);
+        long covered = coverage.values().stream().filter(Boolean::booleanValue).count();
+        return coverage.isEmpty() ? 60 : Math.round(covered * 100.0f / coverage.size());
+    }
+
+    private Map<String, Boolean> semanticTopicCoverage(String type, String normalized) {
+        Map<String, Boolean> coverage = new LinkedHashMap<>();
+        if ("writing".equals(type)) {
+            coverage.put("style", containsAny(normalized, "风格", "文风", "语言", "句式"));
+            coverage.put("scene", containsAny(normalized, "场景", "冲突", "动作", "氛围"));
+            coverage.put("pace", containsAny(normalized, "节奏", "快慢", "推进", "张弛"));
+            coverage.put("boundary", containsAny(normalized, "章节边界", "边界控制", "后续章纲", "不得提前"));
+            coverage.put("review", containsAny(normalized, "检查", "验收", "质量", "修订"));
+        } else if ("outline".equals(type)) {
+            coverage.put("volume", containsAny(normalized, "分卷", "卷纲", "卷目标"));
+            coverage.put("chapter", containsAny(normalized, "章节", "章纲", "章末"));
+            coverage.put("arc", containsAny(normalized, "成长", "转折", "主线", "阶段"));
+            coverage.put("boundary", containsAny(normalized, "边界", "must_write", "must_not_write", "伏笔"));
+            coverage.put("pace", containsAny(normalized, "节奏", "爽点", "悬念", "牵引"));
+        } else if ("review".equals(type)) {
+            coverage.put("dimensions", containsAny(normalized, "审查维度", "检查", "质量", "评分"));
+            coverage.put("continuity", containsAny(normalized, "一致性", "连续性", "canon", "记忆"));
+            coverage.put("boundary", containsAny(normalized, "章节边界", "越界", "后续章纲"));
+            coverage.put("revision", containsAny(normalized, "修改", "返修", "建议", "问题"));
+            coverage.put("evidence", containsAny(normalized, "证据", "引用", "定位", "依据"));
+        } else {
+            coverage.put("purpose", containsAny(normalized, "用途", "目标", "说明", "适用"));
+            coverage.put("rules", containsAny(normalized, "规则", "必须", "检查", "约束"));
+            coverage.put("source", containsAny(normalized, "来源", "样本", "证据", "分析"));
+            coverage.put("scope", containsAny(normalized, "scope", "作用域", "适用范围", "应用场景"));
+        }
+        return coverage;
+    }
+
+    private int ruleSpecificityScore(String normalized) {
+        int score = 30;
+        score += Math.min(30, keywordCount(normalized, "必须", "应当", "需要", "保持") * 5);
+        score += Math.min(20, keywordCount(normalized, "禁止", "不得", "避免", "不要") * 5);
+        score += Math.min(20, keywordCount(normalized, "检查清单", "控制要点", "验收", "标准") * 5);
+        return score;
+    }
+
+    private int evidenceDensityScore(String content, List<Map<String, Object>> sourceTrace, List<Map<String, Object>> evidenceItems) {
+        int score = 20;
+        score += Math.min(30, sourceTrace.size() * 10);
+        score += Math.min(30, evidenceItems.size() * 8);
+        score += Math.min(20, keywordCount(content.toLowerCase(Locale.ROOT), "示例", "引用", "证据", "出现率", "占比") * 4);
+        return score;
+    }
+
+    private int riskControlScore(String normalized) {
+        int score = 20;
+        if (containsAny(normalized, "复刻", "照搬", "抄袭", "样本文字")) score += 20;
+        if (containsAny(normalized, "章节边界", "边界控制", "后续章纲", "不得提前")) score += 25;
+        if (containsAny(normalized, "冲突", "矛盾", "优先级", "scope")) score += 15;
+        if (containsAny(normalized, "禁止", "不得", "避免", "不要")) score += 20;
+        return score;
+    }
+
+    private int maintainabilityScore(String content, List<Map<String, Object>> checks) {
+        int score = 40;
+        score += Math.min(25, headingCount(content) * 5);
+        if (!TEMPLATE_PLACEHOLDER_PATTERN.matcher(content).find()) score += 25;
+        if (content.length() >= 1200) score += 10;
+        if (checks.stream().noneMatch(check -> !Boolean.TRUE.equals(check.get("passed")) && Boolean.TRUE.equals(check.get("required")))) {
+            score += 10;
+        }
+        return score;
+    }
+
+    private List<Map<String, Object>> semanticRisks(List<Map<String, Object>> dimensions, String normalized) {
+        List<Map<String, Object>> risks = new ArrayList<>();
+        for (Map<String, Object> dimension : dimensions) {
+            int score = asInteger(dimension.get("score"), 0);
+            if (score < 60) {
+                Map<String, Object> risk = new LinkedHashMap<>();
+                risk.put("type", "low_" + dimension.get("id"));
+                risk.put("severity", score < 40 ? "high" : "medium");
+                risk.put("message", dimension.get("title") + "不足，当前分数 " + score);
+                risks.add(risk);
+            }
+        }
+        if (containsAny(normalized, "{{", "____")) {
+            risks.add(Map.of(
+                "type", "template_placeholder",
+                "severity", "high",
+                "message", "Skill 中仍有模板占位符"
+            ));
+        }
+        return risks;
+    }
+
+    private List<String> semanticRecommendations(List<Map<String, Object>> dimensions, String type, String normalized) {
+        List<String> recommendations = new ArrayList<>();
+        for (Map<String, Object> dimension : dimensions) {
+            int score = asInteger(dimension.get("score"), 0);
+            if (score >= 80) {
+                continue;
+            }
+            String id = asString(dimension.get("id"), "");
+            switch (id) {
+                case "topic_coverage" -> recommendations.add("补齐 " + type + " Skill 的核心主题覆盖，尤其是边界、节奏、证据或审查维度。");
+                case "rule_specificity" -> recommendations.add("把抽象描述改写为必须/禁止/验收清单，减少主观解释空间。");
+                case "evidence_density" -> recommendations.add("增加样本来源、分析产物路径、出现率或示例片段，形成可追溯证据链。");
+                case "risk_control" -> recommendations.add("补充复刻风险、章节越界、冲突优先级和降级处理规则。");
+                case "maintainability" -> recommendations.add("整理标题层级并清理模板占位符，便于版本审阅和恢复。");
+                default -> recommendations.add("补强 " + dimension.get("title") + "。");
+            }
+        }
+        if (!containsAny(normalized, "语义", "质量", "验收", "审查")) {
+            recommendations.add("增加语义级质量验收标准，说明人工或 Agent 如何判断该 Skill 是否可用。");
+        }
+        return recommendations.stream().distinct().toList();
+    }
+
+    private int keywordCount(String normalized, String... keywords) {
+        int count = 0;
+        for (String keyword : keywords) {
+            String needle = keyword.toLowerCase(Locale.ROOT);
+            int index = 0;
+            while ((index = normalized.indexOf(needle, index)) >= 0) {
+                count++;
+                index += Math.max(1, needle.length());
+            }
+        }
+        return count;
+    }
+
+    private int headingCount(String content) {
+        Matcher matcher = Pattern.compile("(?m)^#{1,6}\\s+.+$").matcher(content);
+        int count = 0;
+        while (matcher.find()) {
+            count++;
+        }
+        return count;
+    }
+
     private int conflictCountForSkill(String projectId, String skillName) {
         List<Map<String, Object>> conflicts = detectSkillConflicts(projectId, listSkills(projectId));
         int count = 0;
@@ -1554,5 +1800,14 @@ public class SkillService {
         return list.stream()
             .map(String::valueOf)
             .toList();
+    }
+
+    private Map<String, Object> asMap(Object value) {
+        if (!(value instanceof Map<?, ?> raw)) {
+            return Map.of();
+        }
+        Map<String, Object> map = new LinkedHashMap<>();
+        raw.forEach((key, item) -> map.put(String.valueOf(key), item));
+        return map;
     }
 }

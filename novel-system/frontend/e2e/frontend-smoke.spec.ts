@@ -32,6 +32,7 @@ test('renders project production pages with fixed API fixtures', async ({ page }
   await expect(page.getByText('项目进度')).toBeVisible()
   await page.getByRole('tab', { name: /Skills/ }).click()
   await expect(page.getByText('writing_skill')).toBeVisible()
+  await expect(page.getByRole('button', { name: '语义 92' })).toBeVisible()
 
   await page.goto(`/projects/${projectId}/samples`)
   await expect(page.getByText('样本管理')).toBeVisible()
@@ -337,6 +338,22 @@ function skillFixtures() {
       priority: 80,
       sourceTrace: [{ type: 'sample', name: '样本一' }],
       evidenceItems: [{ type: 'quote', text: '固定证据' }],
+      semanticQuality: {
+        score: 92,
+        status: 'passed',
+        dimensions: [
+          {
+            id: 'topic_coverage',
+            title: '主题覆盖',
+            status: 'passed',
+            score: 100,
+            message: '覆盖核心主题',
+            metrics: { style: true, scene: true },
+          },
+        ],
+        risks: [],
+        recommendations: [],
+      },
     },
   ]
 }

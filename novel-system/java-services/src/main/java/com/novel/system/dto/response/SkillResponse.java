@@ -27,6 +27,7 @@ public class SkillResponse {
     private Integer qualityScore;
     private String qualityCheckedAt;
     private String latestQualityReportPath;
+    private Map<String, Object> semanticQuality;
     private String approvalStatus;
     private String approvedAt;
     private String approvedBy;

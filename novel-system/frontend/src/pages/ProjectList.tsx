@@ -1,9 +1,12 @@
-import React, { useEffect, useState } from 'react';
-import { Card, Table, Button, Space, Tag, Modal, Form, Input, Select, message } from 'antd';
-import { PlusOutlined, EyeOutlined, DeleteOutlined } from '@ant-design/icons';
-import { useNavigate } from 'react-router-dom';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Button, Card, Form, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd';
+import { EyeOutlined, InboxOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { projectApi } from '../services/api';
 import type { ColumnsType } from 'antd/es/table';
+
+const { Search } = Input;
+const { Text } = Typography;
 
 interface Project {
   id: string;
@@ -48,16 +51,49 @@ const statusColors: Record<string, string> = {
   ARCHIVED: 'default',
 };
 
+const projectStatusGuide: Record<string, string> = {
+  CREATED: '上传样本并启动导入',
+  INGESTING: '等待样本导入完成',
+  CHUNKED: '进入样本分析',
+  ANALYZING: '等待分析任务完成',
+  ANALYZED: '生成 Skill 或大纲',
+  OUTLINING: '审查并确认大纲',
+  WRITING: '继续章节创作',
+  COMPLETED: '查看终稿和产物',
+  FAILED: '查看任务失败原因',
+  ARCHIVED: '已归档，仅保留记录',
+};
+
+const statusOptions = Object.entries(statusLabels).map(([value, label]) => ({ value, label }));
+const sampleGroupOptions = Object.entries(sampleGroupLabels).map(([value, label]) => ({ value, label }));
+
+const compareText = (left?: string, right?: string) => String(left || '').localeCompare(String(right || ''));
+const timestampValue = (value?: string) => value ? new Date(value).getTime() || 0 : 0;
+
 const ProjectList: React.FC = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string | undefined>();
+  const [sampleGroupFilter, setSampleGroupFilter] = useState<string | undefined>();
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
+  const [bulkArchiving, setBulkArchiving] = useState(false);
   const [form] = Form.useForm();
 
   useEffect(() => {
     loadProjects();
   }, []);
+
+  useEffect(() => {
+    if (searchParams.get('action') !== 'create') return;
+    setModalVisible(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete('action');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   const normalizeProject = (project: any): Project => ({
     id: project.id,
@@ -82,11 +118,70 @@ const ProjectList: React.FC = () => {
     }
   };
 
+  const filteredProjects = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return projects.filter((project) => {
+      const matchesQuery = !normalizedQuery || [
+        project.projectName,
+        project.description,
+        project.genre,
+        project.id,
+      ].some((value) => String(value || '').toLowerCase().includes(normalizedQuery));
+      const matchesStatus = !statusFilter || project.status === statusFilter;
+      const matchesSampleGroup = !sampleGroupFilter || project.sampleGroupType === sampleGroupFilter;
+      return matchesQuery && matchesStatus && matchesSampleGroup;
+    });
+  }, [projects, query, statusFilter, sampleGroupFilter]);
+
+  const selectedProjects = useMemo(
+    () => projects.filter((project) => selectedRowKeys.includes(project.id)),
+    [projects, selectedRowKeys]
+  );
+
+  const activeSelectedCount = selectedProjects.filter((project) => project.status !== 'ARCHIVED').length;
+
+  const clearFilters = () => {
+    setQuery('');
+    setStatusFilter(undefined);
+    setSampleGroupFilter(undefined);
+  };
+
+  const archiveProjects = async (targetProjects: Project[]) => {
+    if (!targetProjects.length) return;
+    setBulkArchiving(true);
+    try {
+      await Promise.all(targetProjects.map((project) => projectApi.delete(project.id)));
+      message.success(`已归档 ${targetProjects.length} 个项目`);
+      setSelectedRowKeys([]);
+      await loadProjects();
+    } catch (error) {
+      message.error('项目归档失败');
+    } finally {
+      setBulkArchiving(false);
+    }
+  };
+
+  const confirmArchiveProjects = (targetProjects: Project[]) => {
+    const activeProjects = targetProjects.filter((project) => project.status !== 'ARCHIVED');
+    if (!activeProjects.length) {
+      message.info('所选项目已全部归档');
+      return;
+    }
+    Modal.confirm({
+      title: activeProjects.length > 1 ? '确认批量归档' : '确认归档',
+      content: `将归档 ${activeProjects.length} 个项目；归档后仍可在列表中筛选查看。`,
+      okText: '归档',
+      cancelText: '取消',
+      onOk: () => archiveProjects(activeProjects),
+    });
+  };
+
   const columns: ColumnsType<Project> = [
     {
       title: '项目名称',
       dataIndex: 'projectName',
       key: 'projectName',
+      sorter: (a, b) => compareText(a.projectName, b.projectName),
       render: (text, record) => (
         <a onClick={() => navigate(`/projects/${record.id}`)}>{text}</a>
       ),
@@ -95,38 +190,50 @@ const ProjectList: React.FC = () => {
       title: '描述',
       dataIndex: 'description',
       key: 'description',
+      ellipsis: true,
     },
     {
       title: '题材',
       dataIndex: 'genre',
       key: 'genre',
+      sorter: (a, b) => compareText(a.genre, b.genre),
       render: (genre) => genre ? <Tag color="geekblue">{genre}</Tag> : '-',
     },
     {
       title: '样本分组',
       dataIndex: 'sampleGroupType',
       key: 'sampleGroupType',
+      sorter: (a, b) => compareText(a.sampleGroupType, b.sampleGroupType),
       render: (sampleGroupType) => (
         <Tag color="blue">{sampleGroupLabels[sampleGroupType] || sampleGroupType}</Tag>
       ),
     },
     {
-      title: '样本数量',
+      title: '样本数',
       dataIndex: 'sampleCount',
       key: 'sampleCount',
+      sorter: (a, b) => (a.sampleCount || 0) - (b.sampleCount || 0),
     },
     {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
+      sorter: (a, b) => compareText(a.status, b.status),
       render: (status) => (
         <Tag color={statusColors[status] || 'default'}>{statusLabels[status] || status}</Tag>
       ),
     },
     {
+      title: '下一步',
+      key: 'nextStep',
+      render: (_, record) => <Text type="secondary">{projectStatusGuide[record.status] || '-'}</Text>,
+    },
+    {
       title: '创建时间',
       dataIndex: 'createdAt',
       key: 'createdAt',
+      defaultSortOrder: 'descend',
+      sorter: (a, b) => timestampValue(a.createdAt) - timestampValue(b.createdAt),
     },
     {
       title: '操作',
@@ -143,10 +250,11 @@ const ProjectList: React.FC = () => {
           <Button
             type="link"
             danger
-            icon={<DeleteOutlined />}
-            onClick={() => handleDelete(record.id)}
+            icon={<InboxOutlined />}
+            disabled={record.status === 'ARCHIVED'}
+            onClick={() => confirmArchiveProjects([record])}
           >
-            删除
+            归档
           </Button>
         </Space>
       ),
@@ -173,44 +281,77 @@ const ProjectList: React.FC = () => {
     }
   };
 
-  const handleDelete = async (projectId: string) => {
-    Modal.confirm({
-      title: '确认删除',
-      content: '删除后项目会归档，是否继续？',
-      okText: '确认',
-      cancelText: '取消',
-      onOk: async () => {
-        try {
-          await projectApi.delete(projectId);
-          message.success('删除成功');
-          await loadProjects();
-        } catch (error) {
-          message.error('删除失败');
-        }
-      },
-    });
-  };
-
   return (
     <div>
       <Card
         title="项目列表"
         extra={
-          <Button
-            type="primary"
-            icon={<PlusOutlined />}
-            onClick={() => setModalVisible(true)}
-          >
-            创建项目
-          </Button>
+          <Space wrap>
+            <Button icon={<ReloadOutlined />} onClick={() => loadProjects()} loading={loading}>
+              刷新
+            </Button>
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => setModalVisible(true)}
+            >
+              创建项目
+            </Button>
+          </Space>
         }
       >
-        <Table
-          columns={columns}
-          dataSource={projects}
-          loading={loading}
-          rowKey="id"
-        />
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Space wrap>
+            <Search
+              allowClear
+              placeholder="搜索项目名称、题材、描述或 ID"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              style={{ width: 280 }}
+            />
+            <Select
+              allowClear
+              placeholder="状态"
+              value={statusFilter}
+              onChange={setStatusFilter}
+              options={statusOptions}
+              style={{ width: 150 }}
+            />
+            <Select
+              allowClear
+              placeholder="样本分组"
+              value={sampleGroupFilter}
+              onChange={setSampleGroupFilter}
+              options={sampleGroupOptions}
+              style={{ width: 170 }}
+            />
+            <Button onClick={clearFilters}>清空筛选</Button>
+            <Button
+              danger
+              icon={<InboxOutlined />}
+              disabled={!activeSelectedCount}
+              loading={bulkArchiving}
+              onClick={() => confirmArchiveProjects(selectedProjects)}
+            >
+              批量归档
+            </Button>
+            <Text type="secondary">
+              显示 {filteredProjects.length} / {projects.length}，已选 {selectedRowKeys.length}
+            </Text>
+          </Space>
+
+          <Table
+            columns={columns}
+            dataSource={filteredProjects}
+            loading={loading}
+            rowKey="id"
+            rowSelection={{
+              selectedRowKeys,
+              onChange: setSelectedRowKeys,
+              getCheckboxProps: (record) => ({ disabled: record.status === 'ARCHIVED' }),
+            }}
+          />
+        </Space>
       </Card>
 
       <Modal
@@ -259,13 +400,7 @@ const ProjectList: React.FC = () => {
             initialValue="SAME_GENRE"
             rules={[{ required: true, message: '请选择样本分组类型' }]}
           >
-            <Select
-              options={[
-                { value: 'SAME_GENRE', label: sampleGroupLabels.SAME_GENRE },
-                { value: 'SAME_AUTHOR', label: sampleGroupLabels.SAME_AUTHOR },
-                { value: 'MIXED', label: sampleGroupLabels.MIXED },
-              ]}
-            />
+            <Select options={sampleGroupOptions} />
           </Form.Item>
         </Form>
       </Modal>

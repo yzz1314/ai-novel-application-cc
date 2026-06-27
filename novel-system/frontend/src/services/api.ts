@@ -361,6 +361,10 @@ export const retrievalApi = {
     request(api.get(`/projects/${projectId}/retrieval/quality`)),
   evaluateQuality: (projectId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/retrieval/quality/evaluate`, data || {})),
+  getBenchmarkReport: (projectId: string) =>
+    request(api.get(`/projects/${projectId}/retrieval/benchmark`)),
+  evaluateBenchmark: (projectId: string, data?: any) =>
+    request(api.post(`/projects/${projectId}/retrieval/benchmark/evaluate`, data || {})),
   invalidate: (projectId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/retrieval/invalidate`, data || {})),
   getVersions: (projectId: string) =>

@@ -104,6 +104,55 @@ class RetrievalArtifactServiceTest {
     }
 
     @Test
+    void benchmarkReportCanBeReadAndEvaluateCreatesRetrievalIndexTask() throws Exception {
+        writeProjectFile("indexes/retrieval_benchmark_report.json", """
+            {
+              "status": "passed",
+              "case_count": 2,
+              "passed_count": 2,
+              "hit_rate": 1.0,
+              "mean_reciprocal_rank": 0.75
+            }
+            """);
+
+        Map<String, Object> report = retrievalArtifactService.getBenchmarkReport(PROJECT_ID);
+        assertThat(report)
+            .containsEntry("exists", true)
+            .containsEntry("status", "passed")
+            .containsEntry("case_count", 2)
+            .containsEntry("path", "indexes/retrieval_benchmark_report.json");
+
+        AtomicReference<Map<String, Object>> taskParameters = new AtomicReference<>();
+        Task task = new Task();
+        task.setId("task_retrieval_benchmark");
+        task.setProjectId(PROJECT_ID);
+        task.setTaskType("retrieval_index");
+        task.setAgentName("retrieval_index");
+        when(taskExecutorService.createTask(
+            eq(PROJECT_ID),
+            eq("retrieval_index"),
+            eq("retrieval_index"),
+            eq(Map.of()),
+            any()
+        )).thenAnswer(invocation -> {
+            taskParameters.set(invocation.getArgument(4));
+            return task;
+        });
+        when(taskExecutorService.executeTaskAsync("task_retrieval_benchmark"))
+            .thenReturn(CompletableFuture.completedFuture(task));
+
+        Task benchmarkTask = retrievalArtifactService.evaluateBenchmark(PROJECT_ID, Map.of(
+            "top_k", 5
+        ));
+
+        assertThat(benchmarkTask.getId()).isEqualTo("task_retrieval_benchmark");
+        assertThat(taskParameters.get())
+            .containsEntry("project_id", PROJECT_ID)
+            .containsEntry("run_benchmark", true)
+            .containsEntry("top_k", 5);
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void createIndexVersionListsDetailsAndRebuildSnapshotsPreviousIndexes() throws Exception {
         writeProjectFile("indexes/retrieval_config.json", "{\"top_k\":8}");

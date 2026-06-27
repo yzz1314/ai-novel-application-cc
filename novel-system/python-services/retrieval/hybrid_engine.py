@@ -158,8 +158,176 @@ class HybridRetrievalEngine:
             },
         }
 
+    def evaluate_benchmark(
+            self,
+            benchmark_queries: List[Dict[str, Any]],
+            plan: RetrievalPlan,
+            top_k: int = 10) -> Dict[str, Any]:
+        """Evaluate retrieval against a deterministic local benchmark set."""
+        cases = [case for case in benchmark_queries if str(case.get("query") or "").strip()]
+        evaluated_cases = []
+        for index, case in enumerate(cases, start=1):
+            case_top_k = self._bounded_int(case.get("top_k"), top_k, 1, 50)
+            retrieval = self.retrieve(str(case.get("query")), plan, top_k=case_top_k)
+            results = retrieval.get("results", [])
+            expected = self._expected_matchers(case)
+            matched_results = [
+                self._benchmark_match({**result, "rank": rank}, expected)
+                for rank, result in enumerate(results, start=1)
+            ]
+            matched_results = [match for match in matched_results if match.get("matched")]
+            first_rank = min((match["rank"] for match in matched_results), default=None)
+            expected_count = max(1, expected.get("expected_count", 1))
+            hit_count = len({match["identity"] for match in matched_results})
+            recall_at_k = min(1.0, hit_count / expected_count)
+            reciprocal_rank = round(1 / first_rank, 6) if first_rank else 0
+            min_quality_score = self._bounded_int(case.get("min_quality_score"), 50, 0, 100)
+            quality_score = int(retrieval.get("quality_evaluation", {}).get("score") or 0)
+            passed = bool(first_rank) and quality_score >= min_quality_score
+
+            evaluated_cases.append({
+                "id": case.get("id") or f"benchmark_{index}",
+                "query": case.get("query"),
+                "description": case.get("description", ""),
+                "top_k": case_top_k,
+                "passed": passed,
+                "hit": bool(first_rank),
+                "first_match_rank": first_rank,
+                "reciprocal_rank": reciprocal_rank,
+                "hit_count": hit_count,
+                "expected_count": expected_count,
+                "recall_at_k": round(recall_at_k, 6),
+                "quality_score": quality_score,
+                "quality_status": retrieval.get("quality_evaluation", {}).get("status"),
+                "min_quality_score": min_quality_score,
+                "expected": expected.get("summary", {}),
+                "matched_results": matched_results[:case_top_k],
+                "top_results": [
+                    {
+                        "rank": rank,
+                        "doc_id": result.get("doc_id"),
+                        "source_type": result.get("source_type"),
+                        "path": result.get("path"),
+                        "title": result.get("title"),
+                        "rerank_score": result.get("rerank_score"),
+                        "retrieval_sources": result.get("retrieval_sources"),
+                    }
+                    for rank, result in enumerate(results, start=1)
+                ],
+                "quality_evaluation": retrieval.get("quality_evaluation", {}),
+            })
+
+        case_count = len(evaluated_cases)
+        passed_count = sum(1 for case in evaluated_cases if case["passed"])
+        hit_count = sum(1 for case in evaluated_cases if case["hit"])
+        average_recall = statistics.mean([case["recall_at_k"] for case in evaluated_cases]) if evaluated_cases else 0
+        mean_reciprocal_rank = statistics.mean([case["reciprocal_rank"] for case in evaluated_cases]) if evaluated_cases else 0
+        average_quality_score = statistics.mean([case["quality_score"] for case in evaluated_cases]) if evaluated_cases else 0
+        pass_rate = passed_count / case_count if case_count else 0
+        hit_rate = hit_count / case_count if case_count else 0
+        status = "passed" if case_count and pass_rate >= 0.8 else ("needs_review" if case_count and hit_rate >= 0.5 else "failed")
+
+        warnings = []
+        recommendations = []
+        if not case_count:
+            warnings.append("No retrieval benchmark queries were provided.")
+            recommendations.append("Add indexes/retrieval_benchmark.json or pass benchmark_queries to retrieval_index.")
+        for case in evaluated_cases:
+            if not case["hit"]:
+                warnings.append(f"{case['id']} did not match expected retrieval evidence.")
+                recommendations.append("Tune query wording, expected evidence, or rebuild indexes with missing sources.")
+            elif not case["passed"]:
+                warnings.append(f"{case['id']} matched evidence but failed quality threshold.")
+                recommendations.append("Improve source diversity or quality score for benchmark queries.")
+
+        return {
+            "evaluated_at": datetime.now().isoformat(),
+            "status": status,
+            "case_count": case_count,
+            "passed_count": passed_count,
+            "hit_count": hit_count,
+            "pass_rate": round(pass_rate, 6),
+            "hit_rate": round(hit_rate, 6),
+            "average_recall_at_k": round(average_recall, 6),
+            "mean_reciprocal_rank": round(mean_reciprocal_rank, 6),
+            "average_quality_score": round(average_quality_score, 2),
+            "warnings": warnings,
+            "recommendations": sorted(set(recommendations)),
+            "cases": evaluated_cases,
+        }
+
     def persist_indexes(self, cache_status: Optional[Dict[str, Any]] = None):
         self.vector.persist(self.project_root / "indexes" / "vector", cache_status=cache_status)
+
+    def _expected_matchers(self, case: Dict[str, Any]) -> Dict[str, Any]:
+        doc_ids = self._string_set(case.get("expected_doc_ids") or case.get("expectedDocIds"))
+        paths = self._string_set(case.get("expected_paths") or case.get("expectedPaths"))
+        source_types = self._string_set(case.get("expected_source_types") or case.get("expectedSourceTypes"))
+        contains = self._string_set(case.get("expected_text") or case.get("expectedText") or case.get("expected_contains"))
+        expected_count = int(case.get("expected_count") or case.get("expectedCount") or max(
+            1,
+            len(doc_ids) + len(paths) + len(source_types) + len(contains)
+        ))
+        return {
+            "doc_ids": doc_ids,
+            "paths": paths,
+            "source_types": source_types,
+            "contains": {item.lower() for item in contains},
+            "expected_count": expected_count,
+            "summary": {
+                "docIds": sorted(doc_ids),
+                "paths": sorted(paths),
+                "sourceTypes": sorted(source_types),
+                "contains": sorted(contains),
+                "expectedCount": expected_count,
+            },
+        }
+
+    def _benchmark_match(self, result: Dict[str, Any], expected: Dict[str, Any]) -> Dict[str, Any]:
+        text = " ".join([
+            str(result.get("doc_id", "")),
+            str(result.get("source_type", "")),
+            str(result.get("path", "")),
+            str(result.get("title", "")),
+            str(result.get("snippet", "")),
+        ]).lower()
+        matched_by = []
+        if result.get("doc_id") in expected["doc_ids"]:
+            matched_by.append("doc_id")
+        if result.get("path") in expected["paths"]:
+            matched_by.append("path")
+        if result.get("source_type") in expected["source_types"]:
+            matched_by.append("source_type")
+        if any(item and item in text for item in expected["contains"]):
+            matched_by.append("text")
+        rank = int(result.get("rank") or 0)
+        return {
+            "matched": bool(matched_by),
+            "matched_by": matched_by,
+            "identity": result.get("doc_id") or result.get("path") or result.get("title"),
+            "rank": rank,
+            "doc_id": result.get("doc_id"),
+            "source_type": result.get("source_type"),
+            "path": result.get("path"),
+            "title": result.get("title"),
+            "rerank_score": result.get("rerank_score"),
+        }
+
+    def _string_set(self, value: Any) -> set:
+        if value is None:
+            return set()
+        if isinstance(value, str):
+            return {value} if value.strip() else set()
+        if isinstance(value, list):
+            return {str(item) for item in value if str(item).strip()}
+        return {str(value)}
+
+    def _bounded_int(self, value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(maximum, parsed))
 
     def _graph_results(self, query: str, top_k: int) -> List[Dict[str, Any]]:
         query_tokens = set(self.keyword._tokenize(query))

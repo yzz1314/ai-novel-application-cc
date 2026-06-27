@@ -39,9 +39,41 @@ class RetrievalIndexAgent(BaseAgent):
             engine = HybridRetrievalEngine(builder.project_root, documents, graph_context)
             engine.persist_indexes(cache_status=cache_status)
             retrieval = engine.retrieve(query, plan, top_k=top_k)
+            benchmark_queries = self._benchmark_queries(request, builder.project_root)
+            benchmark_report_path = None
+            if self._benchmark_requested(request, builder.project_root):
+                benchmark_report = engine.evaluate_benchmark(benchmark_queries, plan, top_k=top_k)
+                benchmark_report_path = self._write_benchmark_report(builder.project_root, benchmark_report)
+            else:
+                benchmark_report = {
+                    "status": "skipped",
+                    "case_count": 0,
+                    "passed_count": 0,
+                    "hit_rate": 0,
+                    "mean_reciprocal_rank": 0,
+                    "average_quality_score": 0,
+                }
             builder._save_index_summary(documents, cache_status=cache_status)
             citation_budget = builder.preview_citation_budget(retrieval.get("results", []))
             model_gateway = await self._probe_model_gateway(request, query, retrieval.get("results", []))
+            benchmark_summary = {
+                "status": benchmark_report.get("status"),
+                "case_count": benchmark_report.get("case_count"),
+                "passed_count": benchmark_report.get("passed_count"),
+                "hit_rate": benchmark_report.get("hit_rate"),
+                "mean_reciprocal_rank": benchmark_report.get("mean_reciprocal_rank"),
+                "average_quality_score": benchmark_report.get("average_quality_score"),
+            }
+            if benchmark_report_path:
+                benchmark_summary["report_path"] = self._relative(builder.project_root, benchmark_report_path)
+            artifacts = {
+                "bm25_summary": "indexes/bm25/index_summary.json",
+                "vector_summary": "indexes/vector/index_summary.json",
+                "hybrid_summary": "indexes/hybrid/index_summary.json",
+                "report": "indexes/retrieval_index_report.json",
+            }
+            if benchmark_report_path:
+                artifacts["benchmark_report"] = "indexes/retrieval_benchmark_report.json"
 
             report = {
                 "project_id": request.project_id,
@@ -55,6 +87,7 @@ class RetrievalIndexAgent(BaseAgent):
                 "stats": retrieval.get("stats", {}),
                 "quality_evaluation": retrieval.get("quality_evaluation", {}),
                 "citation_budget": citation_budget,
+                "benchmark": benchmark_summary,
                 "model_gateway": model_gateway,
                 "top_results": [
                     {
@@ -67,38 +100,40 @@ class RetrievalIndexAgent(BaseAgent):
                     }
                     for item in retrieval.get("results", [])[:top_k]
                 ],
-                "artifacts": {
-                    "bm25_summary": "indexes/bm25/index_summary.json",
-                    "vector_summary": "indexes/vector/index_summary.json",
-                    "hybrid_summary": "indexes/hybrid/index_summary.json",
-                    "report": "indexes/retrieval_index_report.json",
-                },
+                "artifacts": artifacts,
             }
             report_path = self._write_report(builder.project_root, report)
             self._write_hybrid_summary(builder.project_root, report)
+            output_refs = [
+                "indexes/bm25/index_summary.json",
+                "indexes/vector/index_summary.json",
+                "indexes/hybrid/index_summary.json",
+                self._relative(builder.project_root, report_path),
+            ]
+            if benchmark_report_path:
+                output_refs.append(self._relative(builder.project_root, benchmark_report_path))
+            structured_output = {
+                "document_count": report["document_count"],
+                "source_counts": report["source_counts"],
+                "stats": report["stats"],
+                "cache_status": report["cache_status"],
+                "quality_evaluation": report["quality_evaluation"],
+                "citation_budget": report["citation_budget"],
+                "benchmark": report["benchmark"],
+                "model_gateway": report["model_gateway"],
+                "report_path": self._relative(builder.project_root, report_path),
+                "bm25_summary_path": "indexes/bm25/index_summary.json",
+                "vector_summary_path": "indexes/vector/index_summary.json",
+                "hybrid_summary_path": "indexes/hybrid/index_summary.json",
+            }
+            if benchmark_report_path:
+                structured_output["benchmark_report_path"] = self._relative(builder.project_root, benchmark_report_path)
 
             return self._build_response(
                 request=request,
                 status="success",
-                output_refs=[
-                    "indexes/bm25/index_summary.json",
-                    "indexes/vector/index_summary.json",
-                    "indexes/hybrid/index_summary.json",
-                    self._relative(builder.project_root, report_path),
-                ],
-                structured_output={
-                    "document_count": report["document_count"],
-                    "source_counts": report["source_counts"],
-                    "stats": report["stats"],
-                    "cache_status": report["cache_status"],
-                    "quality_evaluation": report["quality_evaluation"],
-                    "citation_budget": report["citation_budget"],
-                    "model_gateway": report["model_gateway"],
-                    "report_path": self._relative(builder.project_root, report_path),
-                    "bm25_summary_path": "indexes/bm25/index_summary.json",
-                    "vector_summary_path": "indexes/vector/index_summary.json",
-                    "hybrid_summary_path": "indexes/hybrid/index_summary.json",
-                },
+                output_refs=output_refs,
+                structured_output=structured_output,
             )
         except Exception as e:
             self.logger.error(f"Retrieval index rebuild failed: {str(e)}", exc_info=True)
@@ -117,6 +152,46 @@ class RetrievalIndexAgent(BaseAgent):
         if query:
             return str(query)
         return "项目设定 人物 伏笔 技法 大纲 章节 样本"
+
+    def _benchmark_queries(self, request: AgentRequest, project_root: Path) -> list:
+        raw = (
+            request.parameters.get("benchmark_queries")
+            or request.parameters.get("benchmarkQueries")
+            or request.parameters.get("queries")
+        )
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict):
+            return raw.get("queries") or raw.get("cases") or []
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return parsed
+                if isinstance(parsed, dict):
+                    return parsed.get("queries") or parsed.get("cases") or []
+            except json.JSONDecodeError:
+                pass
+
+        benchmark_file = project_root / "indexes" / "retrieval_benchmark.json"
+        if benchmark_file.exists():
+            try:
+                data = json.loads(benchmark_file.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    return data
+                if isinstance(data, dict):
+                    return data.get("queries") or data.get("cases") or []
+            except json.JSONDecodeError:
+                self.logger.warning("Invalid retrieval benchmark file: %s", benchmark_file)
+        return []
+
+    def _benchmark_requested(self, request: AgentRequest, project_root: Path) -> bool:
+        has_inline_cases = any(
+            key in request.parameters
+            for key in ["benchmark_queries", "benchmarkQueries", "queries"]
+        )
+        benchmark_file = project_root / "indexes" / "retrieval_benchmark.json"
+        return self._truthy(request.parameters.get("run_benchmark")) or has_inline_cases or benchmark_file.exists()
 
     def _source_counts(self, documents) -> Dict[str, int]:
         counts: Dict[str, int] = {}
@@ -208,6 +283,12 @@ class RetrievalIndexAgent(BaseAgent):
         output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         return output_path
 
+    def _write_benchmark_report(self, project_root: Path, report: Dict[str, Any]) -> Path:
+        output_path = project_root / "indexes" / "retrieval_benchmark_report.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return output_path
+
     def _write_hybrid_summary(self, project_root: Path, report: Dict[str, Any]) -> Path:
         hybrid_dir = project_root / "indexes" / "hybrid"
         hybrid_dir.mkdir(parents=True, exist_ok=True)
@@ -223,6 +304,7 @@ class RetrievalIndexAgent(BaseAgent):
                 "stats": report["stats"],
                 "quality_evaluation": report.get("quality_evaluation", {}),
                 "citation_budget": report.get("citation_budget", {}),
+                "benchmark": report.get("benchmark", {}),
                 "model_gateway": report.get("model_gateway", {}),
                 "top_results": report["top_results"],
             }, ensure_ascii=False, indent=2),

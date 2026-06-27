@@ -71,6 +71,19 @@ public class RetrievalController {
         return ResponseEntity.ok(retrievalArtifactService.evaluateQuality(projectId, request == null ? Map.of() : request));
     }
 
+    @GetMapping("/benchmark")
+    public ResponseEntity<Map<String, Object>> getBenchmarkReport(@PathVariable String projectId) {
+        return ResponseEntity.ok(retrievalArtifactService.getBenchmarkReport(projectId));
+    }
+
+    @PostMapping("/benchmark/evaluate")
+    public ResponseEntity<TaskResponse> evaluateBenchmark(
+            @PathVariable String projectId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        Task task = retrievalArtifactService.evaluateBenchmark(projectId, request == null ? Map.of() : request);
+        return ResponseEntity.ok(TaskResponse.from(task));
+    }
+
     @PostMapping("/invalidate")
     public ResponseEntity<Map<String, Object>> invalidateCaches(
             @PathVariable String projectId,

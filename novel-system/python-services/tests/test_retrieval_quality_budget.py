@@ -174,17 +174,81 @@ async def test_retrieval_index_report_includes_quality_and_budget(tmp_path):
     assert response.structured_output["model_gateway"]["enabled"] is True
     assert response.structured_output["model_gateway"]["embedding_probe"]["model_role"] == "embeddingModel"
     assert response.structured_output["model_gateway"]["rerank_probe"]["model_role"] == "rerankModel"
+    assert response.structured_output["benchmark"]["status"] == "skipped"
+    assert "benchmark_report_path" not in response.structured_output
 
     report = json.loads((project_root / "indexes" / "retrieval_index_report.json").read_text(encoding="utf-8"))
     hybrid_summary = json.loads((project_root / "indexes" / "hybrid" / "index_summary.json").read_text(encoding="utf-8"))
     assert report["quality_evaluation"]["metrics"]["returned_count"] > 0
     assert report["citation_budget"]["usage"]["selected_result_count"] > 0
+    assert report["benchmark"]["status"] == "skipped"
     assert report["cache_status"]["index_fingerprint"]
     assert report["model_gateway"]["embedding_probe"]["result_count"] > 0
     assert report["model_gateway"]["rerank_probe"]["result_count"] > 0
     assert hybrid_summary["quality_evaluation"]["score"] == report["quality_evaluation"]["score"]
     assert hybrid_summary["cache_status"]["index_fingerprint"] == report["cache_status"]["index_fingerprint"]
     assert hybrid_summary["model_gateway"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_retrieval_index_writes_benchmark_report(tmp_path):
+    project_id = "proj_retrieval_benchmark"
+    project_root = write_project_documents(tmp_path, project_id)
+    benchmark_file = project_root / "indexes" / "retrieval_benchmark.json"
+    benchmark_file.parent.mkdir(parents=True, exist_ok=True)
+    benchmark_file.write_text(
+        json.dumps({
+            "queries": [
+                {
+                    "id": "jade_token",
+                    "query": "Lin Mo jade token Xuanmen trial",
+                    "expected_source_types": ["sample_chunk", "memory"],
+                    "expected_text": ["jade token", "Xuanmen"],
+                    "expected_count": 1,
+                    "min_quality_score": 50,
+                },
+                {
+                    "id": "scene_skill",
+                    "query": "pressure clue hook trial scene",
+                    "expected_source_types": ["skill", "sample_chunk"],
+                    "expected_text": ["pressure", "hook"],
+                    "expected_count": 1,
+                    "min_quality_score": 45,
+                },
+            ]
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    original_base_path = settings.PROJECT_BASE_PATH
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    try:
+        response = await RetrievalIndexAgent().run(AgentRequest(
+            task_id="task_retrieval_benchmark",
+            project_id=project_id,
+            task_type="retrieval_index",
+            user_input="Lin Mo Xuanmen trial jade token",
+            parameters={"top_k": 5},
+        ))
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+
+    assert response.status == "success"
+    assert response.structured_output["benchmark"]["case_count"] == 2
+    assert response.structured_output["benchmark"]["hit_rate"] >= 0.5
+    assert response.structured_output["benchmark_report_path"] == "indexes/retrieval_benchmark_report.json"
+
+    report = json.loads((project_root / "indexes" / "retrieval_index_report.json").read_text(encoding="utf-8"))
+    benchmark = json.loads((project_root / "indexes" / "retrieval_benchmark_report.json").read_text(encoding="utf-8"))
+    hybrid_summary = json.loads((project_root / "indexes" / "hybrid" / "index_summary.json").read_text(encoding="utf-8"))
+
+    assert report["benchmark"]["case_count"] == 2
+    assert benchmark["case_count"] == 2
+    assert benchmark["hit_count"] >= 1
+    assert benchmark["mean_reciprocal_rank"] > 0
+    assert {case["id"] for case in benchmark["cases"]} == {"jade_token", "scene_skill"}
+    assert all(case["top_results"] for case in benchmark["cases"])
+    assert hybrid_summary["benchmark"]["report_path"] == "indexes/retrieval_benchmark_report.json"
 
 
 @pytest.mark.asyncio

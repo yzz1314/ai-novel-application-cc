@@ -47,6 +47,7 @@ public class RetrievalArtifactService {
         overview.put("indexes", getIndexSummaries(projectId));
         overview.put("indexSummary", readOptionalJson(indexDir(projectId, "bm25").resolve("index_summary.json")));
         overview.put("qualityReport", getQualityReport(projectId));
+        overview.put("benchmarkReport", getBenchmarkReport(projectId));
         overview.put("contextPacks", listContextPacks(projectId));
         overview.put("latestTasks", latestRetrievalTasks(projectId));
         overview.put("latestVersions", listIndexVersions(projectId).stream().limit(5).toList());
@@ -98,6 +99,38 @@ public class RetrievalArtifactService {
             report.putIfAbsent("score", 0);
         }
         return report;
+    }
+
+    public Map<String, Object> getBenchmarkReport(String projectId) {
+        projectService.getProject(projectId);
+        Path file = benchmarkReportFile(projectId);
+        Map<String, Object> report = readOptionalJson(file);
+        report.put("path", relative(projectId, file));
+        report.put("exists", Files.exists(file));
+        report.put("updatedAt", Files.exists(file) ? modifiedAt(file) : "");
+        if (!Files.exists(file)) {
+            report.putIfAbsent("projectId", projectId);
+            report.putIfAbsent("status", "missing");
+            report.putIfAbsent("caseCount", 0);
+        }
+        return report;
+    }
+
+    public Task evaluateBenchmark(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        Map<String, Object> parameters = new LinkedHashMap<>(request == null ? Map.of() : request);
+        parameters.put("project_id", projectId);
+        parameters.putIfAbsent("run_benchmark", true);
+
+        Task task = taskExecutorService.createTask(
+            projectId,
+            "retrieval_index",
+            "retrieval_index",
+            Map.of(),
+            parameters
+        );
+        taskExecutorService.executeTaskAsync(task.getId());
+        return task;
     }
 
     public Map<String, Object> evaluateQuality(String projectId, Map<String, Object> request) {
@@ -255,6 +288,7 @@ public class RetrievalArtifactService {
         artifacts.put("hybrid", artifactRef(projectId, indexDir(projectId, "hybrid").resolve("index_summary.json")));
         artifacts.put("rebuildReport", artifactRef(projectId, projectRoot(projectId).resolve("indexes").resolve("retrieval_index_report.json")));
         artifacts.put("qualityReport", artifactRef(projectId, qualityReportFile(projectId)));
+        artifacts.put("benchmarkReport", artifactRef(projectId, benchmarkReportFile(projectId)));
 
         Map<String, Object> report = new LinkedHashMap<>();
         report.put("projectId", projectId);
@@ -743,6 +777,7 @@ public class RetrievalArtifactService {
         version.put("config", getConfig(projectId));
         version.put("indexes", indexes);
         version.put("qualityReport", qualityReport);
+        version.put("benchmarkReport", getBenchmarkReport(projectId));
         version.put("contextPacks", contextPacks);
         version.put("documentCounts", indexDocumentCounts(indexes));
         version.put("artifactRefs", Map.of(
@@ -751,7 +786,8 @@ public class RetrievalArtifactService {
             "vector", artifactRef(projectId, indexDir(projectId, "vector").resolve("index_summary.json")),
             "hybrid", artifactRef(projectId, indexDir(projectId, "hybrid").resolve("index_summary.json")),
             "rebuildReport", artifactRef(projectId, projectRoot(projectId).resolve("indexes").resolve("retrieval_index_report.json")),
-            "qualityReport", artifactRef(projectId, qualityReportFile(projectId))
+            "qualityReport", artifactRef(projectId, qualityReportFile(projectId)),
+            "benchmarkReport", artifactRef(projectId, benchmarkReportFile(projectId))
         ));
         version.put("versionPath", relative(projectId, versionFile));
         writeJson(versionFile, version);
@@ -881,6 +917,10 @@ public class RetrievalArtifactService {
 
     private Path qualityReportFile(String projectId) {
         return projectRoot(projectId).resolve("indexes").resolve("retrieval_quality_report.json");
+    }
+
+    private Path benchmarkReportFile(String projectId) {
+        return projectRoot(projectId).resolve("indexes").resolve("retrieval_benchmark_report.json");
     }
 
     private Path versionsDir(String projectId) {

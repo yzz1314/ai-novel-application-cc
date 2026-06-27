@@ -38,6 +38,7 @@ const RetrievalView: React.FC = () => {
   const [rebuilding, setRebuilding] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [evaluating, setEvaluating] = useState(false)
+  const [benchmarking, setBenchmarking] = useState(false)
   const [invalidating, setInvalidating] = useState(false)
   const [versioning, setVersioning] = useState(false)
   const [overview, setOverview] = useState<any>(null)
@@ -57,6 +58,7 @@ const RetrievalView: React.FC = () => {
   const latestTasks = overview?.latestTasks || []
   const latestVersions = overview?.latestVersions || []
   const qualityReport = overview?.qualityReport || {}
+  const benchmarkReport = overview?.benchmarkReport || {}
   const latestQuality = indexes?.hybrid?.quality_evaluation || indexes?.rebuildReport?.quality_evaluation || {}
   const latestBudget = indexes?.hybrid?.citation_budget || indexes?.rebuildReport?.citation_budget || {}
 
@@ -160,6 +162,21 @@ const RetrievalView: React.FC = () => {
       message.error({ content: '检索质量评估失败', key: 'retrieval-quality' })
     } finally {
       setEvaluating(false)
+    }
+  }
+
+  const evaluateRetrievalBenchmark = async () => {
+    if (!projectId) return
+    try {
+      setBenchmarking(true)
+      message.loading({ content: '正在运行检索基准集', key: 'retrieval-benchmark' })
+      const task: any = await retrievalApi.evaluateBenchmark(projectId, {})
+      message.success({ content: '检索基准任务已启动', key: 'retrieval-benchmark' })
+      await pollTask(task.id)
+    } catch (error) {
+      message.error({ content: '启动检索基准失败', key: 'retrieval-benchmark' })
+    } finally {
+      setBenchmarking(false)
     }
   }
 
@@ -416,6 +433,22 @@ const RetrievalView: React.FC = () => {
     { title: '建议', dataIndex: 'recommendation', key: 'recommendation' },
   ]
 
+  const benchmarkCaseColumns = [
+    { title: '用例', dataIndex: 'id', key: 'id', width: 180, ellipsis: true },
+    { title: '查询', dataIndex: 'query', key: 'query', ellipsis: true },
+    {
+      title: '状态',
+      dataIndex: 'passed',
+      key: 'passed',
+      width: 90,
+      render: (passed: boolean) => <Tag color={passed ? 'success' : 'warning'}>{passed ? 'pass' : 'review'}</Tag>,
+    },
+    { title: '首中', dataIndex: 'first_match_rank', key: 'first_match_rank', width: 80 },
+    { title: '召回', dataIndex: 'recall_at_k', key: 'recall_at_k', width: 90 },
+    { title: 'MRR', dataIndex: 'reciprocal_rank', key: 'reciprocal_rank', width: 90 },
+    { title: '质量分', dataIndex: 'quality_score', key: 'quality_score', width: 90 },
+  ]
+
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Space style={{ width: '100%', justifyContent: 'space-between' }}>
@@ -432,6 +465,9 @@ const RetrievalView: React.FC = () => {
           </Button>
           <Button icon={<SearchOutlined />} onClick={evaluateRetrievalQuality} loading={evaluating}>
             评估检索质量
+          </Button>
+          <Button icon={<SearchOutlined />} onClick={evaluateRetrievalBenchmark} loading={benchmarking}>
+            运行基准
           </Button>
           <Button icon={<DeleteOutlined />} onClick={invalidateRetrievalCaches} loading={invalidating}>
             清理旧缓存
@@ -531,6 +567,48 @@ const RetrievalView: React.FC = () => {
           </Space>
         ) : (
           <Empty description="尚未生成质量评估报告" />
+        )}
+      </Card>
+
+      <Card title="检索效果基准">
+        {benchmarkReport?.exists ? (
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            <Row gutter={16}>
+              <Col span={5}>
+                <Statistic title="用例" value={benchmarkReport.case_count ?? benchmarkReport.caseCount ?? 0} />
+              </Col>
+              <Col span={5}>
+                <Statistic title="通过" value={benchmarkReport.passed_count ?? benchmarkReport.passedCount ?? 0} />
+              </Col>
+              <Col span={5}>
+                <Statistic title="命中率" value={percent(benchmarkReport.hit_rate ?? benchmarkReport.hitRate)} suffix="%" />
+              </Col>
+              <Col span={5}>
+                <Statistic title="MRR" value={benchmarkReport.mean_reciprocal_rank ?? benchmarkReport.meanReciprocalRank ?? 0} precision={2} />
+              </Col>
+              <Col span={4}>
+                <Tag color={qualityColor(benchmarkReport.status)}>{benchmarkReport.status || 'unknown'}</Tag>
+              </Col>
+            </Row>
+            {(benchmarkReport.warnings || []).length ? (
+              <Alert
+                type={benchmarkReport.status === 'failed' ? 'error' : 'warning'}
+                showIcon
+                message="基准告警"
+                description={(benchmarkReport.warnings || []).join('；')}
+              />
+            ) : null}
+            <Table
+              columns={benchmarkCaseColumns}
+              dataSource={benchmarkReport.cases || []}
+              rowKey="id"
+              pagination={{ pageSize: 6 }}
+              size="small"
+            />
+            <Text type="secondary">产物：{benchmarkReport.path}</Text>
+          </Space>
+        ) : (
+          <Empty description="尚未运行检索基准集，可使用 indexes/retrieval_benchmark.json 或请求参数提供查询集" />
         )}
       </Card>
 

@@ -1,9 +1,11 @@
 package com.novel.system.service;
 
 import com.novel.system.entity.Project;
+import com.novel.system.entity.DashboardAlertState;
 import com.novel.system.entity.Task;
 import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.repository.ChapterArtifactRepository;
+import com.novel.system.repository.DashboardAlertStateRepository;
 import com.novel.system.repository.GraphArtifactRepository;
 import com.novel.system.repository.MemoryArtifactRepository;
 import com.novel.system.repository.OutlineArtifactRepository;
@@ -20,12 +22,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Pageable;
 
 import java.time.LocalDateTime;
+import java.util.Optional;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -37,6 +41,8 @@ class DashboardServiceTest {
     private SampleRepository sampleRepository;
     @Mock
     private TaskRepository taskRepository;
+    @Mock
+    private DashboardAlertStateRepository dashboardAlertStateRepository;
     @Mock
     private ChapterArtifactRepository chapterArtifactRepository;
     @Mock
@@ -62,6 +68,7 @@ class DashboardServiceTest {
             projectRepository,
             sampleRepository,
             taskRepository,
+            dashboardAlertStateRepository,
             chapterArtifactRepository,
             skillProfileRepository,
             outlineArtifactRepository,
@@ -110,6 +117,7 @@ class DashboardServiceTest {
         when(taskRepository.countByStatus(TaskStatus.CANCELLED)).thenReturn(0L);
         when(taskRepository.findByStatus(TaskStatus.PARTIAL)).thenReturn(List.of(approvalTask));
         when(taskRepository.findAllByOrderByCreatedAtDesc(any(Pageable.class))).thenReturn(List.of(failedTask, approvalTask));
+        when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of());
         when(taskRepository.countByProjectId(project.getId())).thenReturn(2L);
         when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.FAILED)).thenReturn(1L);
         when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.PARTIAL)).thenReturn(1L);
@@ -172,11 +180,77 @@ class DashboardServiceTest {
             .filteredOn(alert -> "critical".equals(alert.get("severity")))
             .extracting(alert -> alert.get("target"))
             .contains("tasks");
+        assertThat(alerts)
+            .filteredOn(alert -> "failed_tasks".equals(alert.get("id")))
+            .singleElement()
+            .satisfies(alert -> {
+                assertThat(alert.get("conditionKey")).isNotNull();
+                assertThat((Map<String, Object>) alert.get("state")).containsEntry("status", "OPEN");
+            });
 
         List<Map<String, Object>> nextActions = (List<Map<String, Object>>) dashboard.get("nextActions");
         assertThat(nextActions)
             .extracting(action -> action.get("target"))
             .contains("tasks");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void acknowledgedAlertOnlyHidesSameCondition() {
+        Project project = project("project_dashboard");
+        Task failedTask = task("task_failed", TaskStatus.FAILED, null);
+
+        mockDashboardBasics(project, failedTask);
+        when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of(acknowledgedState(
+            "failed_tasks",
+            "failed_tasks:" + Integer.toHexString(Map.of("failedTasks", 1L).hashCode())
+        )));
+
+        Map<String, Object> dashboard = dashboardService.getDashboard();
+
+        List<Map<String, Object>> alerts = (List<Map<String, Object>>) dashboard.get("alerts");
+        List<Map<String, Object>> acknowledgedAlerts = (List<Map<String, Object>>) dashboard.get("acknowledgedAlerts");
+        assertThat(alerts)
+            .extracting(alert -> alert.get("id"))
+            .doesNotContain("failed_tasks");
+        assertThat(acknowledgedAlerts)
+            .extracting(alert -> alert.get("id"))
+            .contains("failed_tasks");
+
+        when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of(acknowledgedState(
+            "failed_tasks",
+            "failed_tasks:" + Integer.toHexString(Map.of("failedTasks", 2L).hashCode())
+        )));
+
+        Map<String, Object> changedConditionDashboard = dashboardService.getDashboard();
+        List<Map<String, Object>> changedConditionAlerts =
+            (List<Map<String, Object>>) changedConditionDashboard.get("alerts");
+
+        assertThat(changedConditionAlerts)
+            .extracting(alert -> alert.get("id"))
+            .contains("failed_tasks");
+    }
+
+    @Test
+    void updateAlertStateCanSnoozeDashboardAlert() {
+        when(dashboardAlertStateRepository.findById("failed_tasks")).thenReturn(Optional.empty());
+        when(dashboardAlertStateRepository.save(argThat(state ->
+            "failed_tasks".equals(state.getAlertId())
+                && state.getStatus() == com.novel.system.entity.DashboardAlertState.AlertStatus.SNOOZED
+                && state.getSnoozedUntil() != null
+        ))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        Map<String, Object> state = dashboardService.updateAlertState("failed_tasks", Map.of(
+            "action", "snooze",
+            "minutes", 30,
+            "actor", "tester",
+            "note", "investigating"
+        ));
+
+        assertThat(state.get("status")).isEqualTo("SNOOZED");
+        assertThat(state.get("actor")).isEqualTo("tester");
+        assertThat(state.get("note")).isEqualTo("investigating");
+        assertThat(state.get("snoozedUntil")).isNotNull();
     }
 
     private Project project(String projectId) {
@@ -205,5 +279,59 @@ class DashboardServiceTest {
         task.setCreatedAt(LocalDateTime.now());
         task.setRetryCount(0);
         return task;
+    }
+
+    private DashboardAlertState acknowledgedState(String alertId, String conditionKey) {
+        DashboardAlertState state = new DashboardAlertState();
+        state.setAlertId(alertId);
+        state.setStatus(DashboardAlertState.AlertStatus.ACKNOWLEDGED);
+        state.setActor("tester");
+        state.setAcknowledgedAt(LocalDateTime.now());
+        state.setMetadata(Map.of("conditionKey", conditionKey));
+        return state;
+    }
+
+    private void mockDashboardBasics(Project project, Task failedTask) {
+        when(projectRepository.findAll()).thenReturn(List.of(project));
+        when(projectRepository.count()).thenReturn(1L);
+        when(projectRepository.findByStatusIn(any())).thenReturn(List.of(project));
+        when(projectRepository.findByStatus(Project.ProjectStatus.ARCHIVED)).thenReturn(List.of());
+        when(sampleRepository.count()).thenReturn(0L);
+        when(sampleRepository.countByStatus(any())).thenReturn(0L);
+        when(chapterArtifactRepository.count()).thenReturn(0L);
+        when(chapterArtifactRepository.countByStage("draft")).thenReturn(0L);
+        when(chapterArtifactRepository.countByStage("final")).thenReturn(0L);
+        when(taskRepository.count()).thenReturn(1L);
+        when(taskRepository.countByStatus(TaskStatus.PENDING)).thenReturn(0L);
+        when(taskRepository.countByStatus(TaskStatus.RUNNING)).thenReturn(0L);
+        when(taskRepository.countByStatus(TaskStatus.PARTIAL)).thenReturn(0L);
+        when(taskRepository.countByStatus(TaskStatus.SUCCESS)).thenReturn(0L);
+        when(taskRepository.countByStatus(TaskStatus.FAILED)).thenReturn(1L);
+        when(taskRepository.countByStatus(TaskStatus.CANCELLED)).thenReturn(0L);
+        when(taskRepository.findByStatus(TaskStatus.PARTIAL)).thenReturn(List.of());
+        when(taskRepository.findAllByOrderByCreatedAtDesc(any(Pageable.class))).thenReturn(List.of(failedTask));
+        when(taskRepository.countByProjectId(project.getId())).thenReturn(1L);
+        when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.FAILED)).thenReturn(1L);
+        when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.PARTIAL)).thenReturn(0L);
+        when(taskRepository.findByProjectIdAndStatusOrderByCreatedAtDesc(
+            eq(project.getId()),
+            eq(TaskStatus.PARTIAL),
+            any(Pageable.class)
+        )).thenReturn(List.of());
+        when(taskRepository.findByProjectIdOrderByCreatedAtDesc(eq(project.getId()), any(Pageable.class)))
+            .thenReturn(List.of(failedTask));
+        when(sampleRepository.countByProjectId(project.getId())).thenReturn(0L);
+        when(sampleRepository.countByProjectIdAndStatus(project.getId(), com.novel.system.entity.Sample.SampleStatus.ANALYZED))
+            .thenReturn(0L);
+        when(skillProfileRepository.countByProjectId(project.getId())).thenReturn(0L);
+        when(outlineArtifactRepository.countByProjectId(project.getId())).thenReturn(0L);
+        when(chapterArtifactRepository.countByProjectId(project.getId())).thenReturn(0L);
+        when(chapterArtifactRepository.countByProjectIdAndStage(project.getId(), "draft")).thenReturn(0L);
+        when(chapterArtifactRepository.countByProjectIdAndStage(project.getId(), "final")).thenReturn(0L);
+        when(memoryArtifactRepository.countByProjectId(project.getId())).thenReturn(0L);
+        when(graphArtifactRepository.countByProjectId(project.getId())).thenReturn(0L);
+        when(retrievalArtifactRepository.countByProjectId(project.getId())).thenReturn(0L);
+        when(pythonClientService.checkHealth()).thenReturn(true);
+        when(taskExecutorService.getTaskProgress(any(Task.class))).thenReturn(Map.of("percent", 100, "label", "done"));
     }
 }

@@ -113,6 +113,7 @@ const Dashboard: React.FC = () => {
   const blockedProjects = dashboard?.blockedProjects || []
   const nextActions = dashboard?.nextActions || []
   const alerts = dashboard?.alerts || []
+  const alertSummary = dashboard?.alertSummary || {}
 
   const activeTasks = Number(taskSummary.PENDING || 0) + Number(taskSummary.RUNNING || 0)
   const failedTasks = Number(taskSummary.FAILED || 0)
@@ -142,6 +143,16 @@ const Dashboard: React.FC = () => {
     } finally {
       setLoading(false)
     }
+  }
+
+  const updateAlertState = async (alert: any, action: 'acknowledge' | 'snooze') => {
+    await dashboardApi.updateAlertState(alert.id, {
+      action,
+      minutes: action === 'snooze' ? 60 : undefined,
+      actor: 'local-user',
+      conditionKey: alert.conditionKey,
+    })
+    await loadDashboard()
   }
 
   const quickActions = [
@@ -346,12 +357,28 @@ const Dashboard: React.FC = () => {
       ) : null}
 
       {alerts.length ? (
-        <Card title="告警中心" loading={loading}>
+        <Card
+          title="告警中心"
+          loading={loading}
+          extra={
+            <Space wrap>
+              <Tag color="error">活跃 {alertSummary.activeCount || alerts.length}</Tag>
+              <Tag color="default">已确认 {alertSummary.acknowledgedCount || 0}</Tag>
+              <Tag color="processing">静默 {alertSummary.snoozedCount || 0}</Tag>
+            </Space>
+          }
+        >
           <List
             dataSource={alerts}
             renderItem={(item: any) => (
               <List.Item
                 actions={[
+                  <Button type="link" onClick={() => updateAlertState(item, 'acknowledge')}>
+                    确认
+                  </Button>,
+                  <Button type="link" onClick={() => updateAlertState(item, 'snooze')}>
+                    静默1小时
+                  </Button>,
                   <Button type="link" onClick={() => navigate(actionPath(item.target))}>
                     处理
                   </Button>,
@@ -363,6 +390,7 @@ const Dashboard: React.FC = () => {
                     <Space wrap>
                       <Text strong>{item.title}</Text>
                       <Tag color={alertTagColor(item.severity)}>{item.severity}</Tag>
+                      <Tag color="default">{item.state?.status || 'OPEN'}</Tag>
                     </Space>
                   }
                   description={item.message}

@@ -2,12 +2,15 @@ package com.novel.system.service;
 
 import com.novel.system.dto.response.ProjectResponse;
 import com.novel.system.dto.response.TaskResponse;
+import com.novel.system.entity.DashboardAlertState;
+import com.novel.system.entity.DashboardAlertState.AlertStatus;
 import com.novel.system.entity.Project;
 import com.novel.system.entity.Project.ProjectStatus;
 import com.novel.system.entity.Sample.SampleStatus;
 import com.novel.system.entity.Task;
 import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.repository.ChapterArtifactRepository;
+import com.novel.system.repository.DashboardAlertStateRepository;
 import com.novel.system.repository.GraphArtifactRepository;
 import com.novel.system.repository.MemoryArtifactRepository;
 import com.novel.system.repository.OutlineArtifactRepository;
@@ -23,9 +26,12 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -39,6 +45,7 @@ public class DashboardService {
     private final ProjectRepository projectRepository;
     private final SampleRepository sampleRepository;
     private final TaskRepository taskRepository;
+    private final DashboardAlertStateRepository dashboardAlertStateRepository;
     private final ChapterArtifactRepository chapterArtifactRepository;
     private final SkillProfileRepository skillProfileRepository;
     private final OutlineArtifactRepository outlineArtifactRepository;
@@ -63,6 +70,7 @@ public class DashboardService {
         Map<String, Object> healthSummary = healthSummary(stats, taskSummary, partialTasks, serviceStatus);
         Map<String, Object> performanceSummary = performanceSummary(monitoredTasks);
         List<Map<String, Object>> blockedProjects = blockedProjects(projects);
+        Map<String, Object> alertSummary = alertSummary(alerts(healthSummary, performanceSummary, blockedProjects, serviceStatus));
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("generatedAt", LocalDateTime.now());
@@ -70,7 +78,10 @@ public class DashboardService {
         response.put("taskSummary", taskSummary);
         response.put("healthSummary", healthSummary);
         response.put("performanceSummary", performanceSummary);
-        response.put("alerts", alerts(healthSummary, performanceSummary, blockedProjects, serviceStatus));
+        response.put("alerts", alertSummary.get("activeAlerts"));
+        response.put("snoozedAlerts", alertSummary.get("snoozedAlerts"));
+        response.put("acknowledgedAlerts", alertSummary.get("acknowledgedAlerts"));
+        response.put("alertSummary", alertSummary.get("summary"));
         response.put("workflowSummary", workflowSummary(recentProjects));
         response.put("blockedProjects", blockedProjects);
         response.put("nextActions", nextActions(stats, taskSummary, partialTasks, serviceStatus));
@@ -79,6 +90,47 @@ public class DashboardService {
             .map(task -> TaskResponse.from(task, taskExecutorService.getTaskProgress(task)))
             .toList());
         response.put("serviceStatus", serviceStatus);
+        return response;
+    }
+
+    public Map<String, Object> updateAlertState(String alertId, Map<String, Object> request) {
+        String action = stringValue(request == null ? null : request.get("action"), "acknowledge").toLowerCase();
+        String actor = stringValue(request == null ? null : request.get("actor"), "local-user");
+        String note = stringValue(request == null ? null : request.get("note"), "");
+        String conditionKey = stringValue(request == null ? null : request.get("conditionKey"), "");
+        DashboardAlertState state = dashboardAlertStateRepository
+            .findById(alertId)
+            .orElseGet(() -> {
+                DashboardAlertState created = new DashboardAlertState();
+                created.setAlertId(alertId);
+                return created;
+            });
+
+        if ("snooze".equals(action) || "snoozed".equals(action)) {
+            long minutes = numberValue(request == null ? null : request.get("minutes"));
+            minutes = minutes > 0 ? Math.min(minutes, 7 * 24 * 60) : 60;
+            state.setStatus(AlertStatus.SNOOZED);
+            state.setAcknowledgedAt(null);
+            state.setSnoozedUntil(LocalDateTime.now().plusMinutes(minutes));
+            state.setMetadata(details("action", "snooze", "minutes", minutes, "conditionKey", conditionKey));
+        } else if ("reopen".equals(action) || "open".equals(action)) {
+            state.setStatus(AlertStatus.OPEN);
+            state.setAcknowledgedAt(null);
+            state.setSnoozedUntil(null);
+            state.setMetadata(details("action", "reopen", "conditionKey", conditionKey));
+        } else {
+            state.setStatus(AlertStatus.ACKNOWLEDGED);
+            state.setAcknowledgedAt(LocalDateTime.now());
+            state.setSnoozedUntil(null);
+            state.setMetadata(details("action", "acknowledge", "conditionKey", conditionKey));
+        }
+        state.setActor(actor);
+        state.setNote(note);
+
+        DashboardAlertState saved = dashboardAlertStateRepository.save(state);
+        Map<String, Object> response = stateMap(saved);
+        response.put("alertId", alertId);
+        response.put("action", action);
         return response;
     }
 
@@ -446,6 +498,94 @@ public class DashboardService {
         return alerts;
     }
 
+    private Map<String, Object> alertSummary(List<Map<String, Object>> generatedAlerts) {
+        LocalDateTime now = LocalDateTime.now();
+        Map<String, DashboardAlertState> states = alertStates(generatedAlerts.stream()
+            .map(alert -> String.valueOf(alert.get("id")))
+            .toList());
+        List<Map<String, Object>> activeAlerts = new ArrayList<>();
+        List<Map<String, Object>> snoozedAlerts = new ArrayList<>();
+        List<Map<String, Object>> acknowledgedAlerts = new ArrayList<>();
+
+        for (Map<String, Object> alert : generatedAlerts) {
+            DashboardAlertState state = states.get(String.valueOf(alert.get("id")));
+            if (!matchesCondition(state, alert)) {
+                state = null;
+            }
+            Map<String, Object> enriched = new LinkedHashMap<>(alert);
+            enriched.put("state", stateMap(state, now));
+            if (isSnoozed(state, now)) {
+                snoozedAlerts.add(enriched);
+            } else if (state != null && state.getStatus() == AlertStatus.ACKNOWLEDGED) {
+                acknowledgedAlerts.add(enriched);
+            } else {
+                activeAlerts.add(enriched);
+            }
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("activeCount", activeAlerts.size());
+        summary.put("snoozedCount", snoozedAlerts.size());
+        summary.put("acknowledgedCount", acknowledgedAlerts.size());
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("activeAlerts", activeAlerts);
+        result.put("snoozedAlerts", snoozedAlerts);
+        result.put("acknowledgedAlerts", acknowledgedAlerts);
+        result.put("summary", summary);
+        return result;
+    }
+
+    private Map<String, DashboardAlertState> alertStates(Collection<String> alertIds) {
+        if (alertIds == null || alertIds.isEmpty()) {
+            return Map.of();
+        }
+        return dashboardAlertStateRepository.findByAlertIdIn(alertIds).stream()
+            .collect(Collectors.toMap(DashboardAlertState::getAlertId, Function.identity(), (left, right) -> left));
+    }
+
+    private boolean isSnoozed(DashboardAlertState state, LocalDateTime now) {
+        return state != null
+            && state.getStatus() == AlertStatus.SNOOZED
+            && state.getSnoozedUntil() != null
+            && state.getSnoozedUntil().isAfter(now);
+    }
+
+    private boolean matchesCondition(DashboardAlertState state, Map<String, Object> alert) {
+        if (state == null || state.getMetadata() == null) {
+            return false;
+        }
+        Object stateConditionKey = state.getMetadata().get("conditionKey");
+        Object alertConditionKey = alert.get("conditionKey");
+        return stateConditionKey != null && stateConditionKey.equals(alertConditionKey);
+    }
+
+    private Map<String, Object> stateMap(DashboardAlertState state) {
+        return stateMap(state, LocalDateTime.now());
+    }
+
+    private Map<String, Object> stateMap(DashboardAlertState state, LocalDateTime now) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        if (state == null) {
+            result.put("status", AlertStatus.OPEN.name());
+            return result;
+        }
+        AlertStatus status = state.getStatus() == null ? AlertStatus.OPEN : state.getStatus();
+        if (status == AlertStatus.SNOOZED && !isSnoozed(state, now)) {
+            result.put("previousStatus", status.name());
+            result.put("expiredSnooze", true);
+            status = AlertStatus.OPEN;
+        }
+        result.put("status", status.name());
+        result.put("actor", state.getActor());
+        result.put("note", state.getNote());
+        result.put("acknowledgedAt", state.getAcknowledgedAt());
+        result.put("snoozedUntil", state.getSnoozedUntil());
+        result.put("updatedAt", state.getUpdatedAt());
+        result.put("metadata", state.getMetadata() == null ? Map.of() : state.getMetadata());
+        return result;
+    }
+
     private Map<String, Object> details(Object... keyValues) {
         Map<String, Object> details = new LinkedHashMap<>();
         if (keyValues == null) {
@@ -459,6 +599,10 @@ public class DashboardService {
             }
         }
         return details;
+    }
+
+    private String stringValue(Object value, String fallback) {
+        return value == null || String.valueOf(value).isBlank() ? fallback : String.valueOf(value);
     }
 
     private Map<String, Object> alert(
@@ -475,6 +619,7 @@ public class DashboardService {
         alert.put("message", message);
         alert.put("target", target);
         alert.put("details", details != null ? details : Map.of());
+        alert.put("conditionKey", id + ":" + Integer.toHexString((details != null ? details : Map.of()).hashCode()));
         alert.put("createdAt", LocalDateTime.now());
         return alert;
     }

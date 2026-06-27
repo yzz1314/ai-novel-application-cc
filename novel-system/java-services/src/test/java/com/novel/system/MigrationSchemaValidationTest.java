@@ -41,13 +41,14 @@ class MigrationSchemaValidationTest {
                 'chapter_artifacts',
                 'memory_artifacts',
                 'graph_artifacts',
-                'retrieval_artifacts'
+                'retrieval_artifacts',
+                'dashboard_alert_states'
               )
             """,
             Integer.class
         );
 
         assertThat(appliedMigrations).isNotNull().isGreaterThanOrEqualTo(1);
-        assertThat(managedTables).isEqualTo(13);
+        assertThat(managedTables).isEqualTo(14);
     }
 }

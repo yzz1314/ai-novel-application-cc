@@ -30,6 +30,8 @@ export const projectApi = {
 
 export const dashboardApi = {
   getOverview: () => request(api.get('/dashboard')),
+  updateAlertState: (alertId: string, data?: any) =>
+    request(api.post(`/dashboard/alerts/${alertId}/state`, data || {})),
 }
 
 export const modelProfileApi = {

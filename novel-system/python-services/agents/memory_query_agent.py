@@ -328,6 +328,13 @@ class MemoryQueryAgent(BaseAgent):
                     f"{character.get('name')} 的记忆首次提及在第 {first_mentioned} 章，但本章已经出现。",
                     [chapter_number, first_mentioned],
                     "确认人物是否应提前出场；如是，请更新人物记忆的首次提及章节。",
+                    fix={
+                        "action": "set_field",
+                        "memory_file": "characters.json",
+                        "match": self._memory_match(character, ["character_id", "name"]),
+                        "field": "first_mentioned",
+                        "value": chapter_number,
+                    },
                 ))
 
             if appearances and chapter_number not in appearances:
@@ -388,6 +395,13 @@ class MemoryQueryAgent(BaseAgent):
                     f"{name} 的记忆首次提及在第 {first_mentioned} 章，但本章已经出现。",
                     [chapter_number, first_mentioned],
                     "确认该设定是否可提前出现；若不可，请从本章删除或改为暗示。",
+                    fix={
+                        "action": "set_field",
+                        "memory_file": "world_settings.json",
+                        "match": self._memory_match(setting, ["setting_id", "name"]),
+                        "field": "first_mentioned",
+                        "value": chapter_number,
+                    },
                 ))
 
             for record in self._future_records(setting.get("status_changes", []), chapter_number):

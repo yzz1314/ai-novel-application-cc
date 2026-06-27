@@ -253,6 +253,78 @@ class MemoryServiceTest {
             .contains("\"actor\" : \"tester\"");
     }
 
+    @Test
+    void applyContinuityIssueFixCanSetFirstMentioned() throws Exception {
+        writeProjectFile("memory/world_settings.json", """
+            [
+              {
+                "setting_id": "loc_fire",
+                "name": "Fire City",
+                "first_mentioned": 5,
+                "status_changes": []
+              }
+            ]
+            """);
+        writeProjectFile("memory/continuity/continuity_setting_test.json", """
+            {
+              "project_id": "project_memory_versions",
+              "book_id": "default",
+              "chapter_id": "chapter_2",
+              "chapter_number": 2,
+              "has_issues": true,
+              "issues": [
+                {
+                  "issue_id": "issue_setting_first_mentioned",
+                  "issue_type": "setting",
+                  "severity": "major",
+                  "title": "setting appeared early",
+                  "description": "setting first_mentioned is later than current chapter",
+                  "suggestion": "set first_mentioned to current chapter after human confirmation",
+                  "fix": {
+                    "action": "set_field",
+                    "memory_file": "world_settings.json",
+                    "match": {
+                      "setting_id": "loc_fire"
+                    },
+                    "field": "first_mentioned",
+                    "value": 2
+                  }
+                }
+              ]
+            }
+            """);
+
+        Map<String, Object> response = memoryService.applyContinuityIssueFix(
+            PROJECT_ID,
+            "continuity_setting_test",
+            0,
+            Map.of("actor", "tester", "note", "confirm early setting")
+        );
+
+        assertThat(response)
+            .containsEntry("reportType", "continuity")
+            .containsEntry("reportId", "continuity_setting_test");
+        assertThat(Files.readString(projectRoot().resolve("memory/world_settings.json"), StandardCharsets.UTF_8))
+            .contains("\"first_mentioned\" : 2");
+
+        String report = Files.readString(projectRoot().resolve("memory/continuity/continuity_setting_test.json"), StandardCharsets.UTF_8);
+        assertThat(report)
+            .contains("\"resolution_status\" : \"resolved\"")
+            .contains("\"fix_applied\" : true")
+            .contains("\"action\" : \"set_field\"")
+            .contains("\"changedCount\" : 1");
+
+        String beforeVersionPath = String.valueOf(response.get("beforeVersionPath"));
+        assertThat(Files.readString(projectRoot().resolve(beforeVersionPath), StandardCharsets.UTF_8))
+            .contains("\"reason\" : \"before_memory_continuity_fix\"")
+            .contains("\\\"first_mentioned\\\": 5");
+
+        String eventPath = String.valueOf(response.get("eventPath"));
+        assertThat(Files.readString(projectRoot().resolve(eventPath), StandardCharsets.UTF_8))
+            .contains("\"event_type\" : \"memory_continuity_fix\"")
+            .contains("\"report_type\" : \"continuity\"");
+    }
+
     private Path projectRoot() {
         return tempDir.resolve("projects").resolve(PROJECT_ID);
     }

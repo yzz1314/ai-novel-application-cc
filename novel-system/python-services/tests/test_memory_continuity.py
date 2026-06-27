@@ -112,6 +112,100 @@ async def test_continuity_check_detects_future_timeline_and_missing_appearance(t
 
 
 @pytest.mark.asyncio
+async def test_continuity_check_writes_set_field_fixes_for_early_mentions(tmp_path):
+    project_id = "proj_memory_first_mention"
+    book_id = "default"
+    project_root = tmp_path / "projects" / project_id
+    chapter_dir = project_root / "novel" / "chapters" / "drafts" / book_id / "volume_1"
+    memory_dir = project_root / "memory"
+    chapter_dir.mkdir(parents=True)
+    memory_dir.mkdir(parents=True)
+
+    chapter = {
+        "chapter_id": "chapter_2",
+        "book_id": book_id,
+        "volume_number": 1,
+        "chapter_number": 2,
+        "chapter_title": "提前相逢",
+        "content": "苏青在天火城外递来玉牌，林墨第一次意识到局势不对。"
+    }
+    (chapter_dir / "chapter_2.json").write_text(
+        json.dumps(chapter, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (memory_dir / "characters.json").write_text(
+        json.dumps([
+            {
+                "character_id": "char_suqing",
+                "name": "苏青",
+                "aliases": [],
+                "appearances": [5],
+                "first_mentioned": 5,
+                "important_events": [],
+                "status_history": [],
+            }
+        ], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (memory_dir / "world_settings.json").write_text(
+        json.dumps([
+            {
+                "setting_id": "loc_fire",
+                "name": "天火城",
+                "first_mentioned": 4,
+                "status_changes": [],
+            }
+        ], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (memory_dir / "timeline.json").write_text("[]", encoding="utf-8")
+
+    original_base_path = settings.PROJECT_BASE_PATH
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    try:
+        agent = MemoryQueryAgent()
+        response = await agent.run(AgentRequest(
+            task_id="task_first_mention",
+            project_id=project_id,
+            task_type="continuity_check",
+            parameters={
+                "project_id": project_id,
+                "book_id": book_id,
+                "chapter_id": "chapter_2",
+                "volume_number": 1,
+                "chapter_number": 2,
+            },
+        ))
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+
+    assert response.status == "success"
+    issues = response.structured_output["issues"]
+    character_issue = next(issue for issue in issues if issue["title"] == "人物提前出场")
+    setting_issue = next(issue for issue in issues if issue["title"] == "设定提前揭示")
+    assert character_issue["fix"] == {
+        "action": "set_field",
+        "memory_file": "characters.json",
+        "match": {
+            "character_id": "char_suqing",
+            "name": "苏青",
+        },
+        "field": "first_mentioned",
+        "value": 2,
+    }
+    assert setting_issue["fix"] == {
+        "action": "set_field",
+        "memory_file": "world_settings.json",
+        "match": {
+            "setting_id": "loc_fire",
+            "name": "天火城",
+        },
+        "field": "first_mentioned",
+        "value": 2,
+    }
+
+
+@pytest.mark.asyncio
 async def test_memory_audit_detects_conflicts_and_writes_resolution_plan(tmp_path):
     project_id = "proj_memory_audit"
     memory_dir = tmp_path / "projects" / project_id / "memory"

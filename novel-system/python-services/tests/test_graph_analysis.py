@@ -19,6 +19,8 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
     memory_dir.mkdir(parents=True)
     outline_dir = project_root / "novel" / "outline"
     outline_dir.mkdir(parents=True)
+    chapter_dir = project_root / "novel" / "chapters" / "drafts" / "default" / "volume_1"
+    chapter_dir.mkdir(parents=True)
 
     (memory_dir / "characters.json").write_text(
         json.dumps([
@@ -170,6 +172,21 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
         }, ensure_ascii=False),
         encoding="utf-8",
     )
+    (chapter_dir / "chapter_1.json").write_text(
+        json.dumps({
+            "chapter_id": "chapter_1",
+            "book_id": "default",
+            "volume_number": 1,
+            "chapter_number": 1,
+            "chapter_title": "旧谜入城",
+            "content": "林墨踏入天火城时，玄门试炼的钟声刚刚响起。天火旧谜的纹路在令牌上复现，他意识到玄门试炼并非普通考核。",
+            "word_count": 52,
+            "quality_score": 82,
+            "review_status": "reviewed",
+            "version": 1,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     original_base_path = settings.PROJECT_BASE_PATH
     settings.PROJECT_BASE_PATH = str(tmp_path)
@@ -242,6 +259,38 @@ async def test_graph_build_writes_advanced_analysis(tmp_path):
         edge["source_id"] == "outline_chapter_1_1"
         and edge["target_id"] == "plot_trial"
         and edge["edge_type"] == "advances_plot"
+        for edge in graph["edges"]
+    )
+    assert "chapter_content_1_1" in nodes_by_id
+    assert nodes_by_id["chapter_content_1_1"]["node_type"] == "chapter_content"
+    assert any(
+        edge["source_id"] == "chapter_content_1_1"
+        and edge["target_id"] == "outline_chapter_1_1"
+        and edge["edge_type"] == "implements_outline"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["source_id"] == "chapter_content_1_1"
+        and edge["target_id"] == "char_linmo"
+        and edge["edge_type"] == "mentions_character"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["source_id"] == "chapter_content_1_1"
+        and edge["target_id"] == "loc_tianhuo"
+        and edge["edge_type"] == "mentions_setting"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["source_id"] == "chapter_content_1_1"
+        and edge["target_id"] == "suspense_fire_secret"
+        and edge["edge_type"] == "mentions_foreshadowing"
+        for edge in graph["edges"]
+    )
+    assert any(
+        edge["source_id"] == "chapter_content_1_1"
+        and edge["target_id"] == "plot_trial"
+        and edge["edge_type"] == "mentions_plot"
         for edge in graph["edges"]
     )
 

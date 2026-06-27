@@ -102,7 +102,8 @@ class GraphBuilderAgent(BaseAgent):
             "plots": [],
             "suspenses": [],
             "timeline": [],
-            "outline": {}
+            "outline": {},
+            "chapters": []
         }
 
         for memory_type in ["characters", "world_settings", "plots", "suspenses", "timeline"]:
@@ -118,6 +119,8 @@ class GraphBuilderAgent(BaseAgent):
 
         if build_request.use_outline_data:
             memories["outline"] = await self._load_outline(build_request)
+
+        memories["chapters"] = await self._load_chapters(build_request)
 
         return memories
 
@@ -321,6 +324,8 @@ class GraphBuilderAgent(BaseAgent):
 
         if outline:
             self._append_outline_edges(graph, outline, node_by_name)
+
+        self._append_chapter_content_edges(graph, memories.get("chapters") or [], node_by_name)
 
         graph.node_count = len(graph.nodes)
         graph.edge_count = len(graph.edges)
@@ -850,6 +855,44 @@ class GraphBuilderAgent(BaseAgent):
             data = json.load(f)
         return data if isinstance(data, dict) else {}
 
+    async def _load_chapters(self, build_request: GraphBuildRequest) -> List[Dict[str, Any]]:
+        project_root = Path(settings.PROJECT_BASE_PATH) / "projects" / build_request.project_id
+        chapter_roots = [
+            project_root / "novel" / "chapters" / "final" / build_request.book_id,
+            project_root / "novel" / "chapters" / "drafts" / build_request.book_id,
+            project_root / "books" / build_request.book_id,
+        ]
+        chapters_by_key: Dict[Tuple[int, int], Dict[str, Any]] = {}
+
+        for stage_index, root in enumerate(chapter_roots):
+            if not root.exists():
+                continue
+            chapter_files = list(root.glob("volume_*/chapter_*.json"))
+            chapter_files.extend(root.glob("volume_*/chapters/chapter_*.json"))
+            for chapter_file in sorted(chapter_files):
+                try:
+                    with open(chapter_file, 'r', encoding='utf-8') as f:
+                        chapter = json.load(f)
+                except Exception as exc:
+                    self.logger.warning(f"Skipping unreadable chapter {chapter_file}: {exc}")
+                    continue
+                if not isinstance(chapter, dict):
+                    continue
+                volume_number = self._safe_int(chapter.get("volume_number"), self._volume_from_path(chapter_file))
+                chapter_number = self._safe_int(chapter.get("chapter_number"), self._chapter_from_path(chapter_file))
+                if chapter_number <= 0:
+                    continue
+                chapter["volume_number"] = volume_number
+                chapter["chapter_number"] = chapter_number
+                chapter["source_stage"] = "final" if stage_index == 0 else "draft"
+                chapter["source_path"] = str(chapter_file)
+                chapters_by_key.setdefault((volume_number, chapter_number), chapter)
+
+        return [
+            chapters_by_key[key]
+            for key in sorted(chapters_by_key.keys())
+        ]
+
     def _node_id(self, prefix: str, name: str) -> str:
         slug = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]+", "_", str(name)).strip("_")
         if not slug:
@@ -1078,6 +1121,77 @@ class GraphBuilderAgent(BaseAgent):
                     if target_id:
                         graph.edges.append(self._edge(chapter_id, target_id, "advances_plot", chapter_number, chapter_number))
 
+    def _append_chapter_content_edges(
+        self,
+        graph: KnowledgeGraph,
+        chapters: List[Dict[str, Any]],
+        node_by_name: Dict[str, str]
+    ):
+        if not chapters:
+            return
+
+        names_by_type = self._node_names_by_type(graph)
+        previous_chapter_id: Optional[str] = None
+        for chapter in chapters:
+            if not isinstance(chapter, dict):
+                continue
+            volume_number = self._safe_int(chapter.get("volume_number"), 1)
+            chapter_number = self._safe_int(chapter.get("chapter_number"), 1)
+            content = str(chapter.get("content") or "").strip()
+            if not content:
+                continue
+
+            chapter_id = self._chapter_content_node_id(volume_number, chapter_number)
+            chapter_title = str(chapter.get("chapter_title") or f"第{chapter_number}章正文").strip()
+            graph.nodes.append(GraphNode(
+                node_id=chapter_id,
+                node_type="chapter_content",
+                name=chapter_title,
+                properties={
+                    "source": "chapter_content",
+                    "source_stage": chapter.get("source_stage", "draft"),
+                    "source_path": chapter.get("source_path", ""),
+                    "book_id": chapter.get("book_id", ""),
+                    "volume_number": volume_number,
+                    "chapter_number": chapter_number,
+                    "word_count": chapter.get("word_count") or len(content),
+                    "review_status": chapter.get("review_status", ""),
+                    "quality_score": chapter.get("quality_score", 0),
+                    "version": chapter.get("version", 1),
+                    "content_excerpt": content[:240]
+                },
+                first_mentioned=chapter_number,
+                last_updated=chapter_number
+            ))
+
+            outline_id = self._outline_chapter_node_id(volume_number, chapter_number)
+            if any(node.node_id == outline_id for node in graph.nodes):
+                graph.edges.append(self._edge(chapter_id, outline_id, "implements_outline", chapter_number, chapter_number))
+
+            if previous_chapter_id:
+                graph.edges.append(self._edge(previous_chapter_id, chapter_id, "next_chapter", chapter_number, chapter_number))
+            previous_chapter_id = chapter_id
+
+            for character_name in self._match_known_names(content, names_by_type.get("character", set())):
+                target_id = node_by_name.get(character_name)
+                if target_id:
+                    graph.edges.append(self._edge(chapter_id, target_id, "mentions_character", chapter_number, chapter_number))
+
+            for setting_name in self._match_known_names(content, names_by_type.get("setting", set())):
+                target_id = node_by_name.get(setting_name)
+                if target_id:
+                    graph.edges.append(self._edge(chapter_id, target_id, "mentions_setting", chapter_number, chapter_number))
+
+            for suspense_name in self._match_known_names(content, names_by_type.get("foreshadowing", set())):
+                target_id = node_by_name.get(suspense_name)
+                if target_id:
+                    graph.edges.append(self._edge(chapter_id, target_id, "mentions_foreshadowing", chapter_number, chapter_number))
+
+            for plot_name in self._match_known_names(content, names_by_type.get("plot", set())):
+                target_id = node_by_name.get(plot_name)
+                if target_id:
+                    graph.edges.append(self._edge(chapter_id, target_id, "mentions_plot", chapter_number, chapter_number))
+
     def _node_names_by_type(self, graph: KnowledgeGraph) -> Dict[str, Set[str]]:
         names_by_type: Dict[str, Set[str]] = defaultdict(set)
         setting_types = {"location", "organization", "item", "skill", "rule", "setting"}
@@ -1106,6 +1220,9 @@ class GraphBuilderAgent(BaseAgent):
 
     def _outline_chapter_node_id(self, volume_number: int, chapter_number: int) -> str:
         return f"outline_chapter_{volume_number}_{chapter_number}"
+
+    def _chapter_content_node_id(self, volume_number: int, chapter_number: int) -> str:
+        return f"chapter_content_{volume_number}_{chapter_number}"
 
     def _match_known_names(self, data: Any, known_names: Set[str]) -> Set[str]:
         text = " ".join(self._string_values(data))
@@ -1150,6 +1267,14 @@ class GraphBuilderAgent(BaseAgent):
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    def _volume_from_path(self, path: Path) -> int:
+        match = re.search(r"volume_(\d+)", str(path))
+        return int(match.group(1)) if match else 1
+
+    def _chapter_from_path(self, path: Path) -> int:
+        match = re.search(r"chapter_(\d+)", path.name)
+        return int(match.group(1)) if match else 0
 
     def _as_list(self, value: Any) -> List[Any]:
         if value is None:

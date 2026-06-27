@@ -431,6 +431,20 @@ const SampleManagement: React.FC = () => {
     return fromPath || fallback
   }
 
+  const selectedSampleId = () => selectedSample?.sampleId || selectedSample?.id || 'sample'
+
+  const exportSampleReportBundle = () => {
+    if (!selectedSample) return
+    downloadJson(`${selectedSampleId()}_analysis_bundle.json`, {
+      sample: selectedSample,
+      artifacts: sampleArtifacts,
+      coverage: selectedCoverageReport,
+      issues: analysisIssues,
+      bookReport,
+      chunks,
+    })
+  }
+
   const openChunkDetail = async (chunk: any) => {
     if (!projectId || !selectedSample) return
     const sampleId = selectedSample.sampleId || selectedSample.id
@@ -759,6 +773,11 @@ const SampleManagement: React.FC = () => {
         open={!!selectedSample}
         onClose={() => setSelectedSample(null)}
         loading={detailLoading}
+        extra={selectedSample ? (
+          <Button icon={<DownloadOutlined />} onClick={exportSampleReportBundle}>
+            导出分析包
+          </Button>
+        ) : null}
       >
         {selectedSample ? (
           <Tabs
@@ -826,6 +845,20 @@ const SampleManagement: React.FC = () => {
                 label: '覆盖率',
                 children: selectedCoverageReport ? (
                   <Space direction="vertical" style={{ width: '100%' }}>
+                    <Space wrap>
+                      <Button
+                        icon={<DownloadOutlined />}
+                        onClick={() => downloadJson(`${selectedSampleId()}_coverage_report.json`, selectedCoverageReport)}
+                      >
+                        导出覆盖率
+                      </Button>
+                      <Button
+                        icon={<DownloadOutlined />}
+                        onClick={() => downloadJson(`${selectedSampleId()}_analysis_issues.json`, analysisIssues || { issues: coverageIssues })}
+                      >
+                        导出问题块
+                      </Button>
+                    </Space>
                     <Descriptions bordered column={2}>
                       <Descriptions.Item label="状态">
                         {selectedCoverageReport.status}
@@ -962,7 +995,15 @@ const SampleManagement: React.FC = () => {
                 key: 'manifest',
                 label: 'Manifest',
                 children: sampleArtifacts?.manifest ? (
-                  <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(sampleArtifacts.manifest, null, 2)}</pre>
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Button
+                      icon={<DownloadOutlined />}
+                      onClick={() => downloadJson(`${selectedSampleId()}_manifest.json`, sampleArtifacts.manifest)}
+                    >
+                      导出 Manifest
+                    </Button>
+                    <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(sampleArtifacts.manifest, null, 2)}</pre>
+                  </Space>
                 ) : (
                   <Empty description="暂无 manifest" />
                 ),
@@ -971,23 +1012,31 @@ const SampleManagement: React.FC = () => {
                 key: 'chunks',
                 label: '分块',
                 children: chunks.length ? (
-                  <List
-                    dataSource={chunks}
-                    renderItem={(chunk) => (
-                      <List.Item
-                        actions={[
-                          <Button type="link" icon={<EyeOutlined />} onClick={() => openChunkDetail(chunk)}>
-                            详情
-                          </Button>,
-                        ]}
-                      >
-                        <List.Item.Meta
-                          title={`${chunk.id} ${chunk.chapterRange || ''}`}
-                          description={chunk.preview}
-                        />
-                      </List.Item>
-                    )}
-                  />
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Button
+                      icon={<DownloadOutlined />}
+                      onClick={() => downloadJson(`${selectedSampleId()}_chunks_index.json`, chunks)}
+                    >
+                      导出分块索引
+                    </Button>
+                    <List
+                      dataSource={chunks}
+                      renderItem={(chunk) => (
+                        <List.Item
+                          actions={[
+                            <Button type="link" icon={<EyeOutlined />} onClick={() => openChunkDetail(chunk)}>
+                              详情
+                            </Button>,
+                          ]}
+                        >
+                          <List.Item.Meta
+                            title={`${chunk.id} ${chunk.chapterRange || ''}`}
+                            description={chunk.preview}
+                          />
+                        </List.Item>
+                      )}
+                    />
+                  </Space>
                 ) : (
                   <Empty description="暂无分块" />
                 ),

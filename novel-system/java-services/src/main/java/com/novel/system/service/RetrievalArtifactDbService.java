@@ -49,29 +49,38 @@ public class RetrievalArtifactDbService {
         Map<String, Object> hybridSummary = readOptionalJson(indexDir(projectId, "hybrid").resolve("index_summary.json"));
         Path reportFile = projectRoot(projectId).resolve("indexes").resolve("retrieval_index_report.json");
         Map<String, Object> rebuildReport = readOptionalJson(reportFile);
+        Path qualityReportFile = qualityReportFile(projectId);
+        Map<String, Object> qualityReport = readOptionalJson(qualityReportFile);
         List<Map<String, Object>> contextPacks = listContextPacks(projectId);
 
-        boolean anyIndex = !bm25Summary.isEmpty() || !vectorSummary.isEmpty() || !hybridSummary.isEmpty();
+        boolean hasRetrievalArtifacts = !bm25Summary.isEmpty()
+            || !vectorSummary.isEmpty()
+            || !hybridSummary.isEmpty()
+            || !rebuildReport.isEmpty()
+            || !qualityReport.isEmpty()
+            || !contextPacks.isEmpty();
 
         RetrievalArtifact entity = retrievalArtifactRepository.findByProjectId(projectId)
             .orElseGet(RetrievalArtifact::new);
         entity.setId(projectId);
         entity.setProjectId(projectId);
-        entity.setStatus(anyIndex || !contextPacks.isEmpty() ? "synced" : "empty");
+        entity.setStatus(hasRetrievalArtifacts ? "synced" : "empty");
         entity.setBm25DocumentCount(documentCount(bm25Summary));
         entity.setVectorDocumentCount(documentCount(vectorSummary));
         entity.setHybridDocumentCount(documentCount(hybridSummary));
         entity.setContextPackCount(contextPacks.size());
         entity.setConfigPath(relative(projectId, configFile(projectId)));
         entity.setRebuildReportPath(relative(projectId, reportFile));
+        entity.setQualityReportPath(relative(projectId, qualityReportFile));
         entity.setConfig(config);
         entity.setBm25Summary(bm25Summary);
         entity.setVectorSummary(vectorSummary);
         entity.setHybridSummary(hybridSummary);
         entity.setRebuildReport(rebuildReport);
+        entity.setQualityReport(qualityReport);
         entity.setContextPacks(contextPacks);
         entity.setLatestTasks(latestRetrievalTasks(projectId));
-        entity.setRetrievalMetadata(metadata(projectId, bm25Summary, vectorSummary, hybridSummary, contextPacks));
+        entity.setRetrievalMetadata(metadata(projectId, bm25Summary, vectorSummary, hybridSummary, rebuildReport, qualityReport, contextPacks));
         entity.setSyncedAt(LocalDateTime.now());
 
         RetrievalArtifact saved = retrievalArtifactRepository.save(entity);
@@ -106,6 +115,7 @@ public class RetrievalArtifactDbService {
         result.put("vectorSummary", entity.getVectorSummary());
         result.put("hybridSummary", entity.getHybridSummary());
         result.put("rebuildReport", entity.getRebuildReport());
+        result.put("qualityReport", entity.getQualityReport());
         result.put("contextPacks", entity.getContextPacks());
         result.put("latestTasks", entity.getLatestTasks());
         result.put("retrievalMetadata", entity.getRetrievalMetadata());
@@ -123,6 +133,9 @@ public class RetrievalArtifactDbService {
         result.put("contextPackCount", entity.getContextPackCount());
         result.put("configPath", entity.getConfigPath());
         result.put("rebuildReportPath", entity.getRebuildReportPath());
+        result.put("qualityReportPath", entity.getQualityReportPath());
+        result.put("qualityScore", qualityMetric(entity, "score", "latestQualityScore"));
+        result.put("qualityStatus", qualityMetric(entity, "status", "latestQualityStatus"));
         result.put("syncedAt", entity.getSyncedAt());
         result.put("createdAt", entity.getCreatedAt());
         result.put("updatedAt", entity.getUpdatedAt());
@@ -134,6 +147,8 @@ public class RetrievalArtifactDbService {
             Map<String, Object> bm25Summary,
             Map<String, Object> vectorSummary,
             Map<String, Object> hybridSummary,
+            Map<String, Object> rebuildReport,
+            Map<String, Object> qualityReport,
             List<Map<String, Object>> contextPacks) {
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("projectId", projectId);
@@ -142,8 +157,25 @@ public class RetrievalArtifactDbService {
         metadata.put("hybridDocumentCount", documentCount(hybridSummary));
         metadata.put("contextPackCount", contextPacks.size());
         metadata.put("indexTypes", INDEX_TYPES);
-        metadata.put("latestQualityEvaluation", hybridSummary.get("quality_evaluation"));
-        metadata.put("latestCitationBudget", hybridSummary.get("citation_budget"));
+        metadata.put("latestQualityEvaluation", firstPresent(
+            hybridSummary.get("quality_evaluation"),
+            rebuildReport.get("quality_evaluation")
+        ));
+        metadata.put("latestCitationBudget", firstPresent(
+            hybridSummary.get("citation_budget"),
+            rebuildReport.get("citation_budget")
+        ));
+        metadata.put("latestQualityReport", qualityReport);
+        metadata.put("latestQualityScore", firstPresent(
+            qualityReport.get("score"),
+            valueFromMap(hybridSummary, "quality_evaluation", "score"),
+            valueFromMap(rebuildReport, "quality_evaluation", "score")
+        ));
+        metadata.put("latestQualityStatus", firstPresent(
+            qualityReport.get("status"),
+            valueFromMap(hybridSummary, "quality_evaluation", "status"),
+            valueFromMap(rebuildReport, "quality_evaluation", "status")
+        ));
         metadata.put("latestTasksCount", latestRetrievalTasks(projectId).size());
         return metadata;
     }
@@ -228,6 +260,10 @@ public class RetrievalArtifactDbService {
         return projectRoot(projectId).resolve("indexes").resolve("retrieval_config.json");
     }
 
+    private Path qualityReportFile(String projectId) {
+        return projectRoot(projectId).resolve("indexes").resolve("retrieval_quality_report.json");
+    }
+
     private Map<String, Object> readOptionalJson(Path path) {
         if (!Files.exists(path)) {
             return new LinkedHashMap<>();
@@ -260,5 +296,31 @@ public class RetrievalArtifactDbService {
 
     private String stripSuffix(String value, String suffix) {
         return value.endsWith(suffix) ? value.substring(0, value.length() - suffix.length()) : value;
+    }
+
+    private Object qualityMetric(RetrievalArtifact entity, String reportKey, String metadataKey) {
+        if (entity.getQualityReport() != null && entity.getQualityReport().get(reportKey) != null) {
+            return entity.getQualityReport().get(reportKey);
+        }
+        if (entity.getRetrievalMetadata() != null) {
+            return entity.getRetrievalMetadata().get(metadataKey);
+        }
+        return null;
+    }
+
+    private Object valueFromMap(Map<String, Object> source, String nestedKey, String key) {
+        if (source == null || !(source.get(nestedKey) instanceof Map<?, ?> nested)) {
+            return null;
+        }
+        return nested.get(key);
+    }
+
+    private Object firstPresent(Object... values) {
+        for (Object value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
     }
 }

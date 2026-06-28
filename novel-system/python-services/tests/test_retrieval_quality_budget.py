@@ -134,6 +134,71 @@ async def test_context_builder_writes_quality_evaluation_and_citation_budget(tmp
 
 
 @pytest.mark.asyncio
+async def test_context_builder_applies_llm_gateway_reranker(tmp_path):
+    project_id = "proj_context_gateway_rerank"
+    project_root = write_project_documents(tmp_path, project_id)
+    config_dir = project_root / "indexes"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "retrieval_config.json").write_text(
+        json.dumps({
+            "top_k": 4,
+            "use_rerank": True,
+            "rerank_backend": "llm_gateway",
+            "max_retrieval_results": 4,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    config_root = tmp_path / "config"
+    config_root.mkdir(parents=True)
+    (config_root / "model_profiles.json").write_text(
+        json.dumps({
+            "defaultProfileId": "context_rerank",
+            "profiles": [
+                {
+                    "profileId": "context_rerank",
+                    "mainModel": {"provider": "mock", "model": "mock-main", "mock": True},
+                    "embeddingModel": {"provider": "mock", "model": "mock-embedding", "mock": True},
+                    "rerankModel": {"provider": "mock", "model": "mock-rerank", "mock": True},
+                }
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    original_base_path = settings.PROJECT_BASE_PATH
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    try:
+        context_pack = await ContextBuilder(project_id).build_chapter_context(
+            book_id="book_a",
+            volume_number=1,
+            chapter_number=2,
+            chapter_outline=SimpleNamespace(
+                chapter_title="Snow Token Trial",
+                plot_goal="Lin Mo Xuanmen trial jade token pressure clue",
+                character_development="Lin Mo and Suqing learn to trust each other",
+                conflict="The hidden archive pulls the trial into danger",
+                appeal_point="pressure, clue, and chapter-end hook",
+            ),
+            previous_context="The previous chapter ended with Lin Mo grabbing the jade token.",
+            top_k=4,
+            model_profile_id="context_rerank",
+        )
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+
+    assert context_pack["rerank"]["active"] == "llm_gateway"
+    assert context_pack["rerank"]["model_role"] == "rerankModel"
+    assert context_pack["hybrid_retrieval"]["stats"]["rerank_backend"] == "llm_gateway"
+    assert context_pack["retrieval_results"][0]["rerank_backend"] == "llm_gateway"
+
+    saved_pack = json.loads((config_dir / "bm25" / "context_packs" / "book_a_v1_c2.json").read_text(encoding="utf-8"))
+    hybrid_summary = json.loads((config_dir / "hybrid" / "index_summary.json").read_text(encoding="utf-8"))
+    assert saved_pack["rerank"]["model"] == "mock-rerank"
+    assert hybrid_summary["rerank"]["active"] == "llm_gateway"
+    assert hybrid_summary["top_results"][0]["rerank_backend"] == "llm_gateway"
+
+
+@pytest.mark.asyncio
 async def test_retrieval_index_report_includes_quality_and_budget(tmp_path):
     project_id = "proj_retrieval_index_report"
     project_root = write_project_documents(tmp_path, project_id)

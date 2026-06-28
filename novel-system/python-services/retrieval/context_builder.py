@@ -21,6 +21,8 @@ except Exception:  # pragma: no cover - optional runtime convenience
     jieba = None
 
 from config import settings
+from llm.client import LLMClient
+from .rerank import apply_gateway_rerank, resolve_rerank_backend
 
 
 @dataclass
@@ -127,9 +129,10 @@ class KeywordRetriever:
 class ContextBuilder:
     """Builds a reusable context pack for downstream writing agents."""
 
-    def __init__(self, project_id: str):
+    def __init__(self, project_id: str, llm_client: Optional[LLMClient] = None):
         self.project_id = project_id
         self.project_root = Path(settings.PROJECT_BASE_PATH) / "projects" / project_id
+        self.llm_client = llm_client or LLMClient()
 
     async def build_chapter_context(
         self,
@@ -139,6 +142,7 @@ class ContextBuilder:
         chapter_outline: Any,
         previous_context: str,
         top_k: int = 8,
+        model_profile_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         query = self._chapter_query(chapter_outline, previous_context)
         documents = self._load_documents()
@@ -155,6 +159,15 @@ class ContextBuilder:
             vector_backend=self._vector_backend(retrieval_config),
         )
         hybrid_retrieval = hybrid_engine.retrieve(query, retrieval_plan, top_k=top_k)
+        rerank_application = await apply_gateway_rerank(
+            self.llm_client,
+            query,
+            hybrid_retrieval,
+            hybrid_engine,
+            top_k,
+            model_profile_id=model_profile_id,
+            requested_backend=self._rerank_backend(retrieval_config, model_profile_id),
+        )
         hybrid_engine.persist_indexes(cache_status=cache_status)
         keyword_results = hybrid_retrieval.get("runs", {}).get("keyword", [])[:top_k]
         budget_config = self._budget_config()
@@ -187,6 +200,7 @@ class ContextBuilder:
             "memory": memory_context,
             "graph": graph_context,
             "retrieval_plan": hybrid_retrieval.get("plan", {}),
+            "rerank": hybrid_retrieval.get("rerank", rerank_application),
             "hybrid_retrieval": hybrid_retrieval,
             "keyword_results": keyword_results,
             "retrieval_results": retrieval_results,
@@ -228,6 +242,9 @@ class ContextBuilder:
         if text in {"memory", "local", "hash", "hash_vector", "in_memory"}:
             return "memory"
         return "auto"
+
+    def _rerank_backend(self, config: Dict[str, Any], model_profile_id: Optional[str]) -> str:
+        return resolve_rerank_backend(self.llm_client, model_profile_id, config=config)
 
     def format_prompt_section(self, context_pack: Dict[str, Any]) -> str:
         budget = context_pack.get("citation_budget") or {"config": self._budget_config(), "usage": {}}
@@ -516,6 +533,7 @@ class ContextBuilder:
             "plan": retrieval.get("plan", {}),
             "stats": retrieval.get("stats", {}),
             "vector_index": retrieval.get("vector_index", {}),
+            "rerank": retrieval.get("rerank", context_pack.get("rerank", {})),
             "quality_evaluation": retrieval.get("quality_evaluation") or context_pack.get("quality_evaluation", {}),
             "citation_budget": context_pack.get("citation_budget", {}),
             "top_results": [
@@ -526,6 +544,7 @@ class ContextBuilder:
                     "retrieval_sources": item.get("retrieval_sources"),
                     "fusion_score": item.get("fusion_score"),
                     "rerank_score": item.get("rerank_score"),
+                    "rerank_backend": item.get("rerank_backend"),
                 }
                 for item in retrieval.get("results", [])[:20]
             ],

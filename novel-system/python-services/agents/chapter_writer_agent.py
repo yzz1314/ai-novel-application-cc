@@ -98,6 +98,7 @@ class ChapterWriterAgent(BaseAgent):
                 chapter_number=write_request.chapter_number,
                 chapter_outline=chapter_outline,
                 previous_context=previous_context,
+                model_profile_id=request.model_profile_id,
             )
             skills_content["__retrieval_context__"] = retrieval_context.get("prompt_section", "")
             skills_content["__retrieval_context_path__"] = retrieval_context.get("path", "")

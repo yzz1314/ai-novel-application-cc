@@ -86,6 +86,9 @@ export const accessApi = {
   revokeOrganizationMember: (organizationId: string, userId: string) =>
     request(api.delete(`/access/organizations/${organizationId}/members/${userId}`)),
   getAudit: (params?: any) => request(api.get('/access/audit', { params })),
+  getRolePolicies: () => request<any[]>(api.get('/access/role-policies')),
+  updateRolePolicy: (actionKey: string, data: any) =>
+    request(api.patch(`/access/role-policies/${actionKey}`, data || {})),
 }
 
 export const sampleApi = {

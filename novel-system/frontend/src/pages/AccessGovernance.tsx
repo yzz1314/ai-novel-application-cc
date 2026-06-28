@@ -41,11 +41,13 @@ const AccessGovernance: React.FC = () => {
   const [organizationMembers, setOrganizationMembers] = useState<any[]>([])
   const [projectMembers, setProjectMembers] = useState<any[]>([])
   const [auditEvents, setAuditEvents] = useState<any[]>([])
+  const [rolePolicies, setRolePolicies] = useState<any[]>([])
   const [selectedOrg, setSelectedOrg] = useState<string>()
   const [selectedProject, setSelectedProject] = useState<string>()
   const [projects, setProjects] = useState<any[]>([])
   const [orgForm] = Form.useForm()
   const [projectForm] = Form.useForm()
+  const [policyForm] = Form.useForm()
 
   useEffect(() => {
     loadAccessData()
@@ -70,16 +72,18 @@ const AccessGovernance: React.FC = () => {
   const loadAccessData = async () => {
     try {
       setLoading(true)
-      const [meData, orgData, projectData, auditData] = await Promise.all([
+      const [meData, orgData, projectData, auditData, policyData] = await Promise.all([
         accessApi.getMe().catch(() => null),
         accessApi.getOrganizations().catch(() => []),
         projectApi.getList().catch(() => []),
         accessApi.getAudit({ limit: 100 }).catch(() => ({ items: [] })),
+        accessApi.getRolePolicies().catch(() => []),
       ])
       setMe(meData)
       setOrganizations(orgData || [])
       setProjects(projectData || [])
       setAuditEvents(auditData?.items || [])
+      setRolePolicies(policyData || [])
       const orgId = meData?.organizationId || orgData?.[0]?.id
       setSelectedOrg(orgId)
       if (orgId) {
@@ -146,6 +150,19 @@ const AccessGovernance: React.FC = () => {
     await loadAudit({ projectId: record.projectId })
   }
 
+  const updateRolePolicy = async () => {
+    const values = await policyForm.validateFields()
+    await accessApi.updateRolePolicy(values.actionKey, {
+      allowedRoles: values.allowedRoles || [],
+      description: values.description,
+    })
+    message.success('角色策略已更新')
+    policyForm.resetFields()
+    const policies = await accessApi.getRolePolicies().catch(() => [])
+    setRolePolicies(policies || [])
+    await loadAudit({ limit: 100 })
+  }
+
   const orgOptions = useMemo(
     () => organizations.map((item) => ({ label: item.name || item.id, value: item.id })),
     [organizations]
@@ -201,6 +218,20 @@ const AccessGovernance: React.FC = () => {
     { title: '目标用户', dataIndex: 'targetUserId', key: 'targetUserId', render: (value: any) => value || '-' },
     { title: '结果', dataIndex: 'outcome', key: 'outcome', render: (value: string) => <Tag color={value === 'success' ? 'green' : 'red'}>{value}</Tag> },
     { title: '说明', dataIndex: 'reason', key: 'reason', render: (value: any) => value || '-' },
+  ]
+
+  const rolePolicyColumns = [
+    { title: '动作', dataIndex: 'actionKey', key: 'actionKey' },
+    { title: '说明', dataIndex: 'description', key: 'description', render: (value: any) => value || '-' },
+    {
+      title: '允许角色',
+      dataIndex: 'allowedRoles',
+      key: 'allowedRoles',
+      render: (roles: string[] = []) => roles.map((role) => <Tag key={role} color="cyan">{role}</Tag>),
+    },
+    { title: '来源', dataIndex: 'default', key: 'default', render: (value: boolean) => <Tag>{value ? '默认' : '已配置'}</Tag> },
+    { title: '更新人', dataIndex: 'updatedBy', key: 'updatedBy', render: (value: any) => value || '-' },
+    { title: '更新时间', dataIndex: 'updatedAt', key: 'updatedAt', render: (value: any) => value || '-' },
   ]
 
   return (
@@ -313,6 +344,48 @@ const AccessGovernance: React.FC = () => {
                   columns={projectMemberColumns}
                   dataSource={projectMembers}
                   pagination={{ pageSize: 8 }}
+                />
+              </Space>
+            ),
+          },
+          {
+            key: 'policies',
+            label: <span><SafetyCertificateOutlined />角色策略</span>,
+            children: (
+              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                <Form form={policyForm} layout="inline">
+                  <Form.Item name="actionKey" rules={[{ required: true, message: '请选择动作' }]}>
+                    <Select
+                      style={{ width: 240 }}
+                      placeholder="动作"
+                      options={[
+                        { label: 'access_governance', value: 'access_governance' },
+                        { label: 'project_mutation', value: 'project_mutation' },
+                      ]}
+                    />
+                  </Form.Item>
+                  <Form.Item name="allowedRoles" rules={[{ required: true, message: '请选择允许角色' }]}>
+                    <Select
+                      mode="multiple"
+                      style={{ width: 360 }}
+                      placeholder="允许角色"
+                      options={roleOptions}
+                    />
+                  </Form.Item>
+                  <Form.Item name="description">
+                    <Input placeholder="说明" style={{ width: 260 }} />
+                  </Form.Item>
+                  <Form.Item>
+                    <Button type="primary" icon={<PlusOutlined />} onClick={updateRolePolicy}>
+                      保存策略
+                    </Button>
+                  </Form.Item>
+                </Form>
+                <Table
+                  rowKey="actionKey"
+                  columns={rolePolicyColumns}
+                  dataSource={rolePolicies}
+                  pagination={false}
                 />
               </Space>
             ),

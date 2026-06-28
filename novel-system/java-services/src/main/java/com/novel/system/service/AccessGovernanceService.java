@@ -19,7 +19,6 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 @Service
 @RequiredArgsConstructor
@@ -27,12 +26,12 @@ public class AccessGovernanceService {
 
     private static final String ACTIVE = "ACTIVE";
     private static final String REVOKED = "REVOKED";
-    private static final Set<String> GOVERNANCE_ROLES = Set.of("owner", "admin");
 
     private final AccessOrganizationRepository organizationRepository;
     private final AccessUserRepository userRepository;
     private final AccessOrganizationMemberRepository organizationMemberRepository;
     private final AccessAuditEventRepository auditEventRepository;
+    private final AccessRolePolicyService accessRolePolicyService;
 
     @Transactional
     public void ensureOrganizationMembership(RequestAccessContext context) {
@@ -235,10 +234,7 @@ public class AccessGovernanceService {
     }
 
     private void assertGovernanceAllowed(RequestAccessContext context, String action) {
-        if (context == null || !context.hasAnyRole(GOVERNANCE_ROLES)) {
-            String role = context == null ? "anonymous" : context.primaryRole();
-            throw new AccessDeniedException("Role " + role + " cannot perform access governance action " + action);
-        }
+        accessRolePolicyService.assertAllowed(context, AccessRolePolicyService.ACTION_ACCESS_GOVERNANCE, "access governance action " + action);
     }
 
     private void upsertOrganization(String organizationId, String name) {

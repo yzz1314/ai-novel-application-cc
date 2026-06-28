@@ -5,6 +5,7 @@ import com.novel.system.security.AccessControlService;
 import com.novel.system.security.AccessControlInterceptor;
 import com.novel.system.security.RequestAccessContext;
 import com.novel.system.service.AccessIdentityService;
+import com.novel.system.service.AccessRolePolicyService;
 import com.novel.system.service.ProjectAccessService;
 import com.novel.system.service.ArtifactService;
 import org.junit.jupiter.api.Test;
@@ -83,7 +84,8 @@ class ArtifactControllerAccessTest {
         ProjectAccessService projectAccessService = mock(ProjectAccessService.class);
         when(projectAccessService.resolveProjectAccess(any(RequestAccessContext.class), any()))
             .thenAnswer(invocation -> invocation.getArgument(0));
-        AccessControlService accessControlService = new AccessControlService(projectAccessService);
+        AccessRolePolicyService policyService = mock(AccessRolePolicyService.class);
+        AccessControlService accessControlService = new AccessControlService(projectAccessService, policyService);
         ReflectionTestUtils.setField(accessControlService, "enforceAccess", enforceAccess);
         ReflectionTestUtils.setField(accessControlService, "requireAuthentication", requireAuthentication);
         AccessIdentityService accessIdentityService = mock(AccessIdentityService.class);

@@ -1,21 +1,19 @@
 package com.novel.system.security;
 
 import com.novel.system.exception.AccessDeniedException;
+import com.novel.system.service.AccessRolePolicyService;
 import com.novel.system.service.ProjectAccessService;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.util.Set;
-
 @Service
 @RequiredArgsConstructor
 public class AccessControlService {
 
-    private static final Set<String> DEFAULT_MUTATION_ROLES = Set.of("owner", "admin", "editor", "artifact_manager");
-
     private final ProjectAccessService projectAccessService;
+    private final AccessRolePolicyService accessRolePolicyService;
 
     @Value("${security.access.enforce:false}")
     private boolean enforceAccess;
@@ -69,9 +67,7 @@ public class AccessControlService {
         if (!enforceAccess) {
             return;
         }
-        if (!context.hasAnyRole(DEFAULT_MUTATION_ROLES)) {
-            throw new AccessDeniedException("Role " + context.primaryRole() + " cannot perform action " + action);
-        }
+        accessRolePolicyService.assertAllowed(context, AccessRolePolicyService.ACTION_PROJECT_MUTATION, action);
     }
 
     public boolean isEnforceAccess() {

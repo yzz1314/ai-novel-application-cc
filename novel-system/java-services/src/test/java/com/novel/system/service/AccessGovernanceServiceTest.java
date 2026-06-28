@@ -31,6 +31,7 @@ class AccessGovernanceServiceTest {
     private AccessUserRepository userRepository;
     private AccessOrganizationMemberRepository memberRepository;
     private AccessAuditEventRepository auditEventRepository;
+    private AccessRolePolicyService accessRolePolicyService;
     private AccessGovernanceService service;
 
     @BeforeEach
@@ -39,11 +40,13 @@ class AccessGovernanceServiceTest {
         userRepository = mock(AccessUserRepository.class);
         memberRepository = mock(AccessOrganizationMemberRepository.class);
         auditEventRepository = mock(AccessAuditEventRepository.class);
+        accessRolePolicyService = mock(AccessRolePolicyService.class);
         service = new AccessGovernanceService(
             organizationRepository,
             userRepository,
             memberRepository,
-            auditEventRepository
+            auditEventRepository,
+            accessRolePolicyService
         );
     }
 
@@ -77,6 +80,14 @@ class AccessGovernanceServiceTest {
 
     @Test
     void viewerCannotGrantOrganizationMember() {
+        org.mockito.Mockito.doThrow(new AccessDeniedException("Role viewer cannot perform access governance action grant organization member"))
+            .when(accessRolePolicyService)
+            .assertAllowed(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.eq(AccessRolePolicyService.ACTION_ACCESS_GOVERNANCE),
+                org.mockito.ArgumentMatchers.anyString()
+            );
+
         assertThatThrownBy(() -> service.grantOrganizationMember(
             context("viewer"),
             "org-1",

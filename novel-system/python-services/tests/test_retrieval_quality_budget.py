@@ -201,6 +201,65 @@ async def test_retrieval_index_report_includes_quality_and_budget(tmp_path):
     assert hybrid_summary["vector_index"]["vector_mode"] == "local_embedding_fallback"
 
 
+@pytest.mark.asyncio
+async def test_retrieval_index_applies_llm_gateway_reranker(tmp_path):
+    project_id = "proj_retrieval_gateway_rerank"
+    project_root = write_project_documents(tmp_path, project_id)
+    (project_root / "indexes").mkdir(parents=True, exist_ok=True)
+    (project_root / "indexes" / "retrieval_config.json").write_text(
+        json.dumps({
+            "top_k": 4,
+            "use_rerank": True,
+            "rerank_backend": "llm_gateway",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    config_root = tmp_path / "config"
+    config_root.mkdir(parents=True)
+    (config_root / "model_profiles.json").write_text(
+        json.dumps({
+            "defaultProfileId": "retrieval_rerank",
+            "profiles": [
+                {
+                    "profileId": "retrieval_rerank",
+                    "mainModel": {"provider": "mock", "model": "mock-main", "mock": True},
+                    "embeddingModel": {"provider": "mock", "model": "mock-embedding", "mock": True},
+                    "rerankModel": {"provider": "mock", "model": "mock-rerank", "mock": True},
+                }
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    original_base_path = settings.PROJECT_BASE_PATH
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    try:
+        response = await RetrievalIndexAgent().run(AgentRequest(
+            task_id="task_retrieval_rerank",
+            project_id=project_id,
+            task_type="retrieval_index",
+            model_profile_id="retrieval_rerank",
+            user_input="Lin Mo Xuanmen trial jade token",
+            parameters={"top_k": 4},
+        ))
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+
+    assert response.status == "success"
+    assert response.structured_output["rerank"]["active"] == "llm_gateway"
+    assert response.structured_output["rerank"]["model_role"] == "rerankModel"
+    assert response.structured_output["stats"]["rerank_backend"] == "llm_gateway"
+    assert response.structured_output["model_gateway"]["rerank_application"]["model"] == "mock-rerank"
+
+    report = json.loads((project_root / "indexes" / "retrieval_index_report.json").read_text(encoding="utf-8"))
+    hybrid_summary = json.loads((project_root / "indexes" / "hybrid" / "index_summary.json").read_text(encoding="utf-8"))
+    assert report["rerank"]["active"] == "llm_gateway"
+    assert report["model_gateway"]["rerank_application"]["result_count"] > 0
+    assert report["top_results"][0]["rerank_backend"] == "llm_gateway"
+    assert hybrid_summary["rerank"]["active"] == "llm_gateway"
+    assert hybrid_summary["stats"]["rerank_backend"] == "llm_gateway"
+
+
 def test_hash_vector_index_uses_lancedb_backend_when_available(tmp_path, monkeypatch):
     class FakeSearch:
         def __init__(self, rows):

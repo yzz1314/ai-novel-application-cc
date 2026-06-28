@@ -336,6 +336,7 @@ public class RetrievalArtifactService {
                     "use_rerank",
                     "use_model_embeddings",
                     "vector_backend",
+                    "rerank_backend",
                     "graph_relation",
                     "graph_hops",
                     "vector_filters",
@@ -957,6 +958,7 @@ public class RetrievalArtifactService {
         config.put("use_rerank", true);
         config.put("use_model_embeddings", false);
         config.put("vector_backend", "auto");
+        config.put("rerank_backend", "rules");
         config.put("graph_relation", null);
         config.put("graph_hops", 2);
         config.put("vector_filters", new LinkedHashMap<>());

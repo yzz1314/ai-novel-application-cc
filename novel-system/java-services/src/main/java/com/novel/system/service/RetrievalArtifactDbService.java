@@ -151,6 +151,8 @@ public class RetrievalArtifactDbService {
         result.put("vectorMode", vectorMetric(entity, "latestVectorMode"));
         result.put("vectorEngine", vectorMetric(entity, "latestVectorEngine"));
         result.put("vectorBackend", vectorMetric(entity, "latestVectorBackend"));
+        result.put("rerankBackend", vectorMetric(entity, "latestRerankBackend"));
+        result.put("rerankStatus", vectorMetric(entity, "latestRerankStatus"));
         result.put("syncedAt", entity.getSyncedAt());
         result.put("createdAt", entity.getCreatedAt());
         result.put("updatedAt", entity.getUpdatedAt());
@@ -199,6 +201,24 @@ public class RetrievalArtifactDbService {
             valueFromMap(rebuildReport, "vector_index", "embedding_metadata"),
             valueFromMap(hybridSummary, "vector_index", "embedding_metadata"),
             valueFromMap(rebuildReport, "model_gateway", "embedding_index")
+        ));
+        metadata.put("latestRerankBackend", firstPresent(
+            valueFromMap(rebuildReport, "rerank", "active"),
+            valueFromMap(hybridSummary, "rerank", "active"),
+            valueFromMap(rebuildReport, "stats", "rerank_backend"),
+            valueFromMap(hybridSummary, "stats", "rerank_backend")
+        ));
+        metadata.put("latestRerankStatus", firstPresent(
+            valueFromMap(rebuildReport, "rerank", "status"),
+            valueFromMap(hybridSummary, "rerank", "status"),
+            valueFromMap(rebuildReport, "stats", "rerank_status"),
+            valueFromMap(hybridSummary, "stats", "rerank_status")
+        ));
+        metadata.put("latestRerankApplication", firstPresent(
+            rebuildReport.get("rerank"),
+            hybridSummary.get("rerank"),
+            valueFromMap(rebuildReport, "model_gateway", "rerank_application"),
+            valueFromMap(hybridSummary, "model_gateway", "rerank_application")
         ));
         metadata.put("latestQualityEvaluation", firstPresent(
             hybridSummary.get("quality_evaluation"),

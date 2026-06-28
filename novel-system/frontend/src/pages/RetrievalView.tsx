@@ -62,6 +62,12 @@ const RetrievalView: React.FC = () => {
   const benchmarkReport = overview?.benchmarkReport || {}
   const latestQuality = indexes?.hybrid?.quality_evaluation || indexes?.rebuildReport?.quality_evaluation || {}
   const latestBudget = indexes?.hybrid?.citation_budget || indexes?.rebuildReport?.citation_budget || {}
+  const latestRerank =
+    indexes?.hybrid?.rerank ||
+    indexes?.rebuildReport?.rerank ||
+    indexes?.hybrid?.model_gateway?.rerank_application ||
+    indexes?.rebuildReport?.model_gateway?.rerank_application ||
+    {}
 
   const indexStats = useMemo(() => {
     return ['bm25', 'vector', 'hybrid'].map((type) => {
@@ -89,6 +95,7 @@ const RetrievalView: React.FC = () => {
         use_rerank: data?.config?.use_rerank ?? true,
         use_model_embeddings: data?.config?.use_model_embeddings ?? false,
         vector_backend: data?.config?.vector_backend ?? 'auto',
+        rerank_backend: data?.config?.rerank_backend ?? 'rules',
         graph_hops: data?.config?.graph_hops ?? 2,
         top_k: data?.config?.top_k ?? 12,
         max_context_chars: data?.config?.max_context_chars ?? 6000,
@@ -538,6 +545,22 @@ const RetrievalView: React.FC = () => {
         </Col>
       </Row>
 
+      {latestRerank?.active ? (
+        <Alert
+          type={latestRerank.status === 'fallback' ? 'warning' : 'info'}
+          showIcon
+          message="Rerank backend"
+          description={(
+            <Space wrap>
+              <Tag>{latestRerank.active}</Tag>
+              {latestRerank.status ? <Tag>{latestRerank.status}</Tag> : null}
+              {latestRerank.model ? <Tag>{latestRerank.model}</Tag> : null}
+              {latestRerank.local_fallback ? <Tag color="warning">local fallback</Tag> : null}
+            </Space>
+          )}
+        />
+      ) : null}
+
       {(latestQuality?.warnings?.length || latestBudget?.warnings?.length) ? (
         <Alert
           type={latestQuality?.status === 'poor' ? 'error' : 'warning'}
@@ -664,6 +687,16 @@ const RetrievalView: React.FC = () => {
                 { value: 'memory', label: 'Memory' },
                 { value: 'lancedb', label: 'LanceDB' },
                 { value: 'pgvector', label: 'pgvector' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="rerank_backend" label="Rerank backend">
+            <Select
+              style={{ width: 140 }}
+              options={[
+                { value: 'rules', label: 'Rules' },
+                { value: 'auto', label: 'Auto' },
+                { value: 'llm_gateway', label: 'LLM Gateway' },
               ]}
             />
           </Form.Item>

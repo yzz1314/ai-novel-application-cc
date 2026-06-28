@@ -1,5 +1,7 @@
 package com.novel.system.controller;
 
+import com.novel.system.security.RequestAccessContext;
+import com.novel.system.security.RequestAccessContextHolder;
 import com.novel.system.service.ArtifactService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ContentDisposition;
@@ -13,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 @RestController
@@ -44,7 +47,7 @@ public class ArtifactController {
             @RequestParam(required = false) String actor,
             @RequestParam(required = false) String reason,
             @RequestParam(required = false) String role) {
-        return ResponseEntity.ok(artifactService.getArtifact(projectId, path, allowSensitive, actor, reason, role));
+        return ResponseEntity.ok(artifactService.getArtifact(projectId, path, allowSensitive, actor(actor), reason, role(role)));
     }
 
     @GetMapping("/download")
@@ -55,7 +58,7 @@ public class ArtifactController {
             @RequestParam(required = false) String actor,
             @RequestParam(required = false) String reason,
             @RequestParam(required = false) String role) {
-        ArtifactService.DownloadedArtifact artifact = artifactService.downloadArtifact(projectId, path, allowSensitive, actor, reason, role);
+        ArtifactService.DownloadedArtifact artifact = artifactService.downloadArtifact(projectId, path, allowSensitive, actor(actor), reason, role(role));
         return downloaded(artifact);
     }
 
@@ -63,7 +66,7 @@ public class ArtifactController {
     public ResponseEntity<?> bulkDownloadArtifacts(
             @PathVariable String projectId,
             @RequestBody(required = false) Map<String, Object> request) {
-        ArtifactService.DownloadedArtifact artifact = artifactService.bulkDownloadArtifacts(projectId, request == null ? Map.of() : request);
+        ArtifactService.DownloadedArtifact artifact = artifactService.bulkDownloadArtifacts(projectId, withAccessContext(request));
         return downloaded(artifact);
     }
 
@@ -71,35 +74,35 @@ public class ArtifactController {
     public ResponseEntity<Map<String, Object>> archiveArtifact(
             @PathVariable String projectId,
             @RequestBody(required = false) Map<String, Object> request) {
-        return ResponseEntity.ok(artifactService.archiveArtifact(projectId, request == null ? Map.of() : request));
+        return ResponseEntity.ok(artifactService.archiveArtifact(projectId, withAccessContext(request)));
     }
 
     @PostMapping("/restore")
     public ResponseEntity<Map<String, Object>> restoreArtifact(
             @PathVariable String projectId,
             @RequestBody(required = false) Map<String, Object> request) {
-        return ResponseEntity.ok(artifactService.restoreArtifact(projectId, request == null ? Map.of() : request));
+        return ResponseEntity.ok(artifactService.restoreArtifact(projectId, withAccessContext(request)));
     }
 
     @PostMapping("/delete")
     public ResponseEntity<Map<String, Object>> deleteArchivedArtifact(
             @PathVariable String projectId,
             @RequestBody(required = false) Map<String, Object> request) {
-        return ResponseEntity.ok(artifactService.deleteArchivedArtifact(projectId, request == null ? Map.of() : request));
+        return ResponseEntity.ok(artifactService.deleteArchivedArtifact(projectId, withAccessContext(request)));
     }
 
     @PostMapping("/retention/apply")
     public ResponseEntity<Map<String, Object>> applyRetentionPolicy(
             @PathVariable String projectId,
             @RequestBody(required = false) Map<String, Object> request) {
-        return ResponseEntity.ok(artifactService.applyRetentionPolicy(projectId, request == null ? Map.of() : request));
+        return ResponseEntity.ok(artifactService.applyRetentionPolicy(projectId, withAccessContext(request)));
     }
 
     @PostMapping("/diff")
     public ResponseEntity<Map<String, Object>> diffArtifacts(
             @PathVariable String projectId,
             @RequestBody(required = false) Map<String, Object> request) {
-        return ResponseEntity.ok(artifactService.diffArtifacts(projectId, request == null ? Map.of() : request));
+        return ResponseEntity.ok(artifactService.diffArtifacts(projectId, withAccessContext(request)));
     }
 
     @GetMapping("/audit")
@@ -108,7 +111,7 @@ public class ArtifactController {
             @RequestParam(defaultValue = "100") int limit,
             @RequestParam(required = false) String actor,
             @RequestParam(required = false) String role) {
-        return ResponseEntity.ok(artifactService.listAuditEvents(projectId, limit, actor, role));
+        return ResponseEntity.ok(artifactService.listAuditEvents(projectId, limit, actor(actor), role(role)));
     }
 
     private ResponseEntity<?> downloaded(ArtifactService.DownloadedArtifact artifact) {
@@ -119,5 +122,23 @@ public class ArtifactController {
                 ContentDisposition.attachment().filename(artifact.filename()).build().toString()
             )
             .body(artifact.resource());
+    }
+
+    private Map<String, Object> withAccessContext(Map<String, Object> request) {
+        Map<String, Object> merged = new LinkedHashMap<>(request == null ? Map.of() : request);
+        merged.put("actor", RequestAccessContextHolder.current().actor());
+        merged.put("role", RequestAccessContextHolder.current().primaryRole());
+        merged.put("organizationId", RequestAccessContextHolder.current().organizationId());
+        return merged;
+    }
+
+    private String actor(String fallback) {
+        RequestAccessContext context = RequestAccessContextHolder.current();
+        return context.authenticated() ? context.actor() : fallback;
+    }
+
+    private String role(String fallback) {
+        RequestAccessContext context = RequestAccessContextHolder.current();
+        return context.authenticated() ? context.primaryRole() : fallback;
     }
 }

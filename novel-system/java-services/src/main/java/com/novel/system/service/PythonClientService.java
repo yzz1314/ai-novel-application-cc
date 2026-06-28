@@ -1,5 +1,7 @@
 package com.novel.system.service;
 
+import com.novel.system.security.RequestAccessContext;
+import com.novel.system.security.RequestAccessContextHolder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,6 +32,7 @@ public class PythonClientService {
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
+        propagateAccessHeaders(headers, request);
 
         HttpEntity<Map<String, Object>> entity = new HttpEntity<>(request, headers);
 
@@ -108,6 +111,21 @@ public class PythonClientService {
         }
 
         return request;
+    }
+
+    private void propagateAccessHeaders(HttpHeaders headers, Map<String, Object> request) {
+        RequestAccessContext context = RequestAccessContextHolder.current();
+        headers.set("X-User-Id", context.userId());
+        headers.set("X-Actor", context.actor());
+        headers.set("X-Org-Id", context.organizationId());
+        headers.set("X-Roles", String.join(",", context.roles()));
+        Object projectId = request == null ? null : request.get("project_id");
+        headers.set(
+            "X-Project-Id",
+            projectId == null || String.valueOf(projectId).isBlank()
+                ? String.join(",", context.projectIds())
+                : String.valueOf(projectId)
+        );
     }
 
     private String normalizeAgentName(String agentName) {

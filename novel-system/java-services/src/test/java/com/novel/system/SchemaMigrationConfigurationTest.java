@@ -18,12 +18,16 @@ class SchemaMigrationConfigurationTest {
         assertThat(properties.getProperty("spring.flyway.locations")).isEqualTo("classpath:db/migration");
         assertThat(properties.getProperty("spring.jpa.hibernate.ddl-auto"))
             .isEqualTo("${SPRING_JPA_HIBERNATE_DDL_AUTO:validate}");
+        assertThat(properties.getProperty("security.access.enforce")).isEqualTo("${ACCESS_CONTROL_ENFORCE:false}");
+        assertThat(properties.getProperty("security.access.require-authentication")).isEqualTo("${ACCESS_CONTROL_REQUIRE_AUTH:false}");
     }
 
     @Test
     void prodAndCiProfilesValidateMigratedSchema() {
-        assertThat(loadYaml("application-prod.yml").getProperty("spring.jpa.hibernate.ddl-auto"))
-            .isEqualTo("validate");
+        Properties prod = loadYaml("application-prod.yml");
+        assertThat(prod.getProperty("spring.jpa.hibernate.ddl-auto")).isEqualTo("validate");
+        assertThat(prod.getProperty("security.access.enforce")).isEqualTo("${ACCESS_CONTROL_ENFORCE:true}");
+        assertThat(prod.getProperty("security.access.require-authentication")).isEqualTo("${ACCESS_CONTROL_REQUIRE_AUTH:true}");
         assertThat(loadYaml("application-ci.yml").getProperty("spring.jpa.hibernate.ddl-auto"))
             .isEqualTo("validate");
     }

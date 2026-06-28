@@ -63,6 +63,12 @@ python:
   service:
     url: ${PYTHON_SERVICE_URL:http://localhost:8000}
 
+# 访问控制配置。默认兼容本地开发；生产可通过环境变量开启强制请求头身份与项目访问校验。
+security:
+  access:
+    enforce: ${ACCESS_CONTROL_ENFORCE:false}
+    require-authentication: ${ACCESS_CONTROL_REQUIRE_AUTH:false}
+
 # 文件存储配置
 dashboard:
   alerts:

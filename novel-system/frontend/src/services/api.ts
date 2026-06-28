@@ -6,6 +6,24 @@ const api = axios.create({
   timeout: 60000,
 })
 
+api.interceptors.request.use((config) => {
+  config.headers = config.headers || {}
+  const identityHeaders: Record<string, string | undefined> = {
+    'X-User-Id': import.meta.env.VITE_ACCESS_USER_ID,
+    'X-Actor': import.meta.env.VITE_ACCESS_ACTOR,
+    'X-Role': import.meta.env.VITE_ACCESS_ROLE,
+    'X-Roles': import.meta.env.VITE_ACCESS_ROLES,
+    'X-Org-Id': import.meta.env.VITE_ACCESS_ORG_ID,
+    'X-Project-Ids': import.meta.env.VITE_ACCESS_PROJECT_IDS,
+  }
+  Object.entries(identityHeaders).forEach(([key, value]) => {
+    if (value) {
+      config.headers[key] = value
+    }
+  })
+  return config
+})
+
 export const apiBaseUrl = api.defaults.baseURL || '/api'
 export const apiUrl = (path: string) => `${apiBaseUrl.replace(/\/$/, '')}${path.startsWith('/') ? path : `/${path}`}`
 

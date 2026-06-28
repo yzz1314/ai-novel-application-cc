@@ -4,3 +4,8 @@ spring:
       ddl-auto: validate
   flyway:
     enabled: true
+
+security:
+  access:
+    enforce: ${ACCESS_CONTROL_ENFORCE:true}
+    require-authentication: ${ACCESS_CONTROL_REQUIRE_AUTH:true}

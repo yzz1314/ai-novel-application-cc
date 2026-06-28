@@ -9,6 +9,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: python-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python-smoke:
     name: Python tests and offline MVP smoke
@@ -41,7 +48,23 @@ jobs:
 
       - name: Run Python test suite
         working-directory: novel-system/python-services
-        run: python -m pytest tests -q
+        run: python -m pytest tests -q --junitxml=pytest-report.xml
 
       - name: Run offline MVP pipeline smoke
-        run: python scripts/smoke_mvp_pipeline.py
+        run: |
+          rm -rf /tmp/novel-ci-workspace
+          python scripts/smoke_mvp_pipeline.py --workspace /tmp/novel-ci-workspace --project-id python_smoke_project --keep-workspace
+
+      - name: Upload Python smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-smoke-artifacts
+          if-no-files-found: ignore
+          path: |
+            novel-system/python-services/pytest-report.xml
+            /tmp/novel-ci-workspace/projects/python_smoke_project/analysis/coverage/*.json
+            /tmp/novel-ci-workspace/projects/python_smoke_project/analysis/per_chunk/**/summary.json
+            /tmp/novel-ci-workspace/projects/python_smoke_project/analysis/per_book/*.md
+            /tmp/novel-ci-workspace/projects/python_smoke_project/analysis/cross_book/*
+            /tmp/novel-ci-workspace/projects/python_smoke_project/skills/enabled.yaml

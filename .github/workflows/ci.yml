@@ -9,6 +9,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,6 +20,10 @@ jobs:
   python-tests:
     name: Python tests and fixed offline E2E
     runs-on: ubuntu-latest
+    env:
+      MOCK_LLM: "true"
+      PROJECT_BASE_PATH: /tmp/novel-ci-workspace
+      SKILLS_PATH: /tmp/novel-ci-workspace/skills
     defaults:
       run:
         working-directory: novel-system/python-services
@@ -37,11 +44,27 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run Python unit tests
-        run: python -m pytest tests
+        run: python -m pytest tests --junitxml=pytest-report.xml
 
       - name: Run fixed MVP pipeline smoke
         working-directory: novel-system
-        run: python scripts/smoke_mvp_pipeline.py --project-id ci_smoke_project
+        run: |
+          rm -rf /tmp/novel-ci-workspace
+          python scripts/smoke_mvp_pipeline.py --workspace /tmp/novel-ci-workspace --project-id ci_smoke_project --keep-workspace
+
+      - name: Upload Python test and smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-ci-artifacts
+          if-no-files-found: ignore
+          path: |
+            novel-system/python-services/pytest-report.xml
+            /tmp/novel-ci-workspace/projects/ci_smoke_project/analysis/coverage/*.json
+            /tmp/novel-ci-workspace/projects/ci_smoke_project/analysis/per_chunk/**/summary.json
+            /tmp/novel-ci-workspace/projects/ci_smoke_project/analysis/per_book/*.md
+            /tmp/novel-ci-workspace/projects/ci_smoke_project/analysis/cross_book/*
+            /tmp/novel-ci-workspace/projects/ci_smoke_project/skills/enabled.yaml
 
   java-tests:
     name: Java service tests
@@ -86,6 +109,14 @@ jobs:
           SPRING_FLYWAY_SCHEMAS: public
         run: mvn -B -Dtest=MigrationSchemaValidationTest test
 
+      - name: Upload Maven test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-surefire-reports
+          if-no-files-found: ignore
+          path: novel-system/java-services/target/surefire-reports/
+
   frontend-build:
     name: Frontend typecheck and build
     runs-on: ubuntu-latest
@@ -112,3 +143,14 @@ jobs:
 
       - name: Run fixed frontend browser smoke
         run: npm run e2e:ci
+
+      - name: Upload frontend build and Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-ci-artifacts
+          if-no-files-found: ignore
+          path: |
+            novel-system/frontend/dist/
+            novel-system/frontend/playwright-report/
+            novel-system/frontend/test-results/

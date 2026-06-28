@@ -8,6 +8,12 @@ const api = axios.create({
 
 api.interceptors.request.use((config) => {
   config.headers = config.headers || {}
+  const accessToken = import.meta.env.VITE_ACCESS_TOKEN || import.meta.env.VITE_ACCESS_BEARER_TOKEN
+  if (accessToken && !config.headers.Authorization) {
+    config.headers.Authorization = String(accessToken).startsWith('Bearer ')
+      ? String(accessToken)
+      : `Bearer ${accessToken}`
+  }
   const identityHeaders: Record<string, string | undefined> = {
     'X-User-Id': import.meta.env.VITE_ACCESS_USER_ID,
     'X-Actor': import.meta.env.VITE_ACCESS_ACTOR,

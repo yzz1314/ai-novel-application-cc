@@ -9,3 +9,10 @@ security:
   access:
     enforce: ${ACCESS_CONTROL_ENFORCE:true}
     require-authentication: ${ACCESS_CONTROL_REQUIRE_AUTH:true}
+    jwt:
+      enabled: ${ACCESS_JWT_ENABLED:true}
+      require-bearer: ${ACCESS_JWT_REQUIRE_BEARER:true}
+      secret: ${ACCESS_JWT_SECRET:}
+      issuer: ${ACCESS_JWT_ISSUER:}
+      audience: ${ACCESS_JWT_AUDIENCE:}
+      clock-skew-seconds: ${ACCESS_JWT_CLOCK_SKEW_SECONDS:60}

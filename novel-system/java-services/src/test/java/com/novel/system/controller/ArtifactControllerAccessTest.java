@@ -3,11 +3,13 @@ package com.novel.system.controller;
 import com.novel.system.exception.GlobalExceptionHandler;
 import com.novel.system.security.AccessControlService;
 import com.novel.system.security.AccessControlInterceptor;
+import com.novel.system.security.JwtAccessTokenService;
 import com.novel.system.security.RequestAccessContext;
 import com.novel.system.service.AccessIdentityService;
 import com.novel.system.service.AccessRolePolicyService;
 import com.novel.system.service.ProjectAccessService;
 import com.novel.system.service.ArtifactService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
@@ -85,7 +87,13 @@ class ArtifactControllerAccessTest {
         when(projectAccessService.resolveProjectAccess(any(RequestAccessContext.class), any()))
             .thenAnswer(invocation -> invocation.getArgument(0));
         AccessRolePolicyService policyService = mock(AccessRolePolicyService.class);
-        AccessControlService accessControlService = new AccessControlService(projectAccessService, policyService);
+        JwtAccessTokenService jwtAccessTokenService = new JwtAccessTokenService(new ObjectMapper());
+        ReflectionTestUtils.setField(jwtAccessTokenService, "enabled", false);
+        AccessControlService accessControlService = new AccessControlService(
+            projectAccessService,
+            policyService,
+            jwtAccessTokenService
+        );
         ReflectionTestUtils.setField(accessControlService, "enforceAccess", enforceAccess);
         ReflectionTestUtils.setField(accessControlService, "requireAuthentication", requireAuthentication);
         AccessIdentityService accessIdentityService = mock(AccessIdentityService.class);

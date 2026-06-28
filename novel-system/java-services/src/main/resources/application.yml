@@ -68,6 +68,13 @@ security:
   access:
     enforce: ${ACCESS_CONTROL_ENFORCE:false}
     require-authentication: ${ACCESS_CONTROL_REQUIRE_AUTH:false}
+    jwt:
+      enabled: ${ACCESS_JWT_ENABLED:false}
+      require-bearer: ${ACCESS_JWT_REQUIRE_BEARER:false}
+      secret: ${ACCESS_JWT_SECRET:}
+      issuer: ${ACCESS_JWT_ISSUER:}
+      audience: ${ACCESS_JWT_AUDIENCE:}
+      clock-skew-seconds: ${ACCESS_JWT_CLOCK_SKEW_SECONDS:60}
 
 # 文件存储配置
 dashboard:

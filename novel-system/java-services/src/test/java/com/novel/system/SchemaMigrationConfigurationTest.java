@@ -20,6 +20,8 @@ class SchemaMigrationConfigurationTest {
             .isEqualTo("${SPRING_JPA_HIBERNATE_DDL_AUTO:validate}");
         assertThat(properties.getProperty("security.access.enforce")).isEqualTo("${ACCESS_CONTROL_ENFORCE:false}");
         assertThat(properties.getProperty("security.access.require-authentication")).isEqualTo("${ACCESS_CONTROL_REQUIRE_AUTH:false}");
+        assertThat(properties.getProperty("security.access.jwt.enabled")).isEqualTo("${ACCESS_JWT_ENABLED:false}");
+        assertThat(properties.getProperty("security.access.jwt.require-bearer")).isEqualTo("${ACCESS_JWT_REQUIRE_BEARER:false}");
     }
 
     @Test
@@ -28,6 +30,8 @@ class SchemaMigrationConfigurationTest {
         assertThat(prod.getProperty("spring.jpa.hibernate.ddl-auto")).isEqualTo("validate");
         assertThat(prod.getProperty("security.access.enforce")).isEqualTo("${ACCESS_CONTROL_ENFORCE:true}");
         assertThat(prod.getProperty("security.access.require-authentication")).isEqualTo("${ACCESS_CONTROL_REQUIRE_AUTH:true}");
+        assertThat(prod.getProperty("security.access.jwt.enabled")).isEqualTo("${ACCESS_JWT_ENABLED:true}");
+        assertThat(prod.getProperty("security.access.jwt.require-bearer")).isEqualTo("${ACCESS_JWT_REQUIRE_BEARER:true}");
         assertThat(loadYaml("application-ci.yml").getProperty("spring.jpa.hibernate.ddl-auto"))
             .isEqualTo("validate");
     }

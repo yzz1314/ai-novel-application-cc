@@ -14,6 +14,7 @@ public class AccessControlService {
 
     private final ProjectAccessService projectAccessService;
     private final AccessRolePolicyService accessRolePolicyService;
+    private final JwtAccessTokenService jwtAccessTokenService;
 
     @Value("${security.access.enforce:false}")
     private boolean enforceAccess;
@@ -22,6 +23,14 @@ public class AccessControlService {
     private boolean requireAuthentication;
 
     public RequestAccessContext fromRequest(HttpServletRequest request) {
+        var jwtContext = jwtAccessTokenService.fromRequest(request);
+        if (jwtContext.isPresent()) {
+            return jwtContext.get();
+        }
+        if (jwtAccessTokenService.isBearerRequired()) {
+            throw new AccessDeniedException("Bearer token is required");
+        }
+
         String userId = trimToNull(firstHeader(request, "X-User-Id", "X-Actor", "X-User"));
         String actor = trimToNull(firstHeader(request, "X-Actor", "X-User", "X-User-Id"));
         String organizationId = trimToNull(firstHeader(request, "X-Org-Id", "X-Organization-Id"));

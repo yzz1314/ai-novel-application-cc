@@ -35,6 +35,11 @@ spring:
   web:
     resources:
       add-mappings: true
+  mail:
+    host: ${SPRING_MAIL_HOST:}
+    port: ${SPRING_MAIL_PORT:25}
+    username: ${SPRING_MAIL_USERNAME:}
+    password: ${SPRING_MAIL_PASSWORD:}
 
 server:
   port: 8080
@@ -61,6 +66,9 @@ python:
 # 文件存储配置
 dashboard:
   alerts:
+    delivery-enabled: ${DASHBOARD_ALERT_DELIVERY_ENABLED:true}
+    delivery-max-attempts: ${DASHBOARD_ALERT_DELIVERY_MAX_ATTEMPTS:3}
+    delivery-retry-delay-minutes: ${DASHBOARD_ALERT_DELIVERY_RETRY_DELAY_MINUTES:15}
     webhook-url: ${DASHBOARD_ALERT_WEBHOOK_URL:}
     email-to: ${DASHBOARD_ALERT_EMAIL_TO:}
     email-from: ${DASHBOARD_ALERT_EMAIL_FROM:}

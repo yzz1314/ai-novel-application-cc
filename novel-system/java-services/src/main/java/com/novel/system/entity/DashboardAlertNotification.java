@@ -42,9 +42,25 @@ public class DashboardAlertNotification {
     @Column(name = "notification_count")
     private Long notificationCount = 1L;
 
+    @Column(name = "delivery_status", length = 32)
+    private String deliveryStatus;
+
+    @Column(name = "delivery_attempts")
+    private Long deliveryAttempts = 0L;
+
+    @Column(name = "last_delivery_at")
+    private LocalDateTime lastDeliveryAt;
+
+    @Column(name = "next_retry_at")
+    private LocalDateTime nextRetryAt;
+
     @Type(JsonType.class)
     @Column(columnDefinition = "jsonb")
     private Map<String, Object> channels = new LinkedHashMap<>();
+
+    @Type(JsonType.class)
+    @Column(name = "delivery_receipt", columnDefinition = "jsonb")
+    private Map<String, Object> deliveryReceipt = new LinkedHashMap<>();
 
     @Type(JsonType.class)
     @Column(columnDefinition = "jsonb")
@@ -66,6 +82,8 @@ public class DashboardAlertNotification {
         lastSeenAt = lastSeenAt == null ? now : lastSeenAt;
         status = status == null ? "RECORDED" : status;
         notificationCount = notificationCount == null || notificationCount < 1 ? 1L : notificationCount;
+        deliveryAttempts = deliveryAttempts == null || deliveryAttempts < 0 ? 0L : deliveryAttempts;
+        deliveryReceipt = deliveryReceipt == null ? new LinkedHashMap<>() : deliveryReceipt;
         channels = channels == null ? new LinkedHashMap<>() : channels;
         payload = payload == null ? new LinkedHashMap<>() : payload;
     }
@@ -73,6 +91,8 @@ public class DashboardAlertNotification {
     @PreUpdate
     protected void onUpdate() {
         lastSeenAt = lastSeenAt == null ? LocalDateTime.now() : lastSeenAt;
+        deliveryAttempts = deliveryAttempts == null || deliveryAttempts < 0 ? 0L : deliveryAttempts;
+        deliveryReceipt = deliveryReceipt == null ? new LinkedHashMap<>() : deliveryReceipt;
         channels = channels == null ? new LinkedHashMap<>() : channels;
         payload = payload == null ? new LinkedHashMap<>() : payload;
     }

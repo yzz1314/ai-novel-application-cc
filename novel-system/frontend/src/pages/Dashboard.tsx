@@ -429,6 +429,12 @@ const Dashboard: React.FC = () => {
             <Tag color={notificationSummary.escalated ? 'error' : 'default'}>
               升级 {notificationSummary.escalated || 0}
             </Tag>
+            <Tag color={notificationSummary.retryPending ? 'warning' : 'default'}>
+              重试 {notificationSummary.retryPending || 0}
+            </Tag>
+            <Tag color={notificationSummary.deliveryFailed ? 'error' : 'default'}>
+              失败 {notificationSummary.deliveryFailed || 0}
+            </Tag>
           </Space>
         }
       >
@@ -457,12 +463,16 @@ const Dashboard: React.FC = () => {
                           {item.escalationLevel}
                         </Tag>
                         <Tag color={item.status === 'READY' ? 'success' : 'warning'}>{item.status}</Tag>
+                        <Tag color={item.deliveryStatus === 'DELIVERED' ? 'success' : item.deliveryStatus === 'FAILED' ? 'error' : 'warning'}>
+                          {item.deliveryStatus || 'PENDING'}
+                        </Tag>
                       </Space>
                       <Text type="secondary">{item.lastSeenAt}</Text>
                     </Space>
                     <Text type="secondary">
-                      {item.payload?.message || '-'} / 次数 {item.notificationCount || 1}
+                      {item.payload?.message || '-'} / 次数 {item.notificationCount || 1} / 投递 {item.deliveryAttempts || 0}
                     </Text>
+                    {item.nextRetryAt ? <Text type="secondary">下次重试 {item.nextRetryAt}</Text> : null}
                   </Space>
                 </List.Item>
               )}

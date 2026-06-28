@@ -61,6 +61,7 @@ public class DashboardService {
     private final RetrievalArtifactRepository retrievalArtifactRepository;
     private final PythonClientService pythonClientService;
     private final TaskExecutorService taskExecutorService;
+    private final DashboardAlertDeliveryService dashboardAlertDeliveryService;
     private final Environment environment;
 
     public Map<String, Object> getDashboard() {
@@ -149,6 +150,15 @@ public class DashboardService {
             .count());
         summary.put("ready", notifications.stream()
             .filter(notification -> "READY".equals(notification.get("status")))
+            .count());
+        summary.put("delivered", notifications.stream()
+            .filter(notification -> "DELIVERED".equals(notification.get("deliveryStatus")))
+            .count());
+        summary.put("retryPending", notifications.stream()
+            .filter(notification -> "RETRY_PENDING".equals(notification.get("deliveryStatus")))
+            .count());
+        summary.put("deliveryFailed", notifications.stream()
+            .filter(notification -> "FAILED".equals(notification.get("deliveryStatus")))
             .count());
         summary.put("escalated", notifications.stream()
             .filter(notification -> "ESCALATE".equals(notification.get("escalationLevel")))
@@ -311,7 +321,8 @@ public class DashboardService {
             notification.setPayload(notificationPayload(alert));
             notification.setLastSeenAt(LocalDateTime.now());
             notification.setNotificationCount(existing ? numberValue(notification.getNotificationCount()) + 1 : 1L);
-            notifications.add(notificationMap(dashboardAlertNotificationRepository.save(notification)));
+            DashboardAlertNotification saved = dashboardAlertNotificationRepository.save(notification);
+            notifications.add(notificationMap(deliverNotificationIfDue(saved)));
         }
 
         Map<String, Object> summary = new LinkedHashMap<>();
@@ -321,6 +332,15 @@ public class DashboardService {
             .count());
         summary.put("ready", notifications.stream()
             .filter(notification -> "READY".equals(notification.get("status")))
+            .count());
+        summary.put("delivered", notifications.stream()
+            .filter(notification -> "DELIVERED".equals(notification.get("deliveryStatus")))
+            .count());
+        summary.put("retryPending", notifications.stream()
+            .filter(notification -> "RETRY_PENDING".equals(notification.get("deliveryStatus")))
+            .count());
+        summary.put("deliveryFailed", notifications.stream()
+            .filter(notification -> "FAILED".equals(notification.get("deliveryStatus")))
             .count());
         summary.put("escalated", notifications.stream()
             .filter(notification -> "ESCALATE".equals(notification.get("escalationLevel")))
@@ -366,7 +386,12 @@ public class DashboardService {
         result.put("escalationLevel", notification.getEscalationLevel());
         result.put("status", notification.getStatus());
         result.put("notificationCount", notification.getNotificationCount());
+        result.put("deliveryStatus", notification.getDeliveryStatus());
+        result.put("deliveryAttempts", notification.getDeliveryAttempts());
+        result.put("lastDeliveryAt", notification.getLastDeliveryAt());
+        result.put("nextRetryAt", notification.getNextRetryAt());
         result.put("channels", notification.getChannels() == null ? Map.of() : notification.getChannels());
+        result.put("deliveryReceipt", notification.getDeliveryReceipt() == null ? Map.of() : notification.getDeliveryReceipt());
         result.put("payload", notification.getPayload() == null ? Map.of() : notification.getPayload());
         result.put("createdAt", notification.getCreatedAt());
         result.put("lastSeenAt", notification.getLastSeenAt());
@@ -396,6 +421,72 @@ public class DashboardService {
 
     private boolean configured(Map<String, Object> channel) {
         return Boolean.TRUE.equals(channel.get("configured"));
+    }
+
+    private DashboardAlertNotification deliverNotificationIfDue(DashboardAlertNotification notification) {
+        if (!deliveryEnabled() || !externalChannelConfigured(notification.getChannels())) {
+            notification.setDeliveryStatus("PENDING_CHANNEL");
+            notification.setNextRetryAt(null);
+            return dashboardAlertNotificationRepository.save(notification);
+        }
+        if (!deliveryDue(notification)) {
+            return notification;
+        }
+
+        Map<String, Object> receipt = dashboardAlertDeliveryService.deliver(
+            notification.getPayload() == null ? Map.of() : notification.getPayload(),
+            notification.getEscalationLevel()
+        );
+        long attempts = numberValue(notification.getDeliveryAttempts()) + 1;
+        String status = stringValue(receipt.get("status"), "FAILED");
+        LocalDateTime now = LocalDateTime.now();
+        notification.setDeliveryAttempts(attempts);
+        notification.setLastDeliveryAt(now);
+        notification.setDeliveryReceipt(receipt);
+        if ("DELIVERED".equals(status)) {
+            notification.setDeliveryStatus("DELIVERED");
+            notification.setNextRetryAt(null);
+        } else if ("SKIPPED".equals(status)) {
+            notification.setDeliveryStatus("PENDING_CHANNEL");
+            notification.setNextRetryAt(null);
+        } else if (attempts >= deliveryMaxAttempts()) {
+            notification.setDeliveryStatus("FAILED");
+            notification.setNextRetryAt(null);
+        } else {
+            notification.setDeliveryStatus("RETRY_PENDING");
+            notification.setNextRetryAt(now.plusMinutes(deliveryRetryDelayMinutes()));
+        }
+        return dashboardAlertNotificationRepository.save(notification);
+    }
+
+    private boolean deliveryDue(DashboardAlertNotification notification) {
+        String status = notification.getDeliveryStatus();
+        if ("DELIVERED".equals(status) || "FAILED".equals(status)) {
+            return false;
+        }
+        LocalDateTime nextRetryAt = notification.getNextRetryAt();
+        return nextRetryAt == null || !nextRetryAt.isAfter(LocalDateTime.now());
+    }
+
+    private boolean deliveryEnabled() {
+        return booleanValue(configValue("dashboard.alerts.delivery-enabled", "DASHBOARD_ALERT_DELIVERY_ENABLED"), true);
+    }
+
+    private long deliveryMaxAttempts() {
+        long value = numberValue(configValue("dashboard.alerts.delivery-max-attempts", "DASHBOARD_ALERT_DELIVERY_MAX_ATTEMPTS"));
+        return value > 0 ? Math.min(value, 10) : 3;
+    }
+
+    private long deliveryRetryDelayMinutes() {
+        long value = numberValue(configValue("dashboard.alerts.delivery-retry-delay-minutes", "DASHBOARD_ALERT_DELIVERY_RETRY_DELAY_MINUTES"));
+        return value > 0 ? Math.min(value, 24 * 60) : 15;
+    }
+
+    private boolean booleanValue(String value, boolean fallback) {
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        return "true".equalsIgnoreCase(value) || "1".equals(value) || "yes".equalsIgnoreCase(value);
     }
 
     private String configValue(String propertyName, String envName) {

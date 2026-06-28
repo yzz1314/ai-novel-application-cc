@@ -33,8 +33,10 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -69,12 +71,15 @@ class DashboardServiceTest {
     @Mock
     private TaskExecutorService taskExecutorService;
     @Mock
+    private DashboardAlertDeliveryService dashboardAlertDeliveryService;
+    @Mock
     private Environment environment;
 
     private DashboardService dashboardService;
 
     @BeforeEach
     void setUp() {
+        lenient().when(environment.getProperty(anyString())).thenReturn("");
         dashboardService = new DashboardService(
             projectRepository,
             sampleRepository,
@@ -90,6 +95,7 @@ class DashboardServiceTest {
             retrievalArtifactRepository,
             pythonClientService,
             taskExecutorService,
+            dashboardAlertDeliveryService,
             environment
         );
     }
@@ -193,6 +199,7 @@ class DashboardServiceTest {
         assertThat(notificationSummary)
             .containsEntry("generated", 5)
             .containsEntry("pendingChannel", 5L)
+            .containsEntry("delivered", 0L)
             .containsEntry("escalated", 1L);
         List<Map<String, Object>> notifications = (List<Map<String, Object>>) dashboard.get("alertNotifications");
         assertThat(notifications)
@@ -201,6 +208,7 @@ class DashboardServiceTest {
             .satisfies(notification -> {
                 assertThat(notification.get("escalationLevel")).isEqualTo("ESCALATE");
                 assertThat(notification.get("status")).isEqualTo("PENDING_CHANNEL");
+                assertThat(notification.get("deliveryStatus")).isEqualTo("PENDING_CHANNEL");
             });
 
         List<Map<String, Object>> blockedProjects = (List<Map<String, Object>>) dashboard.get("blockedProjects");
@@ -340,6 +348,75 @@ class DashboardServiceTest {
         assertThat((Map<String, Object>) channels.get("webhook")).containsEntry("configured", true);
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void dashboardDeliversConfiguredWebhookAndStoresReceipt() {
+        Project project = project("project_dashboard");
+        Task failedTask = task("task_failed", TaskStatus.FAILED, null);
+        mockDashboardBasics(project, failedTask);
+        mockNotificationPersistence();
+        when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of());
+        when(environment.getProperty("dashboard.alerts.webhook-url")).thenReturn("https://example.invalid/hook");
+        when(dashboardAlertDeliveryService.deliver(any(), any())).thenReturn(Map.of(
+            "status", "DELIVERED",
+            "configured", true,
+            "delivered", true,
+            "webhook", Map.of("status", "DELIVERED")
+        ));
+
+        Map<String, Object> dashboard = dashboardService.getDashboard();
+
+        Map<String, Object> notificationSummary = (Map<String, Object>) dashboard.get("alertNotificationSummary");
+        assertThat(notificationSummary)
+            .containsEntry("ready", 2L)
+            .containsEntry("delivered", 2L)
+            .containsEntry("retryPending", 0L);
+        List<Map<String, Object>> notifications = (List<Map<String, Object>>) dashboard.get("alertNotifications");
+        assertThat(notifications)
+            .filteredOn(notification -> "failed_tasks".equals(notification.get("alertId")))
+            .singleElement()
+            .satisfies(notification -> {
+                assertThat(notification.get("deliveryStatus")).isEqualTo("DELIVERED");
+                assertThat(notification.get("deliveryAttempts")).isEqualTo(1L);
+                assertThat((Map<String, Object>) notification.get("deliveryReceipt")).containsEntry("status", "DELIVERED");
+            });
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void dashboardSchedulesDeliveryRetryWhenConfiguredWebhookFails() {
+        Project project = project("project_dashboard");
+        Task failedTask = task("task_failed", TaskStatus.FAILED, null);
+        mockDashboardBasics(project, failedTask);
+        mockNotificationPersistence();
+        when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of());
+        when(environment.getProperty("dashboard.alerts.webhook-url")).thenReturn("https://example.invalid/hook");
+        when(environment.getProperty("dashboard.alerts.delivery-retry-delay-minutes")).thenReturn("5");
+        when(dashboardAlertDeliveryService.deliver(any(), any())).thenReturn(Map.of(
+            "status", "FAILED",
+            "configured", true,
+            "delivered", false,
+            "webhook", Map.of("status", "FAILED", "error", "boom")
+        ));
+
+        Map<String, Object> dashboard = dashboardService.getDashboard();
+
+        Map<String, Object> notificationSummary = (Map<String, Object>) dashboard.get("alertNotificationSummary");
+        assertThat(notificationSummary)
+            .containsEntry("ready", 2L)
+            .containsEntry("retryPending", 2L)
+            .containsEntry("deliveryFailed", 0L);
+        List<Map<String, Object>> notifications = (List<Map<String, Object>>) dashboard.get("alertNotifications");
+        assertThat(notifications)
+            .filteredOn(notification -> "failed_tasks".equals(notification.get("alertId")))
+            .singleElement()
+            .satisfies(notification -> {
+                assertThat(notification.get("deliveryStatus")).isEqualTo("RETRY_PENDING");
+                assertThat(notification.get("deliveryAttempts")).isEqualTo(1L);
+                assertThat(notification.get("nextRetryAt")).isNotNull();
+            });
+    }
+
     private Project project(String projectId) {
         Project project = new Project();
         project.setId(projectId);
@@ -413,6 +490,7 @@ class DashboardServiceTest {
         notification.setEscalationLevel(level);
         notification.setStatus(status);
         notification.setNotificationCount(1L);
+        notification.setDeliveryAttempts(0L);
         notification.setChannels(Map.of("dashboard", Map.of("enabled", true)));
         notification.setPayload(Map.of("title", "Failed tasks"));
         notification.setCreatedAt(LocalDateTime.now().minusMinutes(5));

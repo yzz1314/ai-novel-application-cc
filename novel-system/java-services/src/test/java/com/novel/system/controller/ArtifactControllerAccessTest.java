@@ -4,6 +4,7 @@ import com.novel.system.exception.GlobalExceptionHandler;
 import com.novel.system.security.AccessControlService;
 import com.novel.system.security.AccessControlInterceptor;
 import com.novel.system.security.RequestAccessContext;
+import com.novel.system.service.AccessIdentityService;
 import com.novel.system.service.ProjectAccessService;
 import com.novel.system.service.ArtifactService;
 import org.junit.jupiter.api.Test;
@@ -86,7 +87,7 @@ class ArtifactControllerAccessTest {
         ReflectionTestUtils.setField(accessControlService, "enforceAccess", enforceAccess);
         ReflectionTestUtils.setField(accessControlService, "requireAuthentication", requireAuthentication);
         return standaloneSetup(controller)
-            .addInterceptors(new AccessControlInterceptor(accessControlService))
+            .addInterceptors(new AccessControlInterceptor(accessControlService, mock(AccessIdentityService.class)))
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
     }

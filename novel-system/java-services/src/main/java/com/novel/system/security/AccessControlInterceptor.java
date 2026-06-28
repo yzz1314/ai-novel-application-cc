@@ -1,5 +1,6 @@
 package com.novel.system.security;
 
+import com.novel.system.service.AccessIdentityService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
@@ -14,6 +15,7 @@ import java.util.Map;
 public class AccessControlInterceptor implements HandlerInterceptor {
 
     private final AccessControlService accessControlService;
+    private final AccessIdentityService accessIdentityService;
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
@@ -21,6 +23,7 @@ public class AccessControlInterceptor implements HandlerInterceptor {
         String projectId = projectId(request);
         context = accessControlService.resolveProjectAccess(context, projectId);
         RequestAccessContextHolder.set(context);
+        accessIdentityService.recordIdentity(context);
         accessControlService.assertProjectAccess(context, projectId);
         if (projectId != null && isMutation(request.getMethod())) {
             accessControlService.assertMutationAllowed(context, projectId, request.getMethod() + " " + request.getRequestURI());

@@ -14,5 +14,7 @@ public interface ProjectMemberRepository extends JpaRepository<ProjectMember, St
 
     List<ProjectMember> findByProjectIdAndStatusOrderByCreatedAtAsc(String projectId, String status);
 
+    List<ProjectMember> findByUserIdAndStatusOrderByUpdatedAtDesc(String userId, String status);
+
     boolean existsByProjectIdAndUserIdAndStatus(String projectId, String userId, String status);
 }

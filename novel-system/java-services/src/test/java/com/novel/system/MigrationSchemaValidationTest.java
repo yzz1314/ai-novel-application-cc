@@ -32,6 +32,8 @@ class MigrationSchemaValidationTest {
                 'projects',
                 'samples',
                 'tasks',
+                'access_organizations',
+                'access_users',
                 'project_members',
                 'model_profiles',
                 'skill_profiles',
@@ -53,6 +55,6 @@ class MigrationSchemaValidationTest {
         );
 
         assertThat(appliedMigrations).isNotNull().isGreaterThanOrEqualTo(1);
-        assertThat(managedTables).isEqualTo(18);
+        assertThat(managedTables).isEqualTo(20);
     }
 }

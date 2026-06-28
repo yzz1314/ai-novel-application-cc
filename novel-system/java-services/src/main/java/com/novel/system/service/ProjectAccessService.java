@@ -61,6 +61,16 @@ public class ProjectAccessService {
             .toList();
     }
 
+    public List<Map<String, Object>> listUserMemberships(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return List.of();
+        }
+        return projectMemberRepository.findByUserIdAndStatusOrderByUpdatedAtDesc(normalizeUserId(userId), ACTIVE)
+            .stream()
+            .map(this::toResponse)
+            .toList();
+    }
+
     public Optional<ProjectMember> findActiveMember(String projectId, String userId) {
         if (projectId == null || projectId.isBlank() || userId == null || userId.isBlank()) {
             return Optional.empty();

@@ -84,12 +84,24 @@ class RetrievalArtifactDbServiceTest {
         writeProjectFile("indexes/vector/index_summary.json", """
             {
               "document_count": 4,
-              "engine": "hash-vector"
+              "engine": "embedding_vector",
+              "vector_mode": "local_embedding_fallback",
+              "embedding_metadata": {
+                "status": "mock",
+                "model_role": "embeddingModel",
+                "model": "mock-embedding",
+                "local_fallback": true,
+                "dimensions": 96
+              }
             }
             """);
         writeProjectFile("indexes/hybrid/index_summary.json", """
             {
               "document_count": 4,
+              "vector_index": {
+                "engine": "embedding_vector",
+                "vector_mode": "local_embedding_fallback"
+              },
               "quality_evaluation": {"score": 82, "status": "good"},
               "citation_budget": {
                 "usage": {
@@ -101,6 +113,21 @@ class RetrievalArtifactDbServiceTest {
             """);
         writeProjectFile("indexes/retrieval_index_report.json", """
             {
+              "vector_index": {
+                "engine": "embedding_vector",
+                "vector_mode": "local_embedding_fallback",
+                "embedding_metadata": {
+                  "model_role": "embeddingModel",
+                  "local_fallback": true
+                }
+              },
+              "model_gateway": {
+                "embedding_index": {
+                  "vector_mode": "local_embedding_fallback",
+                  "model_role": "embeddingModel",
+                  "local_fallback": true
+                }
+              },
               "quality_evaluation": {"score": 79, "status": "needs_review"},
               "citation_budget": {
                 "usage": {"selected_result_count": 2}
@@ -165,7 +192,9 @@ class RetrievalArtifactDbServiceTest {
             .containsEntry("benchmarkCaseCount", 3)
             .containsEntry("benchmarkPassedCount", 2)
             .containsEntry("benchmarkHitRate", 1.0)
-            .containsEntry("benchmarkMeanReciprocalRank", 0.833333);
+            .containsEntry("benchmarkMeanReciprocalRank", 0.833333)
+            .containsEntry("vectorMode", "local_embedding_fallback")
+            .containsEntry("vectorEngine", "embedding_vector");
 
         Map<String, Object> qualityReport = (Map<String, Object>) response.get("qualityReport");
         assertThat(qualityReport)
@@ -193,15 +222,21 @@ class RetrievalArtifactDbServiceTest {
             .containsEntry("latestBenchmarkCaseCount", 3)
             .containsEntry("latestBenchmarkPassedCount", 2)
             .containsEntry("latestBenchmarkHitRate", 1.0)
-            .containsEntry("latestBenchmarkMeanReciprocalRank", 0.833333);
+            .containsEntry("latestBenchmarkMeanReciprocalRank", 0.833333)
+            .containsEntry("latestVectorMode", "local_embedding_fallback")
+            .containsEntry("latestVectorEngine", "embedding_vector");
         Map<String, Object> latestQualityReport = (Map<String, Object>) retrievalMetadata.get("latestQualityReport");
         Map<String, Object> latestBenchmarkReport = (Map<String, Object>) retrievalMetadata.get("latestBenchmarkReport");
         Map<String, Object> latestQualityEvaluation = (Map<String, Object>) retrievalMetadata.get("latestQualityEvaluation");
         Map<String, Object> latestCitationBudget = (Map<String, Object>) retrievalMetadata.get("latestCitationBudget");
+        Map<String, Object> latestEmbeddingIndex = (Map<String, Object>) retrievalMetadata.get("latestEmbeddingIndex");
         assertThat(latestQualityReport).containsEntry("score", 86);
         assertThat(latestBenchmarkReport).containsEntry("status", "passed");
         assertThat(latestQualityEvaluation).containsEntry("score", 82);
         assertThat(latestCitationBudget).containsKey("usage");
+        assertThat(latestEmbeddingIndex)
+            .containsEntry("model_role", "embeddingModel")
+            .containsEntry("local_fallback", true);
 
         RetrievalArtifact saved = savedArtifact.get();
         assertThat(saved.getQualityReportPath()).isEqualTo("indexes/retrieval_quality_report.json");
@@ -222,7 +257,9 @@ class RetrievalArtifactDbServiceTest {
             .containsEntry("benchmarkReportPath", "indexes/retrieval_benchmark_report.json")
             .containsEntry("benchmarkStatus", "passed")
             .containsEntry("benchmarkCaseCount", 3)
-            .containsEntry("benchmarkPassedCount", 2);
+            .containsEntry("benchmarkPassedCount", 2)
+            .containsEntry("vectorMode", "local_embedding_fallback")
+            .containsEntry("vectorEngine", "embedding_vector");
     }
 
     private Path projectRoot() {

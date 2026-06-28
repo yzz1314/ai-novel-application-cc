@@ -36,7 +36,13 @@ class RetrievalIndexAgent(BaseAgent):
             cache_status = builder.cache_status(documents)
             graph_context = builder._graph_context(query)
             plan = builder._default_plan()
-            engine = HybridRetrievalEngine(builder.project_root, documents, graph_context)
+            embedding_bundle = await self._build_embedding_bundle(request, query, documents)
+            engine = HybridRetrievalEngine(
+                builder.project_root,
+                documents,
+                graph_context,
+                embedding_bundle=embedding_bundle,
+            )
             engine.persist_indexes(cache_status=cache_status)
             retrieval = engine.retrieve(query, plan, top_k=top_k)
             benchmark_queries = self._benchmark_queries(request, builder.project_root)
@@ -56,6 +62,7 @@ class RetrievalIndexAgent(BaseAgent):
             builder._save_index_summary(documents, cache_status=cache_status)
             citation_budget = builder.preview_citation_budget(retrieval.get("results", []))
             model_gateway = await self._probe_model_gateway(request, query, retrieval.get("results", []))
+            model_gateway["embedding_index"] = embedding_bundle.get("metadata", {})
             benchmark_summary = {
                 "status": benchmark_report.get("status"),
                 "case_count": benchmark_report.get("case_count"),
@@ -88,6 +95,7 @@ class RetrievalIndexAgent(BaseAgent):
                 "quality_evaluation": retrieval.get("quality_evaluation", {}),
                 "citation_budget": citation_budget,
                 "benchmark": benchmark_summary,
+                "vector_index": retrieval.get("vector_index", {}),
                 "model_gateway": model_gateway,
                 "top_results": [
                     {
@@ -120,6 +128,7 @@ class RetrievalIndexAgent(BaseAgent):
                 "quality_evaluation": report["quality_evaluation"],
                 "citation_budget": report["citation_budget"],
                 "benchmark": report["benchmark"],
+                "vector_index": report["vector_index"],
                 "model_gateway": report["model_gateway"],
                 "report_path": self._relative(builder.project_root, report_path),
                 "bm25_summary_path": "indexes/bm25/index_summary.json",
@@ -198,6 +207,97 @@ class RetrievalIndexAgent(BaseAgent):
         for doc in documents:
             counts[doc.source_type] = counts.get(doc.source_type, 0) + 1
         return counts
+
+    async def _build_embedding_bundle(
+            self,
+            request: AgentRequest,
+            query: str,
+            documents: list) -> Dict[str, Any]:
+        vector_documents = [doc for doc in documents if str(getattr(doc, "text", "") or "").strip()]
+        metadata: Dict[str, Any] = {
+            "enabled": self._embedding_index_enabled(request),
+            "status": "skipped",
+            "vector_mode": "hash_fallback",
+            "document_count": len(vector_documents),
+        }
+        if not metadata["enabled"]:
+            metadata["reason"] = "model_embeddings_not_requested"
+            return {"metadata": metadata}
+
+        texts = [query] + [doc.text for doc in vector_documents]
+        try:
+            response = await self.llm_client.embed_texts(
+                texts,
+                model_profile_id=request.model_profile_id,
+                allow_local_fallback=True,
+            )
+        except Exception as exc:
+            metadata.update({
+                "status": "failed",
+                "reason": "embedding_gateway_error",
+                "error": str(exc),
+            })
+            return {"metadata": metadata}
+
+        embeddings = response.get("embeddings") or []
+        gateway = response.get("model_gateway") or {}
+        usage = response.get("usage") or {}
+        query_vectors = embeddings[:1]
+        document_vectors = embeddings[1:]
+        dimensions = len(embeddings[0]) if embeddings else 0
+        local_fallback = bool(gateway.get("local_fallback"))
+        vector_mode = "local_embedding_fallback" if local_fallback else "model_embedding"
+        if len(document_vectors) != len(vector_documents):
+            metadata.update({
+                "status": "failed",
+                "reason": "embedding_count_mismatch",
+                "vector_mode": "hash_fallback",
+                "embedding_count": len(embeddings),
+                "expected_embedding_count": len(vector_documents) + 1,
+            })
+            return {"metadata": metadata}
+
+        metadata.update({
+            "status": gateway.get("status", "success"),
+            "vector_mode": vector_mode,
+            "operation": gateway.get("operation"),
+            "model_profile_id": usage.get("model_profile_id") or gateway.get("model_profile_id"),
+            "model_role": usage.get("model_role") or gateway.get("model_role"),
+            "model": usage.get("model") or gateway.get("model"),
+            "provider": usage.get("provider") or gateway.get("provider"),
+            "mock": bool(usage.get("mock") or gateway.get("mock")),
+            "local_fallback": local_fallback,
+            "fallback_used": bool(usage.get("fallback_used")),
+            "fallback_attempts": usage.get("fallback_attempts", 0),
+            "fallback_errors": usage.get("fallback_errors", []),
+            "dimensions": dimensions,
+            "embedding_count": len(embeddings),
+            "document_vector_count": len(document_vectors),
+            "query_vector_count": len(query_vectors),
+            "estimated_cost_usd": usage.get("estimated_cost_usd"),
+            "gateway_latency_ms": usage.get("gateway_latency_ms"),
+        })
+        return {
+            "query_vectors": query_vectors,
+            "document_vectors": document_vectors,
+            "metadata": metadata,
+        }
+
+    def _embedding_index_enabled(self, request: AgentRequest) -> bool:
+        explicit = request.parameters.get("use_model_embeddings")
+        if explicit is None:
+            explicit = request.parameters.get("useModelEmbeddings")
+        if explicit is not None:
+            return self._truthy(explicit)
+        if self._truthy(request.parameters.get("probe_model_gateway")):
+            return True
+        if not request.model_profile_id:
+            return False
+        try:
+            config = self.llm_client._select_profile_model(request.model_profile_id, "embedding")
+        except Exception:
+            return False
+        return bool(config and not config.get("mock"))
 
     async def _probe_model_gateway(
             self,
@@ -305,6 +405,7 @@ class RetrievalIndexAgent(BaseAgent):
                 "quality_evaluation": report.get("quality_evaluation", {}),
                 "citation_budget": report.get("citation_budget", {}),
                 "benchmark": report.get("benchmark", {}),
+                "vector_index": report.get("vector_index", {}),
                 "model_gateway": report.get("model_gateway", {}),
                 "top_results": report["top_results"],
             }, ensure_ascii=False, indent=2),

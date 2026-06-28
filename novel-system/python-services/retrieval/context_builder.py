@@ -495,6 +495,7 @@ class ContextBuilder:
             "cache_status": context_pack.get("cache_status", {}),
             "plan": retrieval.get("plan", {}),
             "stats": retrieval.get("stats", {}),
+            "vector_index": retrieval.get("vector_index", {}),
             "quality_evaluation": retrieval.get("quality_evaluation") or context_pack.get("quality_evaluation", {}),
             "citation_budget": context_pack.get("citation_budget", {}),
             "top_results": [

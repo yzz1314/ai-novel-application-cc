@@ -31,16 +31,42 @@ class RetrievalPlan:
 
 
 class HashVectorIndex:
-    """Tiny deterministic vector index for local/offline retrieval."""
+    """Tiny deterministic vector index with optional model embedding vectors."""
 
-    def __init__(self, documents: List[RetrievalDocument], tokenizer, dimensions: int = 96):
+    def __init__(
+            self,
+            documents: List[RetrievalDocument],
+            tokenizer,
+            dimensions: int = 96,
+            embedding_bundle: Optional[Dict[str, Any]] = None):
         self.documents = [doc for doc in documents if doc.text.strip()]
         self.tokenizer = tokenizer
-        self.dimensions = dimensions
-        self.vectors = [self._embed(doc.text) for doc in self.documents]
+        self.embedding_bundle = embedding_bundle or {}
+        self.embedding_metadata = self._normalize_embedding_metadata(self.embedding_bundle.get("metadata"))
+        provided_vectors = self._provided_vectors(self.embedding_bundle.get("document_vectors"))
+        provided_dimensions = self._dimensions(provided_vectors)
+        self.dimensions = provided_dimensions or dimensions
+        if provided_dimensions and provided_vectors and len(provided_vectors) == len(self.documents):
+            self.vectors = provided_vectors
+            self.engine = "embedding_vector"
+            self.vector_mode = str(self.embedding_metadata.get("vector_mode") or "model_embedding")
+        else:
+            self.vectors = [self._embed(doc.text) for doc in self.documents]
+            self.engine = "hash_vector"
+            self.vector_mode = "hash_fallback"
+            if provided_vectors:
+                self.embedding_metadata.setdefault("warnings", []).append(
+                    "Provided embedding vector count did not match indexed documents; hash fallback was used."
+                )
+        self.embedding_metadata.update({
+            "engine": self.engine,
+            "vector_mode": self.vector_mode,
+            "dimensions": self.dimensions,
+            "document_vector_count": len(self.vectors),
+        })
 
     def search(self, query: str, top_k: int = 16, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        query_vector = self._embed(query)
+        query_vector = self._query_vector(query)
         if not query_vector:
             return []
         results = []
@@ -56,9 +82,11 @@ class HashVectorIndex:
         output_dir.mkdir(parents=True, exist_ok=True)
         summary = {
             "updated_at": datetime.now().isoformat(),
-            "engine": "hash_vector",
+            "engine": self.engine,
+            "vector_mode": self.vector_mode,
             "dimensions": self.dimensions,
             "document_count": len(self.documents),
+            "embedding_metadata": self.embedding_metadata,
             "cache_status": cache_status or {},
             "documents": [
                 {
@@ -75,6 +103,71 @@ class HashVectorIndex:
             json.dumps(summary, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "engine": self.engine,
+            "vector_mode": self.vector_mode,
+            "dimensions": self.dimensions,
+            "document_count": len(self.documents),
+            "embedding_metadata": self.embedding_metadata,
+        }
+
+    def _query_vector(self, query: str) -> List[float]:
+        query_vectors = self._provided_vectors(self.embedding_bundle.get("query_vectors"))
+        if query_vectors:
+            query_vector = query_vectors[0]
+            if len(query_vector) == self.dimensions:
+                return query_vector
+            self.embedding_metadata.setdefault("warnings", []).append(
+                "Provided query embedding dimension did not match index dimensions; hash query vector was used."
+            )
+        return self._embed(query)
+
+    def _provided_vectors(self, value: Any) -> List[List[float]]:
+        if not isinstance(value, list):
+            return []
+        vectors: List[List[float]] = []
+        for item in value:
+            if not isinstance(item, list):
+                return []
+            try:
+                vector = [float(number) for number in item]
+            except (TypeError, ValueError):
+                return []
+            vectors.append(self._normalize_vector(vector))
+        return vectors
+
+    def _normalize_vector(self, vector: List[float]) -> List[float]:
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm <= 0:
+            return vector
+        return [value / norm for value in vector]
+
+    def _dimensions(self, vectors: List[List[float]]) -> Optional[int]:
+        if not vectors:
+            return None
+        dimensions = len(vectors[0])
+        if dimensions <= 0:
+            return None
+        if any(len(vector) != dimensions for vector in vectors):
+            self.embedding_metadata.setdefault("warnings", []).append(
+                "Embedding vectors had inconsistent dimensions; hash fallback was used."
+            )
+            return None
+        return dimensions
+
+    def _normalize_embedding_metadata(self, metadata: Any) -> Dict[str, Any]:
+        if isinstance(metadata, dict):
+            normalized = dict(metadata)
+        else:
+            normalized = {}
+        warnings = normalized.get("warnings")
+        if warnings is None:
+            normalized["warnings"] = []
+        elif not isinstance(warnings, list):
+            normalized["warnings"] = [str(warnings)]
+        return normalized
 
     def _embed(self, text: str) -> List[float]:
         vector = [0.0] * self.dimensions
@@ -117,11 +210,16 @@ class HashVectorIndex:
 
 
 class HybridRetrievalEngine:
-    def __init__(self, project_root: Path, documents: List[RetrievalDocument], graph_context: Dict[str, Any]):
+    def __init__(
+            self,
+            project_root: Path,
+            documents: List[RetrievalDocument],
+            graph_context: Dict[str, Any],
+            embedding_bundle: Optional[Dict[str, Any]] = None):
         self.project_root = project_root
         self.documents = documents
         self.keyword = KeywordRetriever(documents)
-        self.vector = HashVectorIndex(documents, self.keyword._tokenize)
+        self.vector = HashVectorIndex(documents, self.keyword._tokenize, embedding_bundle=embedding_bundle)
         self.graph_context = graph_context or {}
 
     def retrieve(self, query: str, plan: RetrievalPlan, top_k: int = 10) -> Dict[str, Any]:
@@ -155,7 +253,10 @@ class HybridRetrievalEngine:
                 "returned_count": len(reranked),
                 "quality_score": quality_evaluation.get("score"),
                 "quality_status": quality_evaluation.get("status"),
+                "vector_mode": self.vector.vector_mode,
+                "vector_engine": self.vector.engine,
             },
+            "vector_index": self.vector.summary(),
         }
 
     def evaluate_benchmark(

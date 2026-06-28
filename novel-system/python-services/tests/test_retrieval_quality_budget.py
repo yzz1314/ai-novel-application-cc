@@ -174,20 +174,30 @@ async def test_retrieval_index_report_includes_quality_and_budget(tmp_path):
     assert response.structured_output["model_gateway"]["enabled"] is True
     assert response.structured_output["model_gateway"]["embedding_probe"]["model_role"] == "embeddingModel"
     assert response.structured_output["model_gateway"]["rerank_probe"]["model_role"] == "rerankModel"
+    assert response.structured_output["vector_index"]["vector_mode"] == "local_embedding_fallback"
+    assert response.structured_output["vector_index"]["engine"] == "embedding_vector"
+    assert response.structured_output["vector_index"]["embedding_metadata"]["model_role"] == "embeddingModel"
+    assert response.structured_output["stats"]["vector_mode"] == "local_embedding_fallback"
     assert response.structured_output["benchmark"]["status"] == "skipped"
     assert "benchmark_report_path" not in response.structured_output
 
     report = json.loads((project_root / "indexes" / "retrieval_index_report.json").read_text(encoding="utf-8"))
+    vector_summary = json.loads((project_root / "indexes" / "vector" / "index_summary.json").read_text(encoding="utf-8"))
     hybrid_summary = json.loads((project_root / "indexes" / "hybrid" / "index_summary.json").read_text(encoding="utf-8"))
     assert report["quality_evaluation"]["metrics"]["returned_count"] > 0
     assert report["citation_budget"]["usage"]["selected_result_count"] > 0
     assert report["benchmark"]["status"] == "skipped"
     assert report["cache_status"]["index_fingerprint"]
+    assert report["vector_index"]["vector_mode"] == "local_embedding_fallback"
+    assert report["model_gateway"]["embedding_index"]["vector_mode"] == "local_embedding_fallback"
+    assert vector_summary["vector_mode"] == "local_embedding_fallback"
+    assert vector_summary["embedding_metadata"]["local_fallback"] is True
     assert report["model_gateway"]["embedding_probe"]["result_count"] > 0
     assert report["model_gateway"]["rerank_probe"]["result_count"] > 0
     assert hybrid_summary["quality_evaluation"]["score"] == report["quality_evaluation"]["score"]
     assert hybrid_summary["cache_status"]["index_fingerprint"] == report["cache_status"]["index_fingerprint"]
     assert hybrid_summary["model_gateway"]["enabled"] is True
+    assert hybrid_summary["vector_index"]["vector_mode"] == "local_embedding_fallback"
 
 
 @pytest.mark.asyncio

@@ -148,6 +148,8 @@ public class RetrievalArtifactDbService {
         result.put("benchmarkPassedCount", benchmarkMetric(entity, "passed_count", "latestBenchmarkPassedCount"));
         result.put("benchmarkHitRate", benchmarkMetric(entity, "hit_rate", "latestBenchmarkHitRate"));
         result.put("benchmarkMeanReciprocalRank", benchmarkMetric(entity, "mean_reciprocal_rank", "latestBenchmarkMeanReciprocalRank"));
+        result.put("vectorMode", vectorMetric(entity, "latestVectorMode"));
+        result.put("vectorEngine", vectorMetric(entity, "latestVectorEngine"));
         result.put("syncedAt", entity.getSyncedAt());
         result.put("createdAt", entity.getCreatedAt());
         result.put("updatedAt", entity.getUpdatedAt());
@@ -170,6 +172,26 @@ public class RetrievalArtifactDbService {
         metadata.put("hybridDocumentCount", documentCount(hybridSummary));
         metadata.put("contextPackCount", contextPacks.size());
         metadata.put("indexTypes", INDEX_TYPES);
+        metadata.put("latestVectorMode", firstPresent(
+            vectorSummary.get("vector_mode"),
+            valueFromMap(rebuildReport, "vector_index", "vector_mode"),
+            valueFromMap(hybridSummary, "vector_index", "vector_mode"),
+            valueFromMap(rebuildReport, "stats", "vector_mode"),
+            valueFromMap(hybridSummary, "stats", "vector_mode")
+        ));
+        metadata.put("latestVectorEngine", firstPresent(
+            vectorSummary.get("engine"),
+            valueFromMap(rebuildReport, "vector_index", "engine"),
+            valueFromMap(hybridSummary, "vector_index", "engine"),
+            valueFromMap(rebuildReport, "stats", "vector_engine"),
+            valueFromMap(hybridSummary, "stats", "vector_engine")
+        ));
+        metadata.put("latestEmbeddingIndex", firstPresent(
+            vectorSummary.get("embedding_metadata"),
+            valueFromMap(rebuildReport, "vector_index", "embedding_metadata"),
+            valueFromMap(hybridSummary, "vector_index", "embedding_metadata"),
+            valueFromMap(rebuildReport, "model_gateway", "embedding_index")
+        ));
         metadata.put("latestQualityEvaluation", firstPresent(
             hybridSummary.get("quality_evaluation"),
             rebuildReport.get("quality_evaluation")
@@ -355,6 +377,13 @@ public class RetrievalArtifactDbService {
         if (entity.getBenchmarkReport() != null && entity.getBenchmarkReport().get(reportKey) != null) {
             return entity.getBenchmarkReport().get(reportKey);
         }
+        if (entity.getRetrievalMetadata() != null) {
+            return entity.getRetrievalMetadata().get(metadataKey);
+        }
+        return null;
+    }
+
+    private Object vectorMetric(RetrievalArtifact entity, String metadataKey) {
         if (entity.getRetrievalMetadata() != null) {
             return entity.getRetrievalMetadata().get(metadataKey);
         }

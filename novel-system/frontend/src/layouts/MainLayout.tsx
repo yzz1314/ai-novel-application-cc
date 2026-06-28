@@ -5,6 +5,7 @@ import {
   ApiOutlined,
   DashboardOutlined,
   ProjectOutlined,
+  SafetyCertificateOutlined,
   ScheduleOutlined,
 } from '@ant-design/icons';
 
@@ -35,6 +36,11 @@ const MainLayout: React.FC = () => {
       key: '/models',
       icon: <ApiOutlined />,
       label: '模型配置',
+    },
+    {
+      key: '/access',
+      icon: <SafetyCertificateOutlined />,
+      label: '访问治理',
     },
   ];
 

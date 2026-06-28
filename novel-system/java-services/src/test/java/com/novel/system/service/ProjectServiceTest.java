@@ -20,6 +20,7 @@ import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -79,12 +80,13 @@ class ProjectServiceTest {
         assertThat(response.getGenre()).isEqualTo("东方玄幻");
         assertThat(response.getSampleGroupType()).isEqualTo("SAME_GENRE");
         verify(projectAccessService).grantProjectAccess(
-            "project_genre",
-            "creator-1",
-            "Creator",
-            "org-1",
-            "owner",
-            "Creator"
+            eq("project_genre"),
+            eq("creator-1"),
+            eq("Creator"),
+            eq("org-1"),
+            eq("owner"),
+            eq("Creator"),
+            any(RequestAccessContext.class)
         );
     }
 }

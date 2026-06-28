@@ -20,6 +20,7 @@ public class ProjectAccessService {
     private static final String REVOKED = "REVOKED";
 
     private final ProjectMemberRepository projectMemberRepository;
+    private final AccessGovernanceService accessGovernanceService;
 
     @Transactional
     public ProjectMember grantProjectAccess(
@@ -29,6 +30,18 @@ public class ProjectAccessService {
             String organizationId,
             String role,
             String grantedBy) {
+        return grantProjectAccess(projectId, userId, actor, organizationId, role, grantedBy, null);
+    }
+
+    @Transactional
+    public ProjectMember grantProjectAccess(
+            String projectId,
+            String userId,
+            String actor,
+            String organizationId,
+            String role,
+            String grantedBy,
+            RequestAccessContext context) {
         String normalizedUser = normalizeUserId(userId);
         ProjectMember member = projectMemberRepository
             .findById(memberId(projectId, normalizedUser))
@@ -41,17 +54,46 @@ public class ProjectAccessService {
         member.setRole(RequestAccessContext.normalizeRole(role));
         member.setGrantedBy(blankToNull(grantedBy));
         member.setStatus(ACTIVE);
-        return projectMemberRepository.save(member);
+        ProjectMember saved = projectMemberRepository.save(member);
+        accessGovernanceService.recordAudit(
+            "project_member_granted",
+            context,
+            saved.getOrganizationId(),
+            saved.getProjectId(),
+            saved.getUserId(),
+            saved.getOrganizationId(),
+            "grant_project_member",
+            "success",
+            "role=" + saved.getRole() + ", grantedBy=" + blankToNull(grantedBy)
+        );
+        return saved;
     }
 
     @Transactional
     public ProjectMember revokeProjectAccess(String projectId, String userId, String revokedBy) {
+        return revokeProjectAccess(projectId, userId, revokedBy, null);
+    }
+
+    @Transactional
+    public ProjectMember revokeProjectAccess(String projectId, String userId, String revokedBy, RequestAccessContext context) {
         ProjectMember member = projectMemberRepository
             .findByProjectIdAndUserIdAndStatus(projectId, normalizeUserId(userId), ACTIVE)
             .orElseThrow(() -> new IllegalArgumentException("Project member does not exist: " + userId));
         member.setStatus(REVOKED);
         member.setGrantedBy(blankToNull(revokedBy));
-        return projectMemberRepository.save(member);
+        ProjectMember saved = projectMemberRepository.save(member);
+        accessGovernanceService.recordAudit(
+            "project_member_revoked",
+            context,
+            saved.getOrganizationId(),
+            saved.getProjectId(),
+            saved.getUserId(),
+            saved.getOrganizationId(),
+            "revoke_project_member",
+            "success",
+            "revokedBy=" + blankToNull(revokedBy)
+        );
+        return saved;
     }
 
     public List<Map<String, Object>> listProjectMembers(String projectId) {

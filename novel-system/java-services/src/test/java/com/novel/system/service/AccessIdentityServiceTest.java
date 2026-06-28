@@ -23,6 +23,7 @@ class AccessIdentityServiceTest {
     private AccessUserRepository userRepository;
     private AccessOrganizationRepository organizationRepository;
     private ProjectAccessService projectAccessService;
+    private AccessGovernanceService accessGovernanceService;
     private AccessIdentityService service;
 
     @BeforeEach
@@ -30,7 +31,8 @@ class AccessIdentityServiceTest {
         userRepository = mock(AccessUserRepository.class);
         organizationRepository = mock(AccessOrganizationRepository.class);
         projectAccessService = mock(ProjectAccessService.class);
-        service = new AccessIdentityService(userRepository, organizationRepository, projectAccessService);
+        accessGovernanceService = mock(AccessGovernanceService.class);
+        service = new AccessIdentityService(userRepository, organizationRepository, projectAccessService, accessGovernanceService);
     }
 
     @Test
@@ -42,6 +44,7 @@ class AccessIdentityServiceTest {
 
         verify(organizationRepository).save(orgWith("org-1"));
         verify(userRepository).save(userWith("user-1", "Alice", "org-1"));
+        verify(accessGovernanceService).ensureOrganizationMembership(context());
     }
 
     @Test
@@ -61,6 +64,10 @@ class AccessIdentityServiceTest {
             "projectId", "project-a",
             "role", "editor"
         )));
+        when(accessGovernanceService.listUserOrganizationMemberships("user-1")).thenReturn(List.of(Map.of(
+            "organizationId", "org-1",
+            "role", "admin"
+        )));
 
         Map<String, Object> response = service.currentIdentity(context());
 
@@ -69,6 +76,7 @@ class AccessIdentityServiceTest {
             .containsEntry("userId", "user-1")
             .containsEntry("organizationId", "org-1");
         assertThat(response.get("projectMemberships")).asList().hasSize(1);
+        assertThat(response.get("organizationMemberships")).asList().hasSize(1);
     }
 
     private RequestAccessContext context() {

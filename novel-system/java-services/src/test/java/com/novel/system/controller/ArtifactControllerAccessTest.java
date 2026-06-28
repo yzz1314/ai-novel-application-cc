@@ -86,8 +86,9 @@ class ArtifactControllerAccessTest {
         AccessControlService accessControlService = new AccessControlService(projectAccessService);
         ReflectionTestUtils.setField(accessControlService, "enforceAccess", enforceAccess);
         ReflectionTestUtils.setField(accessControlService, "requireAuthentication", requireAuthentication);
+        AccessIdentityService accessIdentityService = mock(AccessIdentityService.class);
         return standaloneSetup(controller)
-            .addInterceptors(new AccessControlInterceptor(accessControlService, mock(AccessIdentityService.class)))
+            .addInterceptors(new AccessControlInterceptor(accessControlService, accessIdentityService))
             .setControllerAdvice(new GlobalExceptionHandler())
             .build();
     }

@@ -11,6 +11,7 @@ import ChapterWriter from './pages/ChapterWriter'
 import MemoryView from './pages/MemoryView'
 import GraphView from './pages/GraphView'
 import ModelProfiles from './pages/ModelProfiles'
+import AccessGovernance from './pages/AccessGovernance'
 import RetrievalView from './pages/RetrievalView'
 import ArtifactView from './pages/ArtifactView'
 import TaskCenter from './pages/TaskCenter'
@@ -27,6 +28,7 @@ function App() {
             <Route path="projects" element={<ProjectList />} />
             <Route path="tasks" element={<TaskCenter />} />
             <Route path="models" element={<ModelProfiles />} />
+            <Route path="access" element={<AccessGovernance />} />
             <Route path="projects/:projectId" element={<ProjectDetail />} />
             <Route path="projects/:projectId/samples" element={<SampleManagement />} />
             <Route path="projects/:projectId/outline" element={<OutlineEditor />} />

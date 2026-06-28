@@ -75,7 +75,8 @@ public class ProjectService {
             context.actor(),
             context.organizationId(),
             "owner",
-            context.actor()
+            context.actor(),
+            context
         );
     }
 

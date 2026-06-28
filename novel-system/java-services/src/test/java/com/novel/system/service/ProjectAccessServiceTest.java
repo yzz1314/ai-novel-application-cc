@@ -11,17 +11,20 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ProjectAccessServiceTest {
 
     private ProjectMemberRepository repository;
+    private AccessGovernanceService accessGovernanceService;
     private ProjectAccessService service;
 
     @BeforeEach
     void setUp() {
         repository = mock(ProjectMemberRepository.class);
-        service = new ProjectAccessService(repository);
+        accessGovernanceService = mock(AccessGovernanceService.class);
+        service = new ProjectAccessService(repository, accessGovernanceService);
     }
 
     @Test
@@ -42,6 +45,17 @@ class ProjectAccessServiceTest {
         assertThat(member.getUserId()).isEqualTo("user-1");
         assertThat(member.getRole()).isEqualTo("artifact_manager");
         assertThat(member.getStatus()).isEqualTo("ACTIVE");
+        verify(accessGovernanceService).recordAudit(
+            org.mockito.ArgumentMatchers.eq("project_member_granted"),
+            org.mockito.ArgumentMatchers.isNull(),
+            org.mockito.ArgumentMatchers.eq("org-1"),
+            org.mockito.ArgumentMatchers.eq("project-a"),
+            org.mockito.ArgumentMatchers.eq("user-1"),
+            org.mockito.ArgumentMatchers.eq("org-1"),
+            org.mockito.ArgumentMatchers.eq("grant_project_member"),
+            org.mockito.ArgumentMatchers.eq("success"),
+            org.mockito.ArgumentMatchers.contains("artifact_manager")
+        );
     }
 
     @Test

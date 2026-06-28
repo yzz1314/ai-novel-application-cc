@@ -22,6 +22,7 @@ public class AccessIdentityService {
     private final AccessUserRepository accessUserRepository;
     private final AccessOrganizationRepository accessOrganizationRepository;
     private final ProjectAccessService projectAccessService;
+    private final AccessGovernanceService accessGovernanceService;
 
     @Transactional
     public void recordIdentity(RequestAccessContext context) {
@@ -43,6 +44,7 @@ public class AccessIdentityService {
         user.setStatus(ACTIVE);
         user.setLastSeenAt(LocalDateTime.now());
         accessUserRepository.save(user);
+        accessGovernanceService.ensureOrganizationMembership(context);
     }
 
     public Map<String, Object> currentIdentity(RequestAccessContext context) {
@@ -55,6 +57,7 @@ public class AccessIdentityService {
         response.put("projectIds", context.projectIds());
         response.put("user", accessUserRepository.findById(context.userId()).map(this::userResponse).orElse(null));
         response.put("organization", accessOrganizationRepository.findById(context.organizationId()).map(this::organizationResponse).orElse(null));
+        response.put("organizationMemberships", accessGovernanceService.listUserOrganizationMemberships(context.userId()));
         response.put("projectMemberships", projectAccessService.listUserMemberships(context.userId()));
         return response;
     }

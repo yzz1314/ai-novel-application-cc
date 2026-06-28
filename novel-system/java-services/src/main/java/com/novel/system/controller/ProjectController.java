@@ -87,6 +87,7 @@ public class ProjectController {
         String actor = stringValue(request == null ? null : request.get("actor"), userId);
         String organizationId = stringValue(request == null ? null : request.get("organizationId"), RequestAccessContextHolder.current().organizationId());
         String role = stringValue(request == null ? null : request.get("role"), "viewer");
+        var context = RequestAccessContextHolder.current();
         return ResponseEntity.status(HttpStatus.CREATED).body(projectAccessService.toResponse(
             projectAccessService.grantProjectAccess(
                 projectId,
@@ -94,7 +95,8 @@ public class ProjectController {
                 actor,
                 organizationId,
                 role,
-                RequestAccessContextHolder.current().actor()
+                context.actor(),
+                context
             )
         ));
     }
@@ -104,8 +106,9 @@ public class ProjectController {
             @PathVariable String projectId,
             @PathVariable String userId) {
         projectService.getProject(projectId);
+        var context = RequestAccessContextHolder.current();
         return ResponseEntity.ok(projectAccessService.toResponse(
-            projectAccessService.revokeProjectAccess(projectId, userId, RequestAccessContextHolder.current().actor())
+            projectAccessService.revokeProjectAccess(projectId, userId, context.actor(), context)
         ));
     }
 

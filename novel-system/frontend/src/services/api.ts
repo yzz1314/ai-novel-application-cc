@@ -44,6 +44,9 @@ export const projectApi = {
   getDetail: (projectId: string) => request(api.get(`/projects/${projectId}`)),
   update: (projectId: string, data: any) => request(api.put(`/projects/${projectId}`, data)),
   delete: (projectId: string) => request(api.delete(`/projects/${projectId}`)),
+  getMembers: (projectId: string) => request<any[]>(api.get(`/projects/${projectId}/members`)),
+  grantMember: (projectId: string, data: any) => request(api.post(`/projects/${projectId}/members`, data || {})),
+  revokeMember: (projectId: string, userId: string) => request(api.delete(`/projects/${projectId}/members/${userId}`)),
 }
 
 export const dashboardApi = {
@@ -71,6 +74,18 @@ export const modelProfileApi = {
   delete: (profileId: string) => request(api.delete(`/model-profiles/${profileId}`)),
   setDefault: (profileId: string) => request(api.post(`/model-profiles/${profileId}/default`)),
   test: (profileId: string, data?: any) => request(api.post(`/model-profiles/${profileId}/test`, data || {})),
+}
+
+export const accessApi = {
+  getMe: () => request(api.get('/access/me')),
+  getOrganizations: () => request<any[]>(api.get('/access/organizations')),
+  getOrganizationMembers: (organizationId: string) =>
+    request<any[]>(api.get(`/access/organizations/${organizationId}/members`)),
+  grantOrganizationMember: (organizationId: string, data: any) =>
+    request(api.post(`/access/organizations/${organizationId}/members`, data || {})),
+  revokeOrganizationMember: (organizationId: string, userId: string) =>
+    request(api.delete(`/access/organizations/${organizationId}/members/${userId}`)),
+  getAudit: (params?: any) => request(api.get('/access/audit', { params })),
 }
 
 export const sampleApi = {

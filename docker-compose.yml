@@ -53,13 +53,17 @@ services:
       - ./novel-system/python-services/.env
     environment:
       MOCK_LLM: ${MOCK_LLM:-false}
+      PGVECTOR_DSN: postgresql://novel_user:novel_pass@postgres:5432/novel_system
     volumes:
       - workspace-data:/workspace
       - ./novel-system/python-services:/app
     networks:
       - novel-network
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

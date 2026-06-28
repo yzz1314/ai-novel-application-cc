@@ -305,6 +305,144 @@ def test_hash_vector_index_falls_back_when_lancedb_unavailable(tmp_path, monkeyp
     assert index.search("jade", top_k=1)
 
 
+def test_hash_vector_index_falls_back_when_pgvector_dsn_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "PGVECTOR_DSN", "")
+    monkeypatch.delenv("PGVECTOR_DSN", raising=False)
+    monkeypatch.delenv("PGVECTOR_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    documents = [
+        SimpleNamespace(
+            doc_id="doc:a",
+            source_type="memory",
+            path="memory/a.md",
+            title="A",
+            text="jade token trial",
+            metadata={},
+        )
+    ]
+
+    index = HashVectorIndex(
+        documents,
+        tokenizer=lambda text: str(text).lower().split(),
+        embedding_bundle={
+            "query_vectors": [[1.0, 0.0]],
+            "document_vectors": [[1.0, 0.0]],
+            "metadata": {"vector_mode": "model_embedding"},
+        },
+        vector_backend="pgvector",
+        project_root=tmp_path,
+    )
+
+    summary = index.summary()
+    assert summary["vector_backend"] == "memory"
+    assert summary["backend_status"]["status"] == "fallback"
+    assert summary["backend_status"]["reason"] == "pgvector_dsn_missing"
+    assert summary["embedding_metadata"]["vector_backend"] == "memory"
+    assert index.search("jade", top_k=1)
+
+
+def test_hash_vector_index_uses_pgvector_backend_when_available(tmp_path, monkeypatch):
+    stored_doc_ids = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params=None):
+            normalized = " ".join(str(query).split()).lower()
+            if normalized.startswith("insert into retrieval_vectors"):
+                stored_doc_ids.append(params[2])
+
+        def fetchall(self):
+            return [(doc_id, 0.95 - index * 0.1) for index, doc_id in enumerate(stored_doc_ids)]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+    fake_module = types.SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection())
+    monkeypatch.setitem(sys.modules, "psycopg", fake_module)
+    monkeypatch.setattr(settings, "PGVECTOR_DSN", "postgresql://user:pass@localhost:5432/novel")
+    documents = [
+        SimpleNamespace(
+            doc_id="doc:a",
+            source_type="memory",
+            path="memory/a.md",
+            title="A",
+            text="jade token trial",
+            metadata={},
+        ),
+        SimpleNamespace(
+            doc_id="doc:b",
+            source_type="skill",
+            path="skills/b.md",
+            title="B",
+            text="pressure hook clue",
+            metadata={},
+        ),
+    ]
+
+    index = HashVectorIndex(
+        documents,
+        tokenizer=lambda text: str(text).lower().split(),
+        embedding_bundle={
+            "query_vectors": [[1.0, 0.0]],
+            "document_vectors": [[1.0, 0.0], [0.2, 0.8]],
+            "metadata": {"vector_mode": "model_embedding"},
+        },
+        vector_backend="pgvector",
+        project_root=tmp_path,
+    )
+
+    results = index.search("jade", top_k=2)
+    summary = index.summary()
+
+    assert stored_doc_ids == ["doc:a", "doc:b"]
+    assert results[0]["doc_id"] == "doc:a"
+    assert summary["engine"] == "embedding_vector"
+    assert summary["vector_backend"] == "pgvector"
+    assert summary["backend_status"]["status"] == "active"
+    assert summary["backend_status"]["table"] == "retrieval_vectors"
+    assert summary["embedding_metadata"]["vector_backend"] == "pgvector"
+
+
+def test_retrieval_config_accepts_pgvector_backend(tmp_path):
+    project_id = "proj_retrieval_pgvector_config"
+    project_root = write_project_documents(tmp_path, project_id)
+    (project_root / "indexes").mkdir(parents=True, exist_ok=True)
+    (project_root / "indexes" / "retrieval_config.json").write_text(
+        json.dumps({"vector_backend": "pgvector"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    original_base_path = settings.PROJECT_BASE_PATH
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    try:
+        builder = ContextBuilder(project_id)
+        agent = RetrievalIndexAgent()
+        assert builder._vector_backend(builder._retrieval_config()) == "pgvector"
+        assert agent._vector_backend(
+            AgentRequest(
+                task_id="task_pgvector_config",
+                project_id=project_id,
+                task_type="retrieval_index",
+                parameters={},
+            ),
+            project_root,
+        ) == "pgvector"
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+
+
 @pytest.mark.asyncio
 async def test_retrieval_index_writes_benchmark_report(tmp_path):
     project_id = "proj_retrieval_benchmark"

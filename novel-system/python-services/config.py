@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gpt-4")
     DEFAULT_EMBEDDING_MODEL: str = os.getenv("DEFAULT_EMBEDDING_MODEL", "text-embedding-ada-002")
     MOCK_LLM: bool = os.getenv("MOCK_LLM", "false").lower() in ("1", "true", "yes", "on")
+
+    # Vector store
+    PGVECTOR_DSN: str = os.getenv(
+        "PGVECTOR_DSN",
+        os.getenv("PGVECTOR_DATABASE_URL", os.getenv("DATABASE_URL", ""))
+    )
     
     # 分块配置
     MAX_CHUNK_SIZE: int = int(os.getenv("MAX_CHUNK_SIZE", "2500"))

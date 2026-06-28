@@ -318,7 +318,7 @@ const RetrievalView: React.FC = () => {
         <Space size={4} wrap>
           <Tag color="geekblue">{record.vector_mode}</Tag>
           {record.vector_backend ? (
-            <Tag color={record.vector_backend === 'lancedb' ? 'green' : 'default'}>{record.vector_backend}</Tag>
+            <Tag color={['lancedb', 'pgvector'].includes(record.vector_backend) ? 'green' : 'default'}>{record.vector_backend}</Tag>
           ) : null}
         </Space>
       ) : '-',
@@ -329,7 +329,7 @@ const RetrievalView: React.FC = () => {
       render: (_: any, record: any) => {
         const status = record.backend_status || record.embedding_metadata?.backend_status
         return status?.status ? (
-          <Tag color={status.active === 'lancedb' ? 'success' : status.status === 'fallback' ? 'warning' : 'default'}>
+          <Tag color={['lancedb', 'pgvector'].includes(status.active) ? 'success' : status.status === 'fallback' ? 'warning' : 'default'}>
             {status.status}
           </Tag>
         ) : '-'
@@ -663,6 +663,7 @@ const RetrievalView: React.FC = () => {
                 { value: 'auto', label: 'Auto' },
                 { value: 'memory', label: 'Memory' },
                 { value: 'lancedb', label: 'LanceDB' },
+                { value: 'pgvector', label: 'pgvector' },
               ]}
             />
           </Form.Item>

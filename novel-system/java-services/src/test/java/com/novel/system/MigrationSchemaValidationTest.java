@@ -48,6 +48,7 @@ class MigrationSchemaValidationTest {
                 'memory_artifacts',
                 'graph_artifacts',
                 'retrieval_artifacts',
+                'retrieval_vectors',
                 'dashboard_alert_states',
                 'dashboard_metric_snapshots',
                 'dashboard_alert_notifications',
@@ -58,6 +59,6 @@ class MigrationSchemaValidationTest {
         );
 
         assertThat(appliedMigrations).isNotNull().isGreaterThanOrEqualTo(1);
-        assertThat(managedTables).isEqualTo(23);
+        assertThat(managedTables).isEqualTo(24);
     }
 }

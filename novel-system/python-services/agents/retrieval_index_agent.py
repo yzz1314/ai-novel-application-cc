@@ -349,6 +349,8 @@ class RetrievalIndexAgent(BaseAgent):
         text = str(value or "auto").strip().lower()
         if text in {"lancedb", "lance", "lance_db"}:
             return "lancedb"
+        if text in {"pgvector", "postgres", "postgresql", "postgres_vector", "pg_vector"}:
+            return "pgvector"
         if text in {"memory", "local", "hash", "hash_vector", "in_memory"}:
             return "memory"
         return "auto"

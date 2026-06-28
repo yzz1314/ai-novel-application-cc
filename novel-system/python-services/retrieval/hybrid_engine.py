@@ -8,6 +8,7 @@ scores so the system has inspectable retrieval plans and artifacts today.
 import hashlib
 import json
 import math
+import os
 import statistics
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
@@ -15,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from config import settings
 from .context_builder import KeywordRetriever, RetrievalDocument
 
 
@@ -82,7 +84,9 @@ class HashVectorIndex:
             "status": "memory",
             "reason": "memory_backend_selected",
         }
-        if self._should_use_lancedb():
+        if self._should_use_pgvector():
+            self._activate_pgvector_backend()
+        elif self._should_use_lancedb():
             self._activate_lancedb_backend()
         self.embedding_metadata["vector_backend"] = self.vector_backend
         self.embedding_metadata["backend_status"] = self.backend_status
@@ -91,6 +95,22 @@ class HashVectorIndex:
         query_vector = self._query_vector(query)
         if not query_vector:
             return []
+        if self.vector_backend == "pgvector":
+            try:
+                return self._search_pgvector(query_vector, top_k=top_k, filters=filters)
+            except Exception as exc:
+                self.vector_backend = "memory"
+                self.backend_status.update({
+                    "active": "memory",
+                    "status": "search_fallback",
+                    "reason": "pgvector_search_error",
+                    "error": str(exc),
+                })
+                self.embedding_metadata["vector_backend"] = self.vector_backend
+                self.embedding_metadata["backend_status"] = self.backend_status
+                self.embedding_metadata.setdefault("warnings", []).append(
+                    f"pgvector search failed; memory vector fallback was used: {exc}"
+                )
         if self.vector_backend == "lancedb":
             try:
                 return self._search_lancedb(query_vector, top_k=top_k, filters=filters)
@@ -162,9 +182,24 @@ class HashVectorIndex:
         text = str(value or "auto").strip().lower()
         if text in {"lancedb", "lance", "lance_db"}:
             return "lancedb"
+        if text in {"pgvector", "postgres", "postgresql", "postgres_vector", "pg_vector"}:
+            return "pgvector"
         if text in {"memory", "local", "hash", "hash_vector", "in_memory"}:
             return "memory"
         return "auto"
+
+    def _should_use_pgvector(self) -> bool:
+        if not self.documents or not self.vectors:
+            self.backend_status = {
+                "requested": self.requested_backend,
+                "active": "memory",
+                "status": "skipped",
+                "reason": "no_vectors_to_index",
+            }
+            return False
+        if self.requested_backend == "pgvector":
+            return True
+        return self.requested_backend == "auto" and self.engine == "embedding_vector" and bool(self._pgvector_dsn())
 
     def _should_use_lancedb(self) -> bool:
         if not self.documents or not self.vectors:
@@ -177,9 +212,116 @@ class HashVectorIndex:
             return False
         if self.requested_backend == "memory":
             return False
+        if self.requested_backend == "pgvector":
+            return False
         if self.requested_backend == "lancedb":
             return True
         return self.engine == "embedding_vector"
+
+    def _activate_pgvector_backend(self):
+        dsn = self._pgvector_dsn()
+        if not dsn:
+            self.vector_backend = "memory"
+            self.backend_status = {
+                "requested": self.requested_backend,
+                "active": "memory",
+                "status": "fallback",
+                "reason": "pgvector_dsn_missing",
+            }
+            self.embedding_metadata.setdefault("warnings", []).append(
+                "pgvector backend requested but PGVECTOR_DSN/DATABASE_URL was not configured; memory vector fallback was used."
+            )
+            return
+        try:
+            import psycopg  # type: ignore
+            project_id = self._project_id()
+            rows = self._pgvector_rows()
+            with psycopg.connect(dsn, autocommit=True) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS retrieval_vectors (
+                            id varchar(220) PRIMARY KEY,
+                            project_id varchar(64) NOT NULL,
+                            doc_id varchar(160) NOT NULL,
+                            source_type varchar(80),
+                            path varchar(700),
+                            title varchar(500),
+                            snippet text,
+                            metadata jsonb,
+                            dimensions integer,
+                            embedding vector NOT NULL,
+                            updated_at timestamp NOT NULL DEFAULT now(),
+                            CONSTRAINT uk_retrieval_vectors_project_doc UNIQUE (project_id, doc_id)
+                        )
+                    """)
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_retrieval_vectors_project_id ON retrieval_vectors(project_id)"
+                    )
+                    cursor.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_retrieval_vectors_source_type ON retrieval_vectors(source_type)"
+                    )
+                    cursor.execute("DELETE FROM retrieval_vectors WHERE project_id = %s", (project_id,))
+                    for row in rows:
+                        cursor.execute("""
+                            INSERT INTO retrieval_vectors (
+                                id,
+                                project_id,
+                                doc_id,
+                                source_type,
+                                path,
+                                title,
+                                snippet,
+                                metadata,
+                                dimensions,
+                                embedding,
+                                updated_at
+                            ) VALUES (
+                                %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::vector, now()
+                            )
+                            ON CONFLICT (project_id, doc_id) DO UPDATE SET
+                                source_type = EXCLUDED.source_type,
+                                path = EXCLUDED.path,
+                                title = EXCLUDED.title,
+                                snippet = EXCLUDED.snippet,
+                                metadata = EXCLUDED.metadata,
+                                dimensions = EXCLUDED.dimensions,
+                                embedding = EXCLUDED.embedding,
+                                updated_at = now()
+                        """, (
+                            row["id"],
+                            row["project_id"],
+                            row["doc_id"],
+                            row["source_type"],
+                            row["path"],
+                            row["title"],
+                            row["snippet"],
+                            row["metadata_json"],
+                            row["dimensions"],
+                            row["embedding_literal"],
+                        ))
+            self.vector_backend = "pgvector"
+            self.backend_status = {
+                "requested": self.requested_backend,
+                "active": "pgvector",
+                "status": "active",
+                "table": "retrieval_vectors",
+                "project_id": project_id,
+                "document_count": len(rows),
+                "dimensions": self.dimensions,
+            }
+        except Exception as exc:
+            self.vector_backend = "memory"
+            self.backend_status = {
+                "requested": self.requested_backend,
+                "active": "memory",
+                "status": "fallback",
+                "reason": "pgvector_unavailable",
+                "error": str(exc),
+            }
+            self.embedding_metadata.setdefault("warnings", []).append(
+                f"pgvector backend unavailable; memory vector fallback was used: {exc}"
+            )
 
     def _activate_lancedb_backend(self):
         if self.project_root is None:
@@ -243,6 +385,24 @@ class HashVectorIndex:
             })
         return rows
 
+    def _pgvector_rows(self) -> List[Dict[str, Any]]:
+        project_id = self._project_id()
+        rows = []
+        for doc, vector in zip(self.documents, self.vectors):
+            rows.append({
+                "id": self._pgvector_row_id(project_id, doc.doc_id),
+                "project_id": project_id,
+                "doc_id": doc.doc_id,
+                "source_type": doc.source_type,
+                "path": doc.path,
+                "title": doc.title,
+                "snippet": doc.text[:240] + ("..." if len(doc.text) > 240 else ""),
+                "metadata_json": json.dumps(doc.metadata or {}, ensure_ascii=False),
+                "dimensions": len(vector),
+                "embedding_literal": self._vector_literal(vector),
+            })
+        return rows
+
     def _search_lancedb(self, query_vector: List[float], top_k: int, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         limit = max(top_k * 4, top_k)
         raw_results = self.lancedb_table.search(query_vector).limit(limit).to_list()
@@ -267,6 +427,56 @@ class HashVectorIndex:
         if isinstance(row.get("score"), (int, float)):
             return float(row["score"])
         return 0.0
+
+    def _search_pgvector(self, query_vector: List[float], top_k: int, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        dsn = self._pgvector_dsn()
+        if not dsn:
+            raise RuntimeError("PGVECTOR_DSN/DATABASE_URL is not configured")
+        import psycopg  # type: ignore
+        project_id = self._project_id()
+        query_literal = self._vector_literal(query_vector)
+        limit = max(top_k * 4, top_k)
+        with psycopg.connect(dsn, autocommit=True) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    SELECT doc_id, 1 - (embedding <=> %s::vector) AS score
+                    FROM retrieval_vectors
+                    WHERE project_id = %s
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                """, (query_literal, project_id, query_literal, limit))
+                raw_results = cursor.fetchall()
+        results: List[Dict[str, Any]] = []
+        for doc_id, score in raw_results:
+            doc = self.documents_by_id.get(str(doc_id))
+            if doc is None:
+                continue
+            if filters and not self._matches_filters(doc, filters):
+                continue
+            results.append(self._result(doc, float(score or 0), "vector"))
+            if len(results) >= top_k:
+                break
+        return results
+
+    def _pgvector_dsn(self) -> str:
+        return str(
+            getattr(settings, "PGVECTOR_DSN", "")
+            or os.getenv("PGVECTOR_DSN")
+            or os.getenv("PGVECTOR_DATABASE_URL")
+            or os.getenv("DATABASE_URL")
+            or ""
+        ).strip()
+
+    def _project_id(self) -> str:
+        return self.project_root.name if self.project_root is not None else "default"
+
+    def _pgvector_row_id(self, project_id: str, doc_id: str) -> str:
+        digest = hashlib.sha1(f"{project_id}:{doc_id}".encode("utf-8")).hexdigest()[:24]
+        safe_doc_id = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in doc_id)[:80]
+        return f"{project_id}:{safe_doc_id}:{digest}"[:220]
+
+    def _vector_literal(self, vector: List[float]) -> str:
+        return "[" + ",".join(f"{float(value):.8f}" for value in vector) + "]"
 
     def _query_vector(self, query: str) -> List[float]:
         query_vectors = self._provided_vectors(self.embedding_bundle.get("query_vectors"))

@@ -16,6 +16,7 @@ langchain-core==0.1.53
 
 # Vector Store
 lancedb==0.4.3
+psycopg[binary]==3.1.18
 sentence-transformers==2.3.1
 
 # Graph

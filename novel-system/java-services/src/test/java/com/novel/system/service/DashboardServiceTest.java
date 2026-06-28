@@ -26,7 +26,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.core.env.Environment;
+import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
 
 import java.time.LocalDateTime;
 import java.util.Optional;
@@ -361,8 +363,9 @@ class DashboardServiceTest {
     @SuppressWarnings("unchecked")
     void getAlertNotificationsReturnsRecentNotificationSummary() {
         DashboardAlertNotification notification = notification("notice_1", "failed_tasks", "ESCALATE", "READY");
-        when(dashboardAlertNotificationRepository.findAllByOrderByLastSeenAtDesc(any(Pageable.class)))
-            .thenReturn(List.of(notification));
+        when(dashboardAlertNotificationRepository.findAll(any(Specification.class), any(Pageable.class)))
+            .thenReturn(new PageImpl<>(List.of(notification)));
+        when(dashboardAlertNotificationRepository.count(any(Specification.class))).thenReturn(1L);
         when(environment.getProperty("dashboard.alerts.webhook-url")).thenReturn("https://example.invalid/hook");
 
         Map<String, Object> response = dashboardService.getAlertNotifications(500);
@@ -382,6 +385,43 @@ class DashboardServiceTest {
             });
         Map<String, Object> channels = (Map<String, Object>) response.get("channels");
         assertThat((Map<String, Object>) channels.get("webhook")).containsEntry("configured", true);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getAlertNotificationsAppliesDeliveryHistoryFilters() {
+        DashboardAlertNotification notification = notification("notice_1", "failed_tasks", "ESCALATE", "READY");
+        notification.setDeliveryStatus("FAILED");
+        when(dashboardAlertNotificationRepository.findAll(any(Specification.class), any(Pageable.class)))
+            .thenReturn(new PageImpl<>(List.of(notification)));
+        when(dashboardAlertNotificationRepository.count(any(Specification.class))).thenReturn(7L);
+
+        Map<String, Object> response = dashboardService.getAlertNotifications(20, Map.of(
+            "deliveryStatus", "FAILED",
+            "escalationLevel", "ESCALATE",
+            "severity", "critical",
+            "status", "READY",
+            "alertId", "failed",
+            "since", "2026-06-28T00:00:00",
+            "until", "2026-06-28"
+        ));
+
+        Map<String, Object> filters = (Map<String, Object>) response.get("filters");
+        assertThat(filters)
+            .containsEntry("deliveryStatus", "FAILED")
+            .containsEntry("escalationLevel", "ESCALATE")
+            .containsEntry("severity", "critical")
+            .containsEntry("status", "READY")
+            .containsEntry("alertId", "failed")
+            .containsEntry("since", "2026-06-28T00:00")
+            .containsEntry("until", "2026-06-28T00:00")
+            .containsEntry("active", true);
+        assertThat((Map<String, Object>) response.get("summary"))
+            .containsEntry("matchedTotal", 7L)
+            .containsEntry("deliveryFailed", 1L);
+        assertThat((List<Map<String, Object>>) response.get("notifications"))
+            .singleElement()
+            .satisfies(item -> assertThat(item).containsEntry("deliveryStatus", "FAILED"));
     }
 
     @Test

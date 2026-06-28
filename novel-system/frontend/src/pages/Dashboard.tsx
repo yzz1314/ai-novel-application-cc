@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Col,
+  DatePicker,
   Empty,
   Form,
   Input,
@@ -17,6 +18,7 @@ import {
   Table,
   Tag,
   Typography,
+  Select,
 } from 'antd'
 import {
   BarChartOutlined,
@@ -104,6 +106,8 @@ const subscribersFromText = (value?: string, group = 'ops') => parseCsv(value).m
   channels: ['dashboard', 'email'],
 }))
 
+const dateString = (value: string | string[]) => Array.isArray(value) ? value[0] : value
+
 const trendValue = (item: any, key: string) => {
   const value = Number(item?.[key] || 0)
   return Number.isFinite(value) ? value : 0
@@ -139,6 +143,7 @@ const Dashboard: React.FC = () => {
   const [alertNotifications, setAlertNotifications] = useState<any>(null)
   const [policyModalOpen, setPolicyModalOpen] = useState(false)
   const [savingPolicy, setSavingPolicy] = useState(false)
+  const [notificationFilters, setNotificationFilters] = useState<any>({})
   const [policyForm] = Form.useForm()
 
   useEffect(() => {
@@ -161,6 +166,7 @@ const Dashboard: React.FC = () => {
   const notificationChannels = alertNotifications?.channels || dashboard?.alertNotificationChannels || {}
   const notificationPolicy = alertNotifications?.policy || dashboard?.alertNotificationPolicy || {}
   const notificationItems = alertNotifications?.notifications || dashboard?.alertNotifications || []
+  const activeNotificationFilters = alertNotifications?.filters || {}
   const trendSummary = trends?.summary || {}
   const trendSnapshots = trends?.snapshots || []
 
@@ -187,7 +193,7 @@ const Dashboard: React.FC = () => {
       setLoading(true)
       const data = await dashboardApi.getOverview()
       const trendData = await dashboardApi.getTrends({ limit: 24 })
-      const notificationData = await dashboardApi.getAlertNotifications({ limit: 12 })
+      const notificationData = await dashboardApi.getAlertNotifications({ limit: 12, ...notificationFilters })
       setDashboard(data)
       setTrends(trendData)
       setAlertNotifications(notificationData)
@@ -199,6 +205,19 @@ const Dashboard: React.FC = () => {
       setLoading(false)
     }
   }
+
+  const updateNotificationFilters = async (nextFilters: any) => {
+    setNotificationFilters(nextFilters)
+    try {
+      setLoading(true)
+      const notificationData = await dashboardApi.getAlertNotifications({ limit: 12, ...nextFilters })
+      setAlertNotifications(notificationData)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const clearNotificationFilters = () => updateNotificationFilters({})
 
   const updateAlertState = async (alert: any, action: 'acknowledge' | 'snooze') => {
     await dashboardApi.updateAlertState(alert.id, {
@@ -555,6 +574,80 @@ const Dashboard: React.FC = () => {
               </Tag>
             ))}
             {notificationPolicy.subscriberCount > 4 ? <Tag>+{notificationPolicy.subscriberCount - 4}</Tag> : null}
+          </Space>
+          <Space wrap>
+            <Select
+              allowClear
+              size="small"
+              placeholder="投递状态"
+              style={{ width: 140 }}
+              value={notificationFilters.deliveryStatus}
+              onChange={(value) => updateNotificationFilters({ ...notificationFilters, deliveryStatus: value })}
+              options={[
+                { label: '已投递', value: 'DELIVERED' },
+                { label: '待重试', value: 'RETRY_PENDING' },
+                { label: '投递失败', value: 'FAILED' },
+                { label: '待配置', value: 'PENDING_CHANNEL' },
+              ]}
+            />
+            <Select
+              allowClear
+              size="small"
+              placeholder="升级级别"
+              style={{ width: 130 }}
+              value={notificationFilters.escalationLevel}
+              onChange={(value) => updateNotificationFilters({ ...notificationFilters, escalationLevel: value })}
+              options={[
+                { label: '升级', value: 'ESCALATE' },
+                { label: '通知', value: 'NOTIFY' },
+              ]}
+            />
+            <Select
+              allowClear
+              size="small"
+              placeholder="告警等级"
+              style={{ width: 130 }}
+              value={notificationFilters.severity}
+              onChange={(value) => updateNotificationFilters({ ...notificationFilters, severity: value })}
+              options={[
+                { label: 'critical', value: 'critical' },
+                { label: 'warning', value: 'warning' },
+              ]}
+            />
+            <Input
+              allowClear
+              size="small"
+              placeholder="告警ID"
+              style={{ width: 150 }}
+              value={notificationFilters.alertId}
+              onChange={(event) => setNotificationFilters({ ...notificationFilters, alertId: event.target.value || undefined })}
+              onPressEnter={() => updateNotificationFilters(notificationFilters)}
+            />
+            <DatePicker
+              size="small"
+              placeholder="起始日期"
+              onChange={(_, value) => {
+                const date = dateString(value)
+                updateNotificationFilters({ ...notificationFilters, since: date ? `${date}T00:00:00` : undefined })
+              }}
+            />
+            <DatePicker
+              size="small"
+              placeholder="结束日期"
+              onChange={(_, value) => {
+                const date = dateString(value)
+                updateNotificationFilters({ ...notificationFilters, until: date ? `${date}T23:59:59` : undefined })
+              }}
+            />
+            <Button size="small" onClick={() => updateNotificationFilters(notificationFilters)}>
+              筛选
+            </Button>
+            <Button size="small" onClick={clearNotificationFilters}>
+              清空
+            </Button>
+            {activeNotificationFilters.active ? (
+              <Tag color="processing">命中 {notificationSummary.matchedTotal || 0}</Tag>
+            ) : null}
           </Space>
           {notificationItems.length ? (
             <List

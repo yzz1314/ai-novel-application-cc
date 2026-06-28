@@ -28,14 +28,18 @@ import com.novel.system.repository.TaskRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.env.Environment;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -147,15 +151,22 @@ public class DashboardService {
     }
 
     public Map<String, Object> getAlertNotifications(int limit) {
+        return getAlertNotifications(limit, Map.of());
+    }
+
+    public Map<String, Object> getAlertNotifications(int limit, Map<String, Object> filters) {
         int safeLimit = Math.max(1, Math.min(limit, 200));
-        List<Map<String, Object>> notifications = dashboardAlertNotificationRepository
-            .findAllByOrderByLastSeenAtDesc(PageRequest.of(0, safeLimit))
-            .stream()
-            .map(this::notificationMap)
-            .toList();
+        Map<String, Object> normalizedFilters = normalizeNotificationFilters(filters);
+        Specification<DashboardAlertNotification> specification = notificationSpecification(normalizedFilters);
+        List<DashboardAlertNotification> notificationEntities = dashboardAlertNotificationRepository
+            .findAll(specification, PageRequest.of(0, safeLimit, Sort.by(Sort.Direction.DESC, "lastSeenAt")))
+            .getContent();
+        long matchedTotal = dashboardAlertNotificationRepository.count(specification);
+        List<Map<String, Object>> notifications = notificationEntities.stream().map(this::notificationMap).toList();
 
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("total", notifications.size());
+        summary.put("matchedTotal", matchedTotal);
         summary.put("pendingChannel", notifications.stream()
             .filter(notification -> "PENDING_CHANNEL".equals(notification.get("status")))
             .count());
@@ -177,11 +188,84 @@ public class DashboardService {
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("limit", safeLimit);
+        response.put("filters", normalizedFilters);
         response.put("summary", summary);
         response.put("channels", notificationChannels());
         response.put("policy", getAlertNotificationPolicy());
         response.put("notifications", notifications);
         return response;
+    }
+
+    private Map<String, Object> normalizeNotificationFilters(Map<String, Object> filters) {
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        putNormalizedFilter(normalized, "deliveryStatus", filters == null ? null : filters.get("deliveryStatus"));
+        putNormalizedFilter(normalized, "escalationLevel", filters == null ? null : filters.get("escalationLevel"));
+        putNormalizedFilter(normalized, "severity", filters == null ? null : filters.get("severity"));
+        putNormalizedFilter(normalized, "status", filters == null ? null : filters.get("status"));
+        putNormalizedFilter(normalized, "alertId", filters == null ? null : filters.get("alertId"));
+        putNormalizedTimeFilter(normalized, "since", filters == null ? null : filters.get("since"));
+        putNormalizedTimeFilter(normalized, "until", filters == null ? null : filters.get("until"));
+        normalized.put("active", normalized.values().stream().anyMatch(value -> value != null && !String.valueOf(value).isBlank()));
+        return normalized;
+    }
+
+    private void putNormalizedFilter(Map<String, Object> target, String key, Object value) {
+        String normalized = stringValue(value, "").trim();
+        target.put(key, normalized);
+    }
+
+    private void putNormalizedTimeFilter(Map<String, Object> target, String key, Object value) {
+        String normalized = stringValue(value, "").trim();
+        LocalDateTime parsed = parseFilterTime(normalized);
+        target.put(key, parsed == null ? "" : parsed.toString());
+    }
+
+    private Specification<DashboardAlertNotification> notificationSpecification(Map<String, Object> filters) {
+        return (root, query, builder) -> {
+            List<jakarta.persistence.criteria.Predicate> predicates = new ArrayList<>();
+            equalIgnoreCase(predicates, builder, root.get("deliveryStatus"), stringValue(filters.get("deliveryStatus"), ""));
+            equalIgnoreCase(predicates, builder, root.get("escalationLevel"), stringValue(filters.get("escalationLevel"), ""));
+            equalIgnoreCase(predicates, builder, root.get("severity"), stringValue(filters.get("severity"), ""));
+            equalIgnoreCase(predicates, builder, root.get("status"), stringValue(filters.get("status"), ""));
+            String alertId = stringValue(filters.get("alertId"), "");
+            if (!alertId.isBlank()) {
+                predicates.add(builder.like(builder.lower(root.get("alertId")), "%" + alertId.toLowerCase(Locale.ROOT) + "%"));
+            }
+            LocalDateTime since = parseFilterTime(stringValue(filters.get("since"), ""));
+            if (since != null) {
+                predicates.add(builder.greaterThanOrEqualTo(root.get("lastSeenAt"), since));
+            }
+            LocalDateTime until = parseFilterTime(stringValue(filters.get("until"), ""));
+            if (until != null) {
+                predicates.add(builder.lessThanOrEqualTo(root.get("lastSeenAt"), until));
+            }
+            return builder.and(predicates.toArray(jakarta.persistence.criteria.Predicate[]::new));
+        };
+    }
+
+    private void equalIgnoreCase(
+            List<jakarta.persistence.criteria.Predicate> predicates,
+            jakarta.persistence.criteria.CriteriaBuilder builder,
+            jakarta.persistence.criteria.Expression<String> path,
+            String value) {
+        if (!value.isBlank()) {
+            predicates.add(builder.equal(builder.lower(path), value.toLowerCase(Locale.ROOT)));
+        }
+    }
+
+    private LocalDateTime parseFilterTime(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return LocalDateTime.parse(value);
+        } catch (DateTimeParseException ignored) {
+            try {
+                return LocalDateTime.parse(value + "T00:00:00");
+            } catch (DateTimeParseException ignoredAgain) {
+                return null;
+            }
+        }
     }
 
     public Map<String, Object> getAlertNotificationPolicy() {

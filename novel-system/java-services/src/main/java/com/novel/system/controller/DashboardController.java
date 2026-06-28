@@ -31,8 +31,27 @@ public class DashboardController {
     }
 
     @GetMapping("/alerts/notifications")
-    public ResponseEntity<Map<String, Object>> getAlertNotifications(@RequestParam(defaultValue = "50") int limit) {
-        return ResponseEntity.ok(dashboardService.getAlertNotifications(limit));
+    public ResponseEntity<Map<String, Object>> getAlertNotifications(
+            @RequestParam(defaultValue = "50") int limit,
+            @RequestParam(required = false) String deliveryStatus,
+            @RequestParam(required = false) String escalationLevel,
+            @RequestParam(required = false) String severity,
+            @RequestParam(required = false) String status,
+            @RequestParam(required = false) String alertId,
+            @RequestParam(required = false) String since,
+            @RequestParam(required = false) String until) {
+        return ResponseEntity.ok(dashboardService.getAlertNotifications(
+            limit,
+            Map.of(
+                "deliveryStatus", deliveryStatus == null ? "" : deliveryStatus,
+                "escalationLevel", escalationLevel == null ? "" : escalationLevel,
+                "severity", severity == null ? "" : severity,
+                "status", status == null ? "" : status,
+                "alertId", alertId == null ? "" : alertId,
+                "since", since == null ? "" : since,
+                "until", until == null ? "" : until
+            )
+        ));
     }
 
     @GetMapping("/alerts/notification-policy")

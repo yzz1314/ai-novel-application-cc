@@ -4,6 +4,7 @@ import com.novel.system.dto.response.ProjectResponse;
 import com.novel.system.dto.response.TaskResponse;
 import com.novel.system.entity.DashboardAlertState;
 import com.novel.system.entity.DashboardAlertState.AlertStatus;
+import com.novel.system.entity.DashboardMetricSnapshot;
 import com.novel.system.entity.Project;
 import com.novel.system.entity.Project.ProjectStatus;
 import com.novel.system.entity.Sample.SampleStatus;
@@ -11,6 +12,7 @@ import com.novel.system.entity.Task;
 import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.repository.ChapterArtifactRepository;
 import com.novel.system.repository.DashboardAlertStateRepository;
+import com.novel.system.repository.DashboardMetricSnapshotRepository;
 import com.novel.system.repository.GraphArtifactRepository;
 import com.novel.system.repository.MemoryArtifactRepository;
 import com.novel.system.repository.OutlineArtifactRepository;
@@ -46,6 +48,7 @@ public class DashboardService {
     private final SampleRepository sampleRepository;
     private final TaskRepository taskRepository;
     private final DashboardAlertStateRepository dashboardAlertStateRepository;
+    private final DashboardMetricSnapshotRepository dashboardMetricSnapshotRepository;
     private final ChapterArtifactRepository chapterArtifactRepository;
     private final SkillProfileRepository skillProfileRepository;
     private final OutlineArtifactRepository outlineArtifactRepository;
@@ -90,6 +93,35 @@ public class DashboardService {
             .map(task -> TaskResponse.from(task, taskExecutorService.getTaskProgress(task)))
             .toList());
         response.put("serviceStatus", serviceStatus);
+        response.put("latestTrend", recordMetricSnapshot(healthSummary, performanceSummary, alertSummary, stats, taskSummary));
+        return response;
+    }
+
+    public Map<String, Object> getTrends(int limit) {
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+        List<Map<String, Object>> snapshots = dashboardMetricSnapshotRepository
+            .findAllByOrderByCapturedAtDesc(PageRequest.of(0, safeLimit))
+            .stream()
+            .map(this::snapshotMap)
+            .toList();
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("snapshotCount", snapshots.size());
+        if (!snapshots.isEmpty()) {
+            Map<String, Object> latest = snapshots.get(0);
+            Map<String, Object> oldest = snapshots.get(snapshots.size() - 1);
+            summary.put("latestCapturedAt", latest.get("capturedAt"));
+            summary.put("oldestCapturedAt", oldest.get("capturedAt"));
+            summary.put("failedTaskDelta", numberValue(latest.get("failedTasks")) - numberValue(oldest.get("failedTasks")));
+            summary.put("activeAlertDelta", numberValue(latest.get("activeAlertCount")) - numberValue(oldest.get("activeAlertCount")));
+            summary.put("totalTokenDelta", numberValue(latest.get("totalTokens")) - numberValue(oldest.get("totalTokens")));
+            summary.put("latestHealthStatus", latest.get("healthStatus"));
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("limit", safeLimit);
+        response.put("summary", summary);
+        response.put("snapshots", snapshots);
         return response;
     }
 
@@ -152,6 +184,57 @@ public class DashboardService {
         stats.put("finalChapters", chapterArtifactRepository.countByStage("final"));
         stats.put("totalTasks", taskRepository.count());
         return stats;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> recordMetricSnapshot(
+            Map<String, Object> healthSummary,
+            Map<String, Object> performanceSummary,
+            Map<String, Object> alertSummary,
+            Map<String, Object> stats,
+            Map<String, Object> taskSummary) {
+        Map<String, Object> alertCounts = (Map<String, Object>) alertSummary.getOrDefault("summary", Map.of());
+        DashboardMetricSnapshot snapshot = new DashboardMetricSnapshot();
+        snapshot.setCapturedAt(LocalDateTime.now());
+        snapshot.setHealthStatus(stringValue(healthSummary.get("status"), "UNKNOWN"));
+        snapshot.setActiveTasks(numberValue(healthSummary.get("activeTasks")));
+        snapshot.setFailedTasks(numberValue(healthSummary.get("failedTasks")));
+        snapshot.setWaitingApprovals(numberValue(healthSummary.get("waitingApprovals")));
+        snapshot.setSlowTaskCount(numberValue(performanceSummary.get("slowTaskCount")));
+        snapshot.setHighRetryTaskCount(numberValue(performanceSummary.get("highRetryTaskCount")));
+        snapshot.setActiveAlertCount(numberValue(alertCounts.get("activeCount")));
+        snapshot.setSnoozedAlertCount(numberValue(alertCounts.get("snoozedCount")));
+        snapshot.setAcknowledgedAlertCount(numberValue(alertCounts.get("acknowledgedCount")));
+        snapshot.setTotalTokens(numberValue(performanceSummary.get("totalTokens")));
+        snapshot.setAvgDurationMs(numberValue(performanceSummary.get("avgDurationMs")));
+        snapshot.setMaxDurationMs(numberValue(performanceSummary.get("maxDurationMs")));
+        snapshot.setMetrics(details(
+            "stats", stats,
+            "taskSummary", taskSummary,
+            "performanceWindowTaskCount", performanceSummary.get("windowTaskCount"),
+            "generatedBy", "dashboard_overview"
+        ));
+        return snapshotMap(dashboardMetricSnapshotRepository.save(snapshot));
+    }
+
+    private Map<String, Object> snapshotMap(DashboardMetricSnapshot snapshot) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("id", snapshot.getId());
+        result.put("capturedAt", snapshot.getCapturedAt());
+        result.put("healthStatus", snapshot.getHealthStatus());
+        result.put("activeTasks", snapshot.getActiveTasks());
+        result.put("failedTasks", snapshot.getFailedTasks());
+        result.put("waitingApprovals", snapshot.getWaitingApprovals());
+        result.put("slowTaskCount", snapshot.getSlowTaskCount());
+        result.put("highRetryTaskCount", snapshot.getHighRetryTaskCount());
+        result.put("activeAlertCount", snapshot.getActiveAlertCount());
+        result.put("snoozedAlertCount", snapshot.getSnoozedAlertCount());
+        result.put("acknowledgedAlertCount", snapshot.getAcknowledgedAlertCount());
+        result.put("totalTokens", snapshot.getTotalTokens());
+        result.put("avgDurationMs", snapshot.getAvgDurationMs());
+        result.put("maxDurationMs", snapshot.getMaxDurationMs());
+        result.put("metrics", snapshot.getMetrics() == null ? Map.of() : snapshot.getMetrics());
+        return result;
     }
 
     private Map<String, Object> taskSummary() {

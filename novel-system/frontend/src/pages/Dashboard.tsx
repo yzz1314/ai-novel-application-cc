@@ -97,6 +97,7 @@ const Dashboard: React.FC = () => {
   const navigate = useNavigate()
   const [loading, setLoading] = useState(false)
   const [dashboard, setDashboard] = useState<any>(null)
+  const [trends, setTrends] = useState<any>(null)
 
   useEffect(() => {
     loadDashboard()
@@ -114,6 +115,8 @@ const Dashboard: React.FC = () => {
   const nextActions = dashboard?.nextActions || []
   const alerts = dashboard?.alerts || []
   const alertSummary = dashboard?.alertSummary || {}
+  const trendSummary = trends?.summary || {}
+  const trendSnapshots = trends?.snapshots || []
 
   const activeTasks = Number(taskSummary.PENDING || 0) + Number(taskSummary.RUNNING || 0)
   const failedTasks = Number(taskSummary.FAILED || 0)
@@ -137,9 +140,12 @@ const Dashboard: React.FC = () => {
     try {
       setLoading(true)
       const data = await dashboardApi.getOverview()
+      const trendData = await dashboardApi.getTrends({ limit: 24 })
       setDashboard(data)
+      setTrends(trendData)
     } catch (error) {
       setDashboard(null)
+      setTrends(null)
     } finally {
       setLoading(false)
     }
@@ -630,6 +636,43 @@ const Dashboard: React.FC = () => {
                 </Space>
               ))}
             </Space>
+          </Card>
+
+          <Card title="长期趋势" loading={loading} style={{ marginTop: 16 }}>
+            {trendSnapshots.length ? (
+              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+                <Row gutter={[8, 8]}>
+                  <Col span={8}>
+                    <Statistic title="失败变化" value={trendSummary.failedTaskDelta || 0} />
+                  </Col>
+                  <Col span={8}>
+                    <Statistic title="告警变化" value={trendSummary.activeAlertDelta || 0} />
+                  </Col>
+                  <Col span={8}>
+                    <Statistic title="Token变化" value={formatNumber(trendSummary.totalTokenDelta)} />
+                  </Col>
+                </Row>
+                <List
+                  size="small"
+                  dataSource={trendSnapshots.slice(0, 5)}
+                  renderItem={(item: any) => (
+                    <List.Item>
+                      <Space direction="vertical" size={0} style={{ width: '100%' }}>
+                        <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
+                          <Tag color={healthColor(item.healthStatus)}>{item.healthStatus || 'UNKNOWN'}</Tag>
+                          <Text type="secondary">{item.capturedAt}</Text>
+                        </Space>
+                        <Text type="secondary">
+                          失败 {item.failedTasks || 0} / 告警 {item.activeAlertCount || 0} / 慢任务 {item.slowTaskCount || 0}
+                        </Text>
+                      </Space>
+                    </List.Item>
+                  )}
+                />
+              </Space>
+            ) : (
+              <Empty description="暂无趋势快照" />
+            )}
           </Card>
         </Col>
       </Row>

@@ -2,10 +2,12 @@ package com.novel.system.service;
 
 import com.novel.system.entity.Project;
 import com.novel.system.entity.DashboardAlertState;
+import com.novel.system.entity.DashboardMetricSnapshot;
 import com.novel.system.entity.Task;
 import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.repository.ChapterArtifactRepository;
 import com.novel.system.repository.DashboardAlertStateRepository;
+import com.novel.system.repository.DashboardMetricSnapshotRepository;
 import com.novel.system.repository.GraphArtifactRepository;
 import com.novel.system.repository.MemoryArtifactRepository;
 import com.novel.system.repository.OutlineArtifactRepository;
@@ -44,6 +46,8 @@ class DashboardServiceTest {
     @Mock
     private DashboardAlertStateRepository dashboardAlertStateRepository;
     @Mock
+    private DashboardMetricSnapshotRepository dashboardMetricSnapshotRepository;
+    @Mock
     private ChapterArtifactRepository chapterArtifactRepository;
     @Mock
     private SkillProfileRepository skillProfileRepository;
@@ -69,6 +73,7 @@ class DashboardServiceTest {
             sampleRepository,
             taskRepository,
             dashboardAlertStateRepository,
+            dashboardMetricSnapshotRepository,
             chapterArtifactRepository,
             skillProfileRepository,
             outlineArtifactRepository,
@@ -118,6 +123,8 @@ class DashboardServiceTest {
         when(taskRepository.findByStatus(TaskStatus.PARTIAL)).thenReturn(List.of(approvalTask));
         when(taskRepository.findAllByOrderByCreatedAtDesc(any(Pageable.class))).thenReturn(List.of(failedTask, approvalTask));
         when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of());
+        when(dashboardMetricSnapshotRepository.save(any(DashboardMetricSnapshot.class)))
+            .thenAnswer(invocation -> invocation.getArgument(0));
         when(taskRepository.countByProjectId(project.getId())).thenReturn(2L);
         when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.FAILED)).thenReturn(1L);
         when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.PARTIAL)).thenReturn(1L);
@@ -167,6 +174,11 @@ class DashboardServiceTest {
                 assertThat(item.get("taskCount")).isEqualTo(2L);
                 assertThat(item.get("avgDurationMs")).isEqualTo(410_000L);
             });
+        Map<String, Object> latestTrend = (Map<String, Object>) dashboard.get("latestTrend");
+        assertThat(latestTrend)
+            .containsEntry("healthStatus", "ATTENTION")
+            .containsEntry("failedTasks", 1L)
+            .containsEntry("activeAlertCount", 5L);
 
         List<Map<String, Object>> blockedProjects = (List<Map<String, Object>>) dashboard.get("blockedProjects");
         assertThat(blockedProjects).hasSize(1);
@@ -253,6 +265,30 @@ class DashboardServiceTest {
         assertThat(state.get("snoozedUntil")).isNotNull();
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTrendsReturnsSnapshotDeltas() {
+        DashboardMetricSnapshot older = snapshot("older", LocalDateTime.now().minusMinutes(20), "HEALTHY", 0, 0, 100);
+        DashboardMetricSnapshot latest = snapshot("latest", LocalDateTime.now(), "ATTENTION", 2, 1, 250);
+        when(dashboardMetricSnapshotRepository.findAllByOrderByCapturedAtDesc(any(Pageable.class)))
+            .thenReturn(List.of(latest, older));
+
+        Map<String, Object> trends = dashboardService.getTrends(500);
+
+        assertThat(trends.get("limit")).isEqualTo(200);
+        List<Map<String, Object>> snapshots = (List<Map<String, Object>>) trends.get("snapshots");
+        assertThat(snapshots)
+            .extracting(snapshot -> snapshot.get("id"))
+            .containsExactly("latest", "older");
+        Map<String, Object> summary = (Map<String, Object>) trends.get("summary");
+        assertThat(summary)
+            .containsEntry("snapshotCount", 2)
+            .containsEntry("failedTaskDelta", 2L)
+            .containsEntry("activeAlertDelta", 1L)
+            .containsEntry("totalTokenDelta", 150L)
+            .containsEntry("latestHealthStatus", "ATTENTION");
+    }
+
     private Project project(String projectId) {
         Project project = new Project();
         project.setId(projectId);
@@ -291,6 +327,32 @@ class DashboardServiceTest {
         return state;
     }
 
+    private DashboardMetricSnapshot snapshot(
+            String id,
+            LocalDateTime capturedAt,
+            String status,
+            long failedTasks,
+            long activeAlerts,
+            long totalTokens) {
+        DashboardMetricSnapshot snapshot = new DashboardMetricSnapshot();
+        snapshot.setId(id);
+        snapshot.setCapturedAt(capturedAt);
+        snapshot.setHealthStatus(status);
+        snapshot.setActiveTasks(0L);
+        snapshot.setFailedTasks(failedTasks);
+        snapshot.setWaitingApprovals(0L);
+        snapshot.setSlowTaskCount(0L);
+        snapshot.setHighRetryTaskCount(0L);
+        snapshot.setActiveAlertCount(activeAlerts);
+        snapshot.setSnoozedAlertCount(0L);
+        snapshot.setAcknowledgedAlertCount(0L);
+        snapshot.setTotalTokens(totalTokens);
+        snapshot.setAvgDurationMs(0L);
+        snapshot.setMaxDurationMs(0L);
+        snapshot.setMetrics(Map.of());
+        return snapshot;
+    }
+
     private void mockDashboardBasics(Project project, Task failedTask) {
         when(projectRepository.findAll()).thenReturn(List.of(project));
         when(projectRepository.count()).thenReturn(1L);
@@ -310,6 +372,8 @@ class DashboardServiceTest {
         when(taskRepository.countByStatus(TaskStatus.CANCELLED)).thenReturn(0L);
         when(taskRepository.findByStatus(TaskStatus.PARTIAL)).thenReturn(List.of());
         when(taskRepository.findAllByOrderByCreatedAtDesc(any(Pageable.class))).thenReturn(List.of(failedTask));
+        when(dashboardMetricSnapshotRepository.save(any(DashboardMetricSnapshot.class)))
+            .thenAnswer(invocation -> invocation.getArgument(0));
         when(taskRepository.countByProjectId(project.getId())).thenReturn(1L);
         when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.FAILED)).thenReturn(1L);
         when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.PARTIAL)).thenReturn(0L);

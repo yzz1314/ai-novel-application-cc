@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
@@ -22,6 +23,11 @@ public class DashboardController {
     @GetMapping
     public ResponseEntity<Map<String, Object>> getDashboard() {
         return ResponseEntity.ok(dashboardService.getDashboard());
+    }
+
+    @GetMapping("/trends")
+    public ResponseEntity<Map<String, Object>> getTrends(@RequestParam(defaultValue = "50") int limit) {
+        return ResponseEntity.ok(dashboardService.getTrends(limit));
     }
 
     @PostMapping("/alerts/{alertId}/state")

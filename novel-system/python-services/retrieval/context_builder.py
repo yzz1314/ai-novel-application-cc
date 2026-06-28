@@ -2,7 +2,8 @@
 
 This is the first concrete retrieval layer for chapter writing. It keeps the
 implementation local-file based so it works with the current workspace
-architecture, while leaving a clean place to add LanceDB/vector/rerank later.
+architecture, while optionally using LanceDB for persisted vector search when
+configured and falling back to in-memory vectors otherwise.
 """
 import json
 import math
@@ -144,11 +145,17 @@ class ContextBuilder:
         graph_context = self._graph_context(query)
         memory_context = self._memory_context()
         retrieval_plan = self._default_plan()
+        retrieval_config = self._retrieval_config()
         cache_status = self._cache_status(documents)
         from .hybrid_engine import HybridRetrievalEngine
-        hybrid_engine = HybridRetrievalEngine(self.project_root, documents, graph_context)
-        hybrid_engine.persist_indexes(cache_status=cache_status)
+        hybrid_engine = HybridRetrievalEngine(
+            self.project_root,
+            documents,
+            graph_context,
+            vector_backend=self._vector_backend(retrieval_config),
+        )
         hybrid_retrieval = hybrid_engine.retrieve(query, retrieval_plan, top_k=top_k)
+        hybrid_engine.persist_indexes(cache_status=cache_status)
         keyword_results = hybrid_retrieval.get("runs", {}).get("keyword", [])[:top_k]
         budget_config = self._budget_config()
         retrieval_results, citation_budget = self._budget_retrieval_results(
@@ -196,8 +203,7 @@ class ContextBuilder:
 
     def _default_plan(self):
         from .hybrid_engine import RetrievalPlan
-        config_path = self.project_root / "indexes" / "retrieval_config.json"
-        data = self._read_json(config_path) if config_path.exists() else {}
+        data = self._retrieval_config()
         return RetrievalPlan(
             use_vector=bool(data.get("use_vector", True)),
             vector_filters=data.get("vector_filters") or {},
@@ -208,6 +214,18 @@ class ContextBuilder:
             graph_hops=int(data.get("graph_hops", 2)),
             use_rerank=bool(data.get("use_rerank", True)),
         )
+
+    def _retrieval_config(self) -> Dict[str, Any]:
+        config_path = self.project_root / "indexes" / "retrieval_config.json"
+        return self._read_json(config_path) if config_path.exists() else {}
+
+    def _vector_backend(self, config: Dict[str, Any]) -> str:
+        text = str(config.get("vector_backend") or config.get("vectorBackend") or "auto").strip().lower()
+        if text in {"lancedb", "lance", "lance_db"}:
+            return "lancedb"
+        if text in {"memory", "local", "hash", "hash_vector", "in_memory"}:
+            return "memory"
+        return "auto"
 
     def format_prompt_section(self, context_pack: Dict[str, Any]) -> str:
         budget = context_pack.get("citation_budget") or {"config": self._budget_config(), "usage": {}}

@@ -38,11 +38,22 @@ class HashVectorIndex:
             documents: List[RetrievalDocument],
             tokenizer,
             dimensions: int = 96,
-            embedding_bundle: Optional[Dict[str, Any]] = None):
+            embedding_bundle: Optional[Dict[str, Any]] = None,
+            vector_backend: Optional[str] = None,
+            project_root: Optional[Path] = None):
         self.documents = [doc for doc in documents if doc.text.strip()]
+        self.documents_by_id = {doc.doc_id: doc for doc in self.documents}
         self.tokenizer = tokenizer
+        self.project_root = project_root
         self.embedding_bundle = embedding_bundle or {}
         self.embedding_metadata = self._normalize_embedding_metadata(self.embedding_bundle.get("metadata"))
+        self.requested_backend = self._normalize_backend(
+            vector_backend
+            or self.embedding_bundle.get("vector_backend")
+            or self.embedding_bundle.get("backend")
+            or self.embedding_metadata.get("vector_backend")
+            or self.embedding_metadata.get("backend")
+        )
         provided_vectors = self._provided_vectors(self.embedding_bundle.get("document_vectors"))
         provided_dimensions = self._dimensions(provided_vectors)
         self.dimensions = provided_dimensions or dimensions
@@ -64,11 +75,41 @@ class HashVectorIndex:
             "dimensions": self.dimensions,
             "document_vector_count": len(self.vectors),
         })
+        self.vector_backend = "memory"
+        self.backend_status: Dict[str, Any] = {
+            "requested": self.requested_backend,
+            "active": "memory",
+            "status": "memory",
+            "reason": "memory_backend_selected",
+        }
+        if self._should_use_lancedb():
+            self._activate_lancedb_backend()
+        self.embedding_metadata["vector_backend"] = self.vector_backend
+        self.embedding_metadata["backend_status"] = self.backend_status
 
     def search(self, query: str, top_k: int = 16, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         query_vector = self._query_vector(query)
         if not query_vector:
             return []
+        if self.vector_backend == "lancedb":
+            try:
+                return self._search_lancedb(query_vector, top_k=top_k, filters=filters)
+            except Exception as exc:
+                self.vector_backend = "memory"
+                self.backend_status.update({
+                    "active": "memory",
+                    "status": "search_fallback",
+                    "reason": "lancedb_search_error",
+                    "error": str(exc),
+                })
+                self.embedding_metadata["vector_backend"] = self.vector_backend
+                self.embedding_metadata["backend_status"] = self.backend_status
+                self.embedding_metadata.setdefault("warnings", []).append(
+                    f"LanceDB search failed; memory vector fallback was used: {exc}"
+                )
+        return self._search_memory(query_vector, top_k=top_k, filters=filters)
+
+    def _search_memory(self, query_vector: List[float], top_k: int, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         results = []
         for index, doc in enumerate(self.documents):
             if filters and not self._matches_filters(doc, filters):
@@ -84,6 +125,8 @@ class HashVectorIndex:
             "updated_at": datetime.now().isoformat(),
             "engine": self.engine,
             "vector_mode": self.vector_mode,
+            "vector_backend": self.vector_backend,
+            "backend_status": self.backend_status,
             "dimensions": self.dimensions,
             "document_count": len(self.documents),
             "embedding_metadata": self.embedding_metadata,
@@ -108,10 +151,122 @@ class HashVectorIndex:
         return {
             "engine": self.engine,
             "vector_mode": self.vector_mode,
+            "vector_backend": self.vector_backend,
+            "backend_status": self.backend_status,
             "dimensions": self.dimensions,
             "document_count": len(self.documents),
             "embedding_metadata": self.embedding_metadata,
         }
+
+    def _normalize_backend(self, value: Any) -> str:
+        text = str(value or "auto").strip().lower()
+        if text in {"lancedb", "lance", "lance_db"}:
+            return "lancedb"
+        if text in {"memory", "local", "hash", "hash_vector", "in_memory"}:
+            return "memory"
+        return "auto"
+
+    def _should_use_lancedb(self) -> bool:
+        if not self.documents or not self.vectors:
+            self.backend_status = {
+                "requested": self.requested_backend,
+                "active": "memory",
+                "status": "skipped",
+                "reason": "no_vectors_to_index",
+            }
+            return False
+        if self.requested_backend == "memory":
+            return False
+        if self.requested_backend == "lancedb":
+            return True
+        return self.engine == "embedding_vector"
+
+    def _activate_lancedb_backend(self):
+        if self.project_root is None:
+            self.backend_status = {
+                "requested": self.requested_backend,
+                "active": "memory",
+                "status": "fallback",
+                "reason": "project_root_missing",
+            }
+            return
+        try:
+            import lancedb  # type: ignore
+            backend_path = self.project_root / "indexes" / "vector" / "lancedb"
+            backend_path.mkdir(parents=True, exist_ok=True)
+            db = lancedb.connect(str(backend_path))
+            table_name = "retrieval_vectors"
+            rows = self._lancedb_rows()
+            try:
+                table = db.create_table(table_name, data=rows, mode="overwrite")
+            except TypeError:
+                if hasattr(db, "drop_table"):
+                    try:
+                        db.drop_table(table_name)
+                    except Exception:
+                        pass
+                table = db.create_table(table_name, data=rows)
+            self.lancedb_table = table
+            self.vector_backend = "lancedb"
+            self.backend_status = {
+                "requested": self.requested_backend,
+                "active": "lancedb",
+                "status": "active",
+                "path": str(backend_path),
+                "table": table_name,
+                "document_count": len(rows),
+            }
+        except Exception as exc:
+            self.vector_backend = "memory"
+            self.backend_status = {
+                "requested": self.requested_backend,
+                "active": "memory",
+                "status": "fallback",
+                "reason": "lancedb_unavailable",
+                "error": str(exc),
+            }
+            self.embedding_metadata.setdefault("warnings", []).append(
+                f"LanceDB backend unavailable; memory vector fallback was used: {exc}"
+            )
+
+    def _lancedb_rows(self) -> List[Dict[str, Any]]:
+        rows = []
+        for doc, vector in zip(self.documents, self.vectors):
+            rows.append({
+                "vector": vector,
+                "doc_id": doc.doc_id,
+                "source_type": doc.source_type,
+                "path": doc.path,
+                "title": doc.title,
+                "snippet": doc.text[:240] + ("..." if len(doc.text) > 240 else ""),
+                "metadata_json": json.dumps(doc.metadata or {}, ensure_ascii=False),
+            })
+        return rows
+
+    def _search_lancedb(self, query_vector: List[float], top_k: int, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        limit = max(top_k * 4, top_k)
+        raw_results = self.lancedb_table.search(query_vector).limit(limit).to_list()
+        results: List[Dict[str, Any]] = []
+        for row in raw_results:
+            doc = self.documents_by_id.get(str(row.get("doc_id") or ""))
+            if doc is None:
+                continue
+            if filters and not self._matches_filters(doc, filters):
+                continue
+            score = self._lancedb_score(row)
+            results.append(self._result(doc, score, "vector"))
+            if len(results) >= top_k:
+                break
+        return results
+
+    def _lancedb_score(self, row: Dict[str, Any]) -> float:
+        if isinstance(row.get("_score"), (int, float)):
+            return float(row["_score"])
+        if isinstance(row.get("_distance"), (int, float)):
+            return 1.0 / (1.0 + max(0.0, float(row["_distance"])))
+        if isinstance(row.get("score"), (int, float)):
+            return float(row["score"])
+        return 0.0
 
     def _query_vector(self, query: str) -> List[float]:
         query_vectors = self._provided_vectors(self.embedding_bundle.get("query_vectors"))
@@ -215,11 +370,18 @@ class HybridRetrievalEngine:
             project_root: Path,
             documents: List[RetrievalDocument],
             graph_context: Dict[str, Any],
-            embedding_bundle: Optional[Dict[str, Any]] = None):
+            embedding_bundle: Optional[Dict[str, Any]] = None,
+            vector_backend: Optional[str] = None):
         self.project_root = project_root
         self.documents = documents
         self.keyword = KeywordRetriever(documents)
-        self.vector = HashVectorIndex(documents, self.keyword._tokenize, embedding_bundle=embedding_bundle)
+        self.vector = HashVectorIndex(
+            documents,
+            self.keyword._tokenize,
+            embedding_bundle=embedding_bundle,
+            vector_backend=vector_backend,
+            project_root=project_root,
+        )
         self.graph_context = graph_context or {}
 
     def retrieve(self, query: str, plan: RetrievalPlan, top_k: int = 10) -> Dict[str, Any]:
@@ -255,6 +417,7 @@ class HybridRetrievalEngine:
                 "quality_status": quality_evaluation.get("status"),
                 "vector_mode": self.vector.vector_mode,
                 "vector_engine": self.vector.engine,
+                "vector_backend": self.vector.vector_backend,
             },
             "vector_index": self.vector.summary(),
         }

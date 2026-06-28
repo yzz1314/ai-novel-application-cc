@@ -150,6 +150,7 @@ public class RetrievalArtifactDbService {
         result.put("benchmarkMeanReciprocalRank", benchmarkMetric(entity, "mean_reciprocal_rank", "latestBenchmarkMeanReciprocalRank"));
         result.put("vectorMode", vectorMetric(entity, "latestVectorMode"));
         result.put("vectorEngine", vectorMetric(entity, "latestVectorEngine"));
+        result.put("vectorBackend", vectorMetric(entity, "latestVectorBackend"));
         result.put("syncedAt", entity.getSyncedAt());
         result.put("createdAt", entity.getCreatedAt());
         result.put("updatedAt", entity.getUpdatedAt());
@@ -185,6 +186,13 @@ public class RetrievalArtifactDbService {
             valueFromMap(hybridSummary, "vector_index", "engine"),
             valueFromMap(rebuildReport, "stats", "vector_engine"),
             valueFromMap(hybridSummary, "stats", "vector_engine")
+        ));
+        metadata.put("latestVectorBackend", firstPresent(
+            vectorSummary.get("vector_backend"),
+            valueFromMap(rebuildReport, "vector_index", "vector_backend"),
+            valueFromMap(hybridSummary, "vector_index", "vector_backend"),
+            valueFromMap(rebuildReport, "stats", "vector_backend"),
+            valueFromMap(hybridSummary, "stats", "vector_backend")
         ));
         metadata.put("latestEmbeddingIndex", firstPresent(
             vectorSummary.get("embedding_metadata"),

@@ -86,12 +86,15 @@ class RetrievalArtifactDbServiceTest {
               "document_count": 4,
               "engine": "embedding_vector",
               "vector_mode": "local_embedding_fallback",
+              "vector_backend": "lancedb",
+              "backend_status": {"status": "active", "active": "lancedb"},
               "embedding_metadata": {
                 "status": "mock",
                 "model_role": "embeddingModel",
                 "model": "mock-embedding",
                 "local_fallback": true,
-                "dimensions": 96
+                "dimensions": 96,
+                "vector_backend": "lancedb"
               }
             }
             """);
@@ -100,7 +103,8 @@ class RetrievalArtifactDbServiceTest {
               "document_count": 4,
               "vector_index": {
                 "engine": "embedding_vector",
-                "vector_mode": "local_embedding_fallback"
+                "vector_mode": "local_embedding_fallback",
+                "vector_backend": "lancedb"
               },
               "quality_evaluation": {"score": 82, "status": "good"},
               "citation_budget": {
@@ -116,16 +120,19 @@ class RetrievalArtifactDbServiceTest {
               "vector_index": {
                 "engine": "embedding_vector",
                 "vector_mode": "local_embedding_fallback",
+                "vector_backend": "lancedb",
                 "embedding_metadata": {
                   "model_role": "embeddingModel",
-                  "local_fallback": true
+                  "local_fallback": true,
+                  "vector_backend": "lancedb"
                 }
               },
               "model_gateway": {
                 "embedding_index": {
                   "vector_mode": "local_embedding_fallback",
                   "model_role": "embeddingModel",
-                  "local_fallback": true
+                  "local_fallback": true,
+                  "vector_backend": "lancedb"
                 }
               },
               "quality_evaluation": {"score": 79, "status": "needs_review"},
@@ -194,7 +201,8 @@ class RetrievalArtifactDbServiceTest {
             .containsEntry("benchmarkHitRate", 1.0)
             .containsEntry("benchmarkMeanReciprocalRank", 0.833333)
             .containsEntry("vectorMode", "local_embedding_fallback")
-            .containsEntry("vectorEngine", "embedding_vector");
+            .containsEntry("vectorEngine", "embedding_vector")
+            .containsEntry("vectorBackend", "lancedb");
 
         Map<String, Object> qualityReport = (Map<String, Object>) response.get("qualityReport");
         assertThat(qualityReport)
@@ -224,7 +232,8 @@ class RetrievalArtifactDbServiceTest {
             .containsEntry("latestBenchmarkHitRate", 1.0)
             .containsEntry("latestBenchmarkMeanReciprocalRank", 0.833333)
             .containsEntry("latestVectorMode", "local_embedding_fallback")
-            .containsEntry("latestVectorEngine", "embedding_vector");
+            .containsEntry("latestVectorEngine", "embedding_vector")
+            .containsEntry("latestVectorBackend", "lancedb");
         Map<String, Object> latestQualityReport = (Map<String, Object>) retrievalMetadata.get("latestQualityReport");
         Map<String, Object> latestBenchmarkReport = (Map<String, Object>) retrievalMetadata.get("latestBenchmarkReport");
         Map<String, Object> latestQualityEvaluation = (Map<String, Object>) retrievalMetadata.get("latestQualityEvaluation");
@@ -236,7 +245,8 @@ class RetrievalArtifactDbServiceTest {
         assertThat(latestCitationBudget).containsKey("usage");
         assertThat(latestEmbeddingIndex)
             .containsEntry("model_role", "embeddingModel")
-            .containsEntry("local_fallback", true);
+            .containsEntry("local_fallback", true)
+            .containsEntry("vector_backend", "lancedb");
 
         RetrievalArtifact saved = savedArtifact.get();
         assertThat(saved.getQualityReportPath()).isEqualTo("indexes/retrieval_quality_report.json");
@@ -259,7 +269,8 @@ class RetrievalArtifactDbServiceTest {
             .containsEntry("benchmarkCaseCount", 3)
             .containsEntry("benchmarkPassedCount", 2)
             .containsEntry("vectorMode", "local_embedding_fallback")
-            .containsEntry("vectorEngine", "embedding_vector");
+            .containsEntry("vectorEngine", "embedding_vector")
+            .containsEntry("vectorBackend", "lancedb");
     }
 
     private Path projectRoot() {

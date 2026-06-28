@@ -2,7 +2,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from agents.base import BaseAgent
 from config import settings
@@ -36,15 +36,23 @@ class RetrievalIndexAgent(BaseAgent):
             cache_status = builder.cache_status(documents)
             graph_context = builder._graph_context(query)
             plan = builder._default_plan()
-            embedding_bundle = await self._build_embedding_bundle(request, query, documents)
+            vector_backend = self._vector_backend(request, builder.project_root)
+            embedding_bundle = await self._build_embedding_bundle(
+                request,
+                query,
+                documents,
+                vector_backend,
+                builder.project_root,
+            )
             engine = HybridRetrievalEngine(
                 builder.project_root,
                 documents,
                 graph_context,
                 embedding_bundle=embedding_bundle,
+                vector_backend=vector_backend,
             )
-            engine.persist_indexes(cache_status=cache_status)
             retrieval = engine.retrieve(query, plan, top_k=top_k)
+            engine.persist_indexes(cache_status=cache_status)
             benchmark_queries = self._benchmark_queries(request, builder.project_root)
             benchmark_report_path = None
             if self._benchmark_requested(request, builder.project_root):
@@ -212,12 +220,15 @@ class RetrievalIndexAgent(BaseAgent):
             self,
             request: AgentRequest,
             query: str,
-            documents: list) -> Dict[str, Any]:
+            documents: list,
+            vector_backend: str = "auto",
+            project_root: Optional[Path] = None) -> Dict[str, Any]:
         vector_documents = [doc for doc in documents if str(getattr(doc, "text", "") or "").strip()]
         metadata: Dict[str, Any] = {
-            "enabled": self._embedding_index_enabled(request),
+            "enabled": self._embedding_index_enabled(request, project_root),
             "status": "skipped",
             "vector_mode": "hash_fallback",
+            "vector_backend": vector_backend,
             "document_count": len(vector_documents),
         }
         if not metadata["enabled"]:
@@ -260,6 +271,7 @@ class RetrievalIndexAgent(BaseAgent):
         metadata.update({
             "status": gateway.get("status", "success"),
             "vector_mode": vector_mode,
+            "vector_backend": vector_backend,
             "operation": gateway.get("operation"),
             "model_profile_id": usage.get("model_profile_id") or gateway.get("model_profile_id"),
             "model_role": usage.get("model_role") or gateway.get("model_role"),
@@ -283,12 +295,16 @@ class RetrievalIndexAgent(BaseAgent):
             "metadata": metadata,
         }
 
-    def _embedding_index_enabled(self, request: AgentRequest) -> bool:
+    def _embedding_index_enabled(self, request: AgentRequest, project_root: Optional[Path] = None) -> bool:
         explicit = request.parameters.get("use_model_embeddings")
         if explicit is None:
             explicit = request.parameters.get("useModelEmbeddings")
         if explicit is not None:
             return self._truthy(explicit)
+        if project_root is not None:
+            configured = self._config_value(project_root, "use_model_embeddings", "useModelEmbeddings")
+            if configured is not None:
+                return self._truthy(configured)
         if self._truthy(request.parameters.get("probe_model_gateway")):
             return True
         if not request.model_profile_id:
@@ -298,6 +314,44 @@ class RetrievalIndexAgent(BaseAgent):
         except Exception:
             return False
         return bool(config and not config.get("mock"))
+
+    def _vector_backend(self, request: AgentRequest, project_root: Path) -> str:
+        explicit = (
+            request.parameters.get("vector_backend")
+            or request.parameters.get("vectorBackend")
+            or request.parameters.get("vector_store")
+            or request.parameters.get("vectorStore")
+        )
+        if explicit:
+            return self._normalize_vector_backend(explicit)
+        config_path = project_root / "indexes" / "retrieval_config.json"
+        if config_path.exists():
+            configured = self._config_value(project_root, "vector_backend", "vectorBackend")
+            if configured:
+                return self._normalize_vector_backend(configured)
+        return "auto"
+
+    def _config_value(self, project_root: Path, *keys: str) -> Any:
+        config_path = project_root / "indexes" / "retrieval_config.json"
+        if not config_path.exists():
+            return None
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            self.logger.warning("Invalid retrieval config: %s", config_path)
+            return None
+        for key in keys:
+            if key in config:
+                return config.get(key)
+        return None
+
+    def _normalize_vector_backend(self, value: Any) -> str:
+        text = str(value or "auto").strip().lower()
+        if text in {"lancedb", "lance", "lance_db"}:
+            return "lancedb"
+        if text in {"memory", "local", "hash", "hash_vector", "in_memory"}:
+            return "memory"
+        return "auto"
 
     async def _probe_model_gateway(
             self,

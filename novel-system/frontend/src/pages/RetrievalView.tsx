@@ -11,6 +11,7 @@ import {
   InputNumber,
   Progress,
   Row,
+  Select,
   Space,
   Statistic,
   Switch,
@@ -86,6 +87,8 @@ const RetrievalView: React.FC = () => {
         use_vector: data?.config?.use_vector ?? true,
         use_graph: data?.config?.use_graph ?? true,
         use_rerank: data?.config?.use_rerank ?? true,
+        use_model_embeddings: data?.config?.use_model_embeddings ?? false,
+        vector_backend: data?.config?.vector_backend ?? 'auto',
         graph_hops: data?.config?.graph_hops ?? 2,
         top_k: data?.config?.top_k ?? 12,
         max_context_chars: data?.config?.max_context_chars ?? 6000,
@@ -308,6 +311,30 @@ const RetrievalView: React.FC = () => {
       render: (exists: boolean) => <Tag color={exists ? 'success' : 'default'}>{exists ? '已生成' : '未生成'}</Tag>,
     },
     { title: '引擎', dataIndex: 'engine', key: 'engine' },
+    {
+      title: '向量模式',
+      key: 'vectorMode',
+      render: (_: any, record: any) => record.vector_mode ? (
+        <Space size={4} wrap>
+          <Tag color="geekblue">{record.vector_mode}</Tag>
+          {record.vector_backend ? (
+            <Tag color={record.vector_backend === 'lancedb' ? 'green' : 'default'}>{record.vector_backend}</Tag>
+          ) : null}
+        </Space>
+      ) : '-',
+    },
+    {
+      title: '后端状态',
+      key: 'backendStatus',
+      render: (_: any, record: any) => {
+        const status = record.backend_status || record.embedding_metadata?.backend_status
+        return status?.status ? (
+          <Tag color={status.active === 'lancedb' ? 'success' : status.status === 'fallback' ? 'warning' : 'default'}>
+            {status.status}
+          </Tag>
+        ) : '-'
+      },
+    },
     { title: '文档数', dataIndex: 'documentCount', key: 'documentCount', width: 100 },
     { title: '更新时间', dataIndex: 'updatedAt', key: 'updatedAt' },
     { title: '路径', dataIndex: 'path', key: 'path' },
@@ -625,6 +652,19 @@ const RetrievalView: React.FC = () => {
           </Form.Item>
           <Form.Item name="use_rerank" label="Rerank" valuePropName="checked">
             <Switch />
+          </Form.Item>
+          <Form.Item name="use_model_embeddings" label="模型向量" valuePropName="checked">
+            <Switch />
+          </Form.Item>
+          <Form.Item name="vector_backend" label="向量库">
+            <Select
+              style={{ width: 120 }}
+              options={[
+                { value: 'auto', label: 'Auto' },
+                { value: 'memory', label: 'Memory' },
+                { value: 'lancedb', label: 'LanceDB' },
+              ]}
+            />
           </Form.Item>
           <Form.Item name="graph_hops" label="图谱跳数">
             <InputNumber min={1} max={5} style={{ width: 90 }} />

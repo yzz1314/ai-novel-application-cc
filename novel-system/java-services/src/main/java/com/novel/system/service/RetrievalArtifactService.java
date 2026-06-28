@@ -334,6 +334,8 @@ public class RetrievalArtifactService {
                     "use_keyword",
                     "use_graph",
                     "use_rerank",
+                    "use_model_embeddings",
+                    "vector_backend",
                     "graph_relation",
                     "graph_hops",
                     "vector_filters",
@@ -953,6 +955,8 @@ public class RetrievalArtifactService {
         config.put("use_keyword", true);
         config.put("use_graph", true);
         config.put("use_rerank", true);
+        config.put("use_model_embeddings", false);
+        config.put("vector_backend", "auto");
         config.put("graph_relation", null);
         config.put("graph_hops", 2);
         config.put("vector_filters", new LinkedHashMap<>());

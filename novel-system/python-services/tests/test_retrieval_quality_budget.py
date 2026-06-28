@@ -10,6 +10,7 @@ sys.modules.setdefault("litellm", types.SimpleNamespace(acompletion=None))
 from agents.retrieval_index_agent import RetrievalIndexAgent
 from config import settings
 from retrieval.context_builder import ContextBuilder
+from retrieval.hybrid_engine import HashVectorIndex
 from schemas.agent_request import AgentRequest
 
 
@@ -200,6 +201,110 @@ async def test_retrieval_index_report_includes_quality_and_budget(tmp_path):
     assert hybrid_summary["vector_index"]["vector_mode"] == "local_embedding_fallback"
 
 
+def test_hash_vector_index_uses_lancedb_backend_when_available(tmp_path, monkeypatch):
+    class FakeSearch:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def limit(self, _limit):
+            return self
+
+        def to_list(self):
+            return [
+                {**row, "_distance": index * 0.1}
+                for index, row in enumerate(self.rows)
+            ]
+
+    class FakeTable:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def search(self, _query_vector):
+            return FakeSearch(self.rows)
+
+    class FakeDb:
+        def __init__(self):
+            self.rows = []
+
+        def create_table(self, _name, data, mode=None):
+            self.rows = list(data)
+            return FakeTable(self.rows)
+
+    fake_module = types.SimpleNamespace(connect=lambda _path: FakeDb())
+    monkeypatch.setitem(sys.modules, "lancedb", fake_module)
+    documents = [
+        SimpleNamespace(
+            doc_id="doc:a",
+            source_type="memory",
+            path="memory/a.md",
+            title="A",
+            text="jade token trial",
+            metadata={"order": 1},
+        ),
+        SimpleNamespace(
+            doc_id="doc:b",
+            source_type="skill",
+            path="skills/b.md",
+            title="B",
+            text="pressure hook clue",
+            metadata={"order": 2},
+        ),
+    ]
+    index = HashVectorIndex(
+        documents,
+        tokenizer=lambda text: str(text).lower().split(),
+        embedding_bundle={
+            "query_vectors": [[1.0, 0.0, 0.0]],
+            "document_vectors": [[1.0, 0.0, 0.0], [0.2, 0.8, 0.0]],
+            "metadata": {"vector_mode": "model_embedding"},
+        },
+        vector_backend="lancedb",
+        project_root=tmp_path,
+    )
+
+    results = index.search("jade token", top_k=2)
+    summary = index.summary()
+
+    assert results[0]["doc_id"] == "doc:a"
+    assert summary["engine"] == "embedding_vector"
+    assert summary["vector_backend"] == "lancedb"
+    assert summary["backend_status"]["status"] == "active"
+    assert summary["embedding_metadata"]["vector_backend"] == "lancedb"
+
+
+def test_hash_vector_index_falls_back_when_lancedb_unavailable(tmp_path, monkeypatch):
+    fake_module = types.SimpleNamespace(
+        connect=lambda _path: (_ for _ in ()).throw(RuntimeError("lancedb unavailable"))
+    )
+    monkeypatch.setitem(sys.modules, "lancedb", fake_module)
+    documents = [
+        SimpleNamespace(
+            doc_id="doc:a",
+            source_type="memory",
+            path="memory/a.md",
+            title="A",
+            text="jade token trial",
+            metadata={},
+        )
+    ]
+    index = HashVectorIndex(
+        documents,
+        tokenizer=lambda text: str(text).lower().split(),
+        embedding_bundle={
+            "query_vectors": [[1.0, 0.0]],
+            "document_vectors": [[1.0, 0.0]],
+            "metadata": {"vector_mode": "model_embedding"},
+        },
+        vector_backend="lancedb",
+        project_root=tmp_path,
+    )
+
+    assert index.summary()["vector_backend"] == "memory"
+    assert index.summary()["backend_status"]["status"] == "fallback"
+    assert index.summary()["backend_status"]["reason"] == "lancedb_unavailable"
+    assert index.search("jade", top_k=1)
+
+
 @pytest.mark.asyncio
 async def test_retrieval_index_writes_benchmark_report(tmp_path):
     project_id = "proj_retrieval_benchmark"
@@ -259,6 +364,89 @@ async def test_retrieval_index_writes_benchmark_report(tmp_path):
     assert {case["id"] for case in benchmark["cases"]} == {"jade_token", "scene_skill"}
     assert all(case["top_results"] for case in benchmark["cases"])
     assert hybrid_summary["benchmark"]["report_path"] == "indexes/retrieval_benchmark_report.json"
+
+
+@pytest.mark.asyncio
+async def test_retrieval_index_uses_configured_embedding_and_vector_backend(tmp_path, monkeypatch):
+    class FakeSearch:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def limit(self, _limit):
+            return self
+
+        def to_list(self):
+            return [
+                {**row, "_distance": index * 0.05}
+                for index, row in enumerate(self.rows)
+            ]
+
+    class FakeTable:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def search(self, _query_vector):
+            return FakeSearch(self.rows)
+
+    class FakeDb:
+        def create_table(self, _name, data, mode=None):
+            return FakeTable(list(data))
+
+    monkeypatch.setitem(sys.modules, "lancedb", types.SimpleNamespace(connect=lambda _path: FakeDb()))
+    project_id = "proj_retrieval_lancedb_config"
+    project_root = write_project_documents(tmp_path, project_id)
+    (project_root / "indexes").mkdir(parents=True, exist_ok=True)
+    (project_root / "indexes" / "retrieval_config.json").write_text(
+        json.dumps({
+            "top_k": 4,
+            "use_model_embeddings": True,
+            "vector_backend": "lancedb",
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    config_root = tmp_path / "config"
+    config_root.mkdir(parents=True)
+    (config_root / "model_profiles.json").write_text(
+        json.dumps({
+            "defaultProfileId": "retrieval_lancedb",
+            "profiles": [
+                {
+                    "profileId": "retrieval_lancedb",
+                    "mainModel": {"provider": "mock", "model": "mock-main", "mock": True},
+                    "embeddingModel": {"provider": "mock", "model": "mock-embedding", "mock": True},
+                    "rerankModel": {"provider": "mock", "model": "mock-rerank", "mock": True},
+                }
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    original_base_path = settings.PROJECT_BASE_PATH
+    settings.PROJECT_BASE_PATH = str(tmp_path)
+    try:
+        response = await RetrievalIndexAgent().run(AgentRequest(
+            task_id="task_retrieval_lancedb",
+            project_id=project_id,
+            task_type="retrieval_index",
+            model_profile_id="retrieval_lancedb",
+            user_input="Lin Mo Xuanmen trial jade token",
+            parameters={"top_k": 4},
+        ))
+    finally:
+        settings.PROJECT_BASE_PATH = original_base_path
+
+    assert response.status == "success"
+    vector_index = response.structured_output["vector_index"]
+    assert vector_index["engine"] == "embedding_vector"
+    assert vector_index["vector_backend"] == "lancedb"
+    assert vector_index["backend_status"]["status"] == "active"
+    assert vector_index["embedding_metadata"]["vector_backend"] == "lancedb"
+
+    vector_summary = json.loads((project_root / "indexes" / "vector" / "index_summary.json").read_text(encoding="utf-8"))
+    report = json.loads((project_root / "indexes" / "retrieval_index_report.json").read_text(encoding="utf-8"))
+    assert vector_summary["vector_backend"] == "lancedb"
+    assert vector_summary["backend_status"]["status"] == "active"
+    assert report["stats"]["vector_backend"] == "lancedb"
 
 
 @pytest.mark.asyncio

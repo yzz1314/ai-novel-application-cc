@@ -140,6 +140,7 @@ const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [dashboard, setDashboard] = useState<any>(null)
   const [trends, setTrends] = useState<any>(null)
+  const [operations, setOperations] = useState<any>(null)
   const [alertNotifications, setAlertNotifications] = useState<any>(null)
   const [policyModalOpen, setPolicyModalOpen] = useState(false)
   const [savingPolicy, setSavingPolicy] = useState(false)
@@ -169,6 +170,12 @@ const Dashboard: React.FC = () => {
   const activeNotificationFilters = alertNotifications?.filters || {}
   const trendSummary = trends?.summary || {}
   const trendSnapshots = trends?.snapshots || []
+  const operationsReadiness = operations?.readiness || {}
+  const operationsIncidents = operations?.incidents || {}
+  const operationsCapacity = operations?.capacity || {}
+  const operationsDelivery = operations?.delivery || {}
+  const operationsFreshness = operations?.dataFreshness || {}
+  const operationsRunbook = operations?.runbook || []
 
   const activeTasks = Number(taskSummary.PENDING || 0) + Number(taskSummary.RUNNING || 0)
   const failedTasks = Number(taskSummary.FAILED || 0)
@@ -193,13 +200,16 @@ const Dashboard: React.FC = () => {
       setLoading(true)
       const data = await dashboardApi.getOverview()
       const trendData = await dashboardApi.getTrends({ limit: 24 })
+      const operationsData = await dashboardApi.getOperations()
       const notificationData = await dashboardApi.getAlertNotifications({ limit: 12, ...notificationFilters })
       setDashboard(data)
       setTrends(trendData)
+      setOperations(operationsData)
       setAlertNotifications(notificationData)
     } catch (error) {
       setDashboard(null)
       setTrends(null)
+      setOperations(null)
       setAlertNotifications(null)
     } finally {
       setLoading(false)
@@ -687,6 +697,67 @@ const Dashboard: React.FC = () => {
             <Empty description="暂无通知事件" />
           )}
         </Space>
+      </Card>
+
+      <Card
+        title="运维看板"
+        loading={loading}
+        extra={
+          <Space wrap>
+            <Tag color={operationsReadiness.status === 'READY' ? 'success' : operationsReadiness.status === 'DEGRADED' ? 'error' : 'warning'}>
+              {operationsReadiness.status || 'UNKNOWN'}
+            </Tag>
+            <Tag color={operationsFreshness.status === 'FRESH' ? 'success' : operationsFreshness.status === 'MISSING' ? 'default' : 'warning'}>
+              趋势 {operationsFreshness.status || 'UNKNOWN'}
+            </Tag>
+          </Space>
+        }
+      >
+        <Row gutter={[16, 16]}>
+          <Col xs={24} md={6}>
+            <Statistic
+              title="活跃告警"
+              value={operationsIncidents.activeCount || 0}
+              valueStyle={{ color: Number(operationsIncidents.criticalCount || 0) ? '#cf1322' : undefined }}
+            />
+            <Space wrap>
+              <Tag color={operationsIncidents.criticalCount ? 'error' : 'default'}>严重 {operationsIncidents.criticalCount || 0}</Tag>
+              <Tag color={operationsIncidents.warningCount ? 'warning' : 'default'}>警告 {operationsIncidents.warningCount || 0}</Tag>
+            </Space>
+          </Col>
+          <Col xs={24} md={6}>
+            <Statistic title="任务积压" value={operationsCapacity.activeBacklog || 0} />
+            <Text type="secondary">
+              运行 {operationsCapacity.runningTasks || 0} / 等待 {operationsCapacity.pendingTasks || 0} / 审批 {operationsCapacity.waitingApprovals || 0}
+            </Text>
+          </Col>
+          <Col xs={24} md={6}>
+            <Statistic title="投递异常" value={(operationsDelivery.retryPending || 0) + (operationsDelivery.failed || 0)} />
+            <Text type="secondary">
+              成功 {operationsDelivery.delivered || 0} / 重试 {operationsDelivery.retryPending || 0} / 失败 {operationsDelivery.failed || 0}
+            </Text>
+          </Col>
+          <Col xs={24} md={6}>
+            <Statistic title="趋势年龄" value={operationsFreshness.ageMinutes >= 0 ? operationsFreshness.ageMinutes : 0} suffix="分钟" />
+            <Text type="secondary">采样 {operationsFreshness.sampleIntervalMinutes || 5} 分钟</Text>
+          </Col>
+        </Row>
+        <List
+          size="small"
+          style={{ marginTop: 16 }}
+          dataSource={operationsRunbook}
+          renderItem={(item: any) => (
+            <List.Item
+              actions={[
+                <Button type="link" onClick={() => navigate(actionPath(item.target))}>
+                  处理
+                </Button>,
+              ]}
+            >
+              <List.Item.Meta title={item.title} description={item.description} />
+            </List.Item>
+          )}
+        />
       </Card>
 
       {(performanceSummary.slowTaskCount || performanceSummary.highRetryTaskCount) ? (

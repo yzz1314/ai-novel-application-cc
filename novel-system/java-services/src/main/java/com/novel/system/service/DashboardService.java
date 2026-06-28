@@ -150,6 +150,35 @@ public class DashboardService {
         return response;
     }
 
+    public Map<String, Object> getOperations() {
+        List<Project> projects = projectRepository.findAll();
+        List<Task> monitoredTasks = taskRepository.findAllByOrderByCreatedAtDesc(PageRequest.of(0, MONITORED_TASK_LIMIT));
+        Map<String, Object> stats = stats();
+        Map<String, Object> taskSummary = taskSummary();
+        List<Task> partialTasks = taskRepository.findByStatus(TaskStatus.PARTIAL);
+        Map<String, Object> serviceStatus = serviceStatus();
+        Map<String, Object> healthSummary = healthSummary(stats, taskSummary, partialTasks, serviceStatus);
+        Map<String, Object> performanceSummary = performanceSummary(monitoredTasks);
+        List<Map<String, Object>> blockedProjects = blockedProjects(projects);
+        Map<String, Object> alertSummary = alertSummary(alerts(healthSummary, performanceSummary, blockedProjects, serviceStatus));
+        Map<String, Object> notificationHistory = getAlertNotifications(50);
+        List<Map<String, Object>> snapshots = dashboardMetricSnapshotRepository
+            .findAllByOrderByCapturedAtDesc(PageRequest.of(0, 1))
+            .stream()
+            .map(this::snapshotMap)
+            .toList();
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("generatedAt", LocalDateTime.now());
+        response.put("readiness", operationsReadiness(healthSummary, alertSummary, serviceStatus));
+        response.put("incidents", operationsIncidents(alertSummary, blockedProjects));
+        response.put("capacity", operationsCapacity(stats, taskSummary, performanceSummary));
+        response.put("delivery", operationsDelivery(notificationHistory));
+        response.put("dataFreshness", operationsDataFreshness(snapshots));
+        response.put("runbook", operationsRunbook(healthSummary, alertSummary, performanceSummary, notificationHistory));
+        return response;
+    }
+
     public Map<String, Object> getAlertNotifications(int limit) {
         return getAlertNotifications(limit, Map.of());
     }
@@ -434,6 +463,137 @@ public class DashboardService {
         result.put("maxDurationMs", snapshot.getMaxDurationMs());
         result.put("metrics", snapshot.getMetrics() == null ? Map.of() : snapshot.getMetrics());
         return result;
+    }
+
+    private Map<String, Object> operationsReadiness(
+            Map<String, Object> healthSummary,
+            Map<String, Object> alertSummary,
+            Map<String, Object> serviceStatus) {
+        Map<String, Object> summary = (Map<String, Object>) alertSummary.getOrDefault("summary", Map.of());
+        long activeAlerts = numberValue(summary.get("activeCount"));
+        boolean servicesUp = serviceStatus.values().stream().allMatch(this::serviceIsUp);
+        String healthStatus = stringValue(healthSummary.get("status"), "UNKNOWN");
+        String status = servicesUp && activeAlerts == 0 && "HEALTHY".equals(healthStatus)
+            ? "READY"
+            : servicesUp ? "ATTENTION" : "DEGRADED";
+        return details(
+            "status", status,
+            "healthStatus", healthStatus,
+            "servicesUp", servicesUp,
+            "activeAlerts", activeAlerts,
+            "successRate", healthSummary.get("successRate"),
+            "message", healthSummary.get("message")
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> operationsIncidents(
+            Map<String, Object> alertSummary,
+            List<Map<String, Object>> blockedProjects) {
+        Map<String, Object> summary = (Map<String, Object>) alertSummary.getOrDefault("summary", Map.of());
+        List<Map<String, Object>> activeAlerts = alertSummary.get("activeAlerts") instanceof List<?> list
+            ? list.stream().filter(Map.class::isInstance).map(item -> (Map<String, Object>) item).toList()
+            : List.of();
+        return details(
+            "activeCount", summary.getOrDefault("activeCount", 0L),
+            "criticalCount", activeAlerts.stream().filter(alert -> "critical".equals(alert.get("severity"))).count(),
+            "warningCount", activeAlerts.stream().filter(alert -> "warning".equals(alert.get("severity"))).count(),
+            "blockedProjectCount", blockedProjects.size(),
+            "topAlerts", activeAlerts.stream().limit(5).toList(),
+            "blockedProjects", blockedProjects.stream().limit(5).toList()
+        );
+    }
+
+    private Map<String, Object> operationsCapacity(
+            Map<String, Object> stats,
+            Map<String, Object> taskSummary,
+            Map<String, Object> performanceSummary) {
+        long running = numberValue(taskSummary.get(TaskStatus.RUNNING.name()));
+        long pending = numberValue(taskSummary.get(TaskStatus.PENDING.name()));
+        long waitingApprovals = numberValue(taskSummary.get(TaskStatus.PARTIAL.name()));
+        long windowTaskCount = numberValue(performanceSummary.get("windowTaskCount"));
+        long slowTaskCount = numberValue(performanceSummary.get("slowTaskCount"));
+        long highRetryTaskCount = numberValue(performanceSummary.get("highRetryTaskCount"));
+        return details(
+            "runningTasks", running,
+            "pendingTasks", pending,
+            "waitingApprovals", waitingApprovals,
+            "activeBacklog", running + pending + waitingApprovals,
+            "windowTaskCount", windowTaskCount,
+            "slowTaskCount", slowTaskCount,
+            "highRetryTaskCount", highRetryTaskCount,
+            "avgDurationMs", performanceSummary.get("avgDurationMs"),
+            "maxDurationMs", performanceSummary.get("maxDurationMs"),
+            "totalTokens", performanceSummary.get("totalTokens"),
+            "totalProjects", stats.get("totalProjects")
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> operationsDelivery(Map<String, Object> notificationHistory) {
+        Map<String, Object> summary = (Map<String, Object>) notificationHistory.getOrDefault("summary", Map.of());
+        return details(
+            "total", summary.getOrDefault("total", 0),
+            "matchedTotal", summary.getOrDefault("matchedTotal", 0L),
+            "delivered", summary.getOrDefault("delivered", 0L),
+            "retryPending", summary.getOrDefault("retryPending", 0L),
+            "failed", summary.getOrDefault("deliveryFailed", 0L),
+            "pendingChannel", summary.getOrDefault("pendingChannel", 0L),
+            "escalated", summary.getOrDefault("escalated", 0L),
+            "channels", notificationHistory.getOrDefault("channels", Map.of()),
+            "policy", notificationHistory.getOrDefault("policy", Map.of())
+        );
+    }
+
+    private Map<String, Object> operationsDataFreshness(List<Map<String, Object>> snapshots) {
+        Map<String, Object> latest = snapshots.isEmpty() ? Map.of() : snapshots.get(0);
+        LocalDateTime capturedAt = parseFilterTime(stringValue(latest.get("capturedAt"), ""));
+        long ageMinutes = capturedAt == null ? -1L : Duration.between(capturedAt, LocalDateTime.now()).toMinutes();
+        long sampleInterval = trendSampleIntervalMinutes();
+        String status = capturedAt == null
+            ? "MISSING"
+            : ageMinutes <= sampleInterval * 3 ? "FRESH" : "STALE";
+        return details(
+            "status", status,
+            "latestCapturedAt", latest.get("capturedAt"),
+            "ageMinutes", ageMinutes,
+            "sampleIntervalMinutes", sampleInterval,
+            "retentionDays", trendRetentionDays()
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> operationsRunbook(
+            Map<String, Object> healthSummary,
+            Map<String, Object> alertSummary,
+            Map<String, Object> performanceSummary,
+            Map<String, Object> notificationHistory) {
+        List<Map<String, Object>> runbook = new ArrayList<>();
+        Map<String, Object> alerts = (Map<String, Object>) alertSummary.getOrDefault("summary", Map.of());
+        Map<String, Object> delivery = (Map<String, Object>) notificationHistory.getOrDefault("summary", Map.of());
+        if (numberValue(healthSummary.get("failedTasks")) > 0) {
+            runbook.add(operationsAction("处理失败任务", "tasks", "查看失败诊断，优先重试可恢复任务"));
+        }
+        if (numberValue(healthSummary.get("waitingApprovals")) > 0) {
+            runbook.add(operationsAction("处理人工确认", "tasks", "恢复等待人工确认的工作流节点"));
+        }
+        if (numberValue(alerts.get("activeCount")) > 0) {
+            runbook.add(operationsAction("压降活跃告警", "dashboard", "确认、静默或处理当前活跃告警"));
+        }
+        if (numberValue(performanceSummary.get("slowTaskCount")) > 0 || numberValue(performanceSummary.get("highRetryTaskCount")) > 0) {
+            runbook.add(operationsAction("排查性能窗口", "tasks", "查看慢任务、高重试任务和 token 消耗"));
+        }
+        if (numberValue(delivery.get("retryPending")) > 0 || numberValue(delivery.get("deliveryFailed")) > 0) {
+            runbook.add(operationsAction("修复通知投递", "dashboard", "检查 webhook/email 配置和通知策略"));
+        }
+        if (runbook.isEmpty()) {
+            runbook.add(operationsAction("保持巡检", "dashboard", "当前无阻塞项，继续观察趋势和服务健康"));
+        }
+        return runbook;
+    }
+
+    private Map<String, Object> operationsAction(String title, String target, String description) {
+        return details("title", title, "target", target, "description", description);
     }
 
     @SuppressWarnings("unchecked")

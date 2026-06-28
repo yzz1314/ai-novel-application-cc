@@ -557,6 +557,68 @@ class DashboardServiceTest {
             });
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void operationsDashboardSummarizesReadinessIncidentsDeliveryAndRunbook() {
+        Project project = project("project_dashboard");
+        Task failedTask = task("task_failed", TaskStatus.FAILED, null);
+        DashboardAlertNotification notification = notification("notice_failed", "failed_tasks", "ESCALATE", "READY");
+        notification.setDeliveryStatus("FAILED");
+        when(projectRepository.findAll()).thenReturn(List.of(project));
+        when(projectRepository.count()).thenReturn(1L);
+        when(projectRepository.findByStatusIn(any())).thenReturn(List.of(project));
+        when(projectRepository.findByStatus(Project.ProjectStatus.ARCHIVED)).thenReturn(List.of());
+        when(sampleRepository.count()).thenReturn(0L);
+        when(sampleRepository.countByStatus(any())).thenReturn(0L);
+        when(chapterArtifactRepository.count()).thenReturn(0L);
+        when(chapterArtifactRepository.countByStage("draft")).thenReturn(0L);
+        when(chapterArtifactRepository.countByStage("final")).thenReturn(0L);
+        when(taskRepository.count()).thenReturn(1L);
+        when(taskRepository.countByStatus(TaskStatus.PENDING)).thenReturn(0L);
+        when(taskRepository.countByStatus(TaskStatus.RUNNING)).thenReturn(0L);
+        when(taskRepository.countByStatus(TaskStatus.PARTIAL)).thenReturn(0L);
+        when(taskRepository.countByStatus(TaskStatus.SUCCESS)).thenReturn(0L);
+        when(taskRepository.countByStatus(TaskStatus.FAILED)).thenReturn(1L);
+        when(taskRepository.countByStatus(TaskStatus.CANCELLED)).thenReturn(0L);
+        when(taskRepository.findByStatus(TaskStatus.PARTIAL)).thenReturn(List.of());
+        when(taskRepository.findAllByOrderByCreatedAtDesc(any(Pageable.class))).thenReturn(List.of(failedTask));
+        when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.FAILED)).thenReturn(1L);
+        when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.PARTIAL)).thenReturn(0L);
+        when(taskRepository.findByProjectIdAndStatusOrderByCreatedAtDesc(eq(project.getId()), eq(TaskStatus.PARTIAL), any(Pageable.class)))
+            .thenReturn(List.of());
+        when(taskRepository.findByProjectIdOrderByCreatedAtDesc(eq(project.getId()), any(Pageable.class))).thenReturn(List.of(failedTask));
+        when(pythonClientService.checkHealth()).thenReturn(true);
+        when(taskExecutorService.getTaskProgress(any(Task.class))).thenReturn(Map.of("percent", 100, "label", "done"));
+        when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of());
+        when(dashboardAlertNotificationRepository.findAll(any(Specification.class), any(Pageable.class)))
+            .thenReturn(new PageImpl<>(List.of(notification)));
+        when(dashboardAlertNotificationRepository.count(any(Specification.class))).thenReturn(1L);
+        when(dashboardMetricSnapshotRepository.findAllByOrderByCapturedAtDesc(any(Pageable.class)))
+            .thenReturn(List.of(snapshot("snapshot_1", LocalDateTime.now().minusMinutes(2), "ATTENTION", 1, 2, 100)));
+
+        Map<String, Object> operations = dashboardService.getOperations();
+
+        Map<String, Object> readiness = (Map<String, Object>) operations.get("readiness");
+        assertThat(readiness)
+            .containsEntry("status", "ATTENTION")
+            .containsEntry("servicesUp", true)
+            .containsEntry("activeAlerts", 2L);
+        Map<String, Object> incidents = (Map<String, Object>) operations.get("incidents");
+        assertThat(((Number) incidents.get("activeCount")).longValue()).isEqualTo(2L);
+        assertThat(incidents)
+            .containsEntry("criticalCount", 1L)
+            .containsEntry("blockedProjectCount", 1);
+        Map<String, Object> delivery = (Map<String, Object>) operations.get("delivery");
+        assertThat(delivery)
+            .containsEntry("failed", 1L)
+            .containsEntry("matchedTotal", 1L);
+        Map<String, Object> freshness = (Map<String, Object>) operations.get("dataFreshness");
+        assertThat(freshness).containsEntry("status", "FRESH");
+        assertThat((List<Map<String, Object>>) operations.get("runbook"))
+            .extracting(item -> item.get("target"))
+            .contains("tasks", "dashboard");
+    }
+
     private Project project(String projectId) {
         Project project = new Project();
         project.setId(projectId);

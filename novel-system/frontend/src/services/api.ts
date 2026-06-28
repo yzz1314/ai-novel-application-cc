@@ -31,6 +31,7 @@ export const projectApi = {
 export const dashboardApi = {
   getOverview: () => request(api.get('/dashboard')),
   getTrends: (params?: any) => request(api.get('/dashboard/trends', { params })),
+  getOperations: () => request(api.get('/dashboard/operations')),
   getAlertNotifications: (params?: any) => request(api.get('/dashboard/alerts/notifications', { params })),
   getAlertNotificationPolicy: () => request(api.get('/dashboard/alerts/notification-policy')),
   updateAlertNotificationPolicy: (data?: any) =>

@@ -2,6 +2,7 @@ package com.novel.system.service;
 
 import com.novel.system.dto.response.ProjectResponse;
 import com.novel.system.dto.response.TaskResponse;
+import com.novel.system.entity.DashboardAlertNotification;
 import com.novel.system.entity.DashboardAlertState;
 import com.novel.system.entity.DashboardAlertState.AlertStatus;
 import com.novel.system.entity.DashboardMetricSnapshot;
@@ -11,6 +12,7 @@ import com.novel.system.entity.Sample.SampleStatus;
 import com.novel.system.entity.Task;
 import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.repository.ChapterArtifactRepository;
+import com.novel.system.repository.DashboardAlertNotificationRepository;
 import com.novel.system.repository.DashboardAlertStateRepository;
 import com.novel.system.repository.DashboardMetricSnapshotRepository;
 import com.novel.system.repository.GraphArtifactRepository;
@@ -22,6 +24,7 @@ import com.novel.system.repository.SampleRepository;
 import com.novel.system.repository.SkillProfileRepository;
 import com.novel.system.repository.TaskRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.core.env.Environment;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 
@@ -47,6 +50,7 @@ public class DashboardService {
     private final ProjectRepository projectRepository;
     private final SampleRepository sampleRepository;
     private final TaskRepository taskRepository;
+    private final DashboardAlertNotificationRepository dashboardAlertNotificationRepository;
     private final DashboardAlertStateRepository dashboardAlertStateRepository;
     private final DashboardMetricSnapshotRepository dashboardMetricSnapshotRepository;
     private final ChapterArtifactRepository chapterArtifactRepository;
@@ -57,6 +61,7 @@ public class DashboardService {
     private final RetrievalArtifactRepository retrievalArtifactRepository;
     private final PythonClientService pythonClientService;
     private final TaskExecutorService taskExecutorService;
+    private final Environment environment;
 
     public Map<String, Object> getDashboard() {
         List<Project> projects = projectRepository.findAll();
@@ -74,6 +79,7 @@ public class DashboardService {
         Map<String, Object> performanceSummary = performanceSummary(monitoredTasks);
         List<Map<String, Object>> blockedProjects = blockedProjects(projects);
         Map<String, Object> alertSummary = alertSummary(alerts(healthSummary, performanceSummary, blockedProjects, serviceStatus));
+        Map<String, Object> notificationSummary = recordAlertNotifications(activeAlerts(alertSummary));
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("generatedAt", LocalDateTime.now());
@@ -85,6 +91,9 @@ public class DashboardService {
         response.put("snoozedAlerts", alertSummary.get("snoozedAlerts"));
         response.put("acknowledgedAlerts", alertSummary.get("acknowledgedAlerts"));
         response.put("alertSummary", alertSummary.get("summary"));
+        response.put("alertNotifications", notificationSummary.get("notifications"));
+        response.put("alertNotificationSummary", notificationSummary.get("summary"));
+        response.put("alertNotificationChannels", notificationSummary.get("channels"));
         response.put("workflowSummary", workflowSummary(recentProjects));
         response.put("blockedProjects", blockedProjects);
         response.put("nextActions", nextActions(stats, taskSummary, partialTasks, serviceStatus));
@@ -122,6 +131,34 @@ public class DashboardService {
         response.put("limit", safeLimit);
         response.put("summary", summary);
         response.put("snapshots", snapshots);
+        return response;
+    }
+
+    public Map<String, Object> getAlertNotifications(int limit) {
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+        List<Map<String, Object>> notifications = dashboardAlertNotificationRepository
+            .findAllByOrderByLastSeenAtDesc(PageRequest.of(0, safeLimit))
+            .stream()
+            .map(this::notificationMap)
+            .toList();
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("total", notifications.size());
+        summary.put("pendingChannel", notifications.stream()
+            .filter(notification -> "PENDING_CHANNEL".equals(notification.get("status")))
+            .count());
+        summary.put("ready", notifications.stream()
+            .filter(notification -> "READY".equals(notification.get("status")))
+            .count());
+        summary.put("escalated", notifications.stream()
+            .filter(notification -> "ESCALATE".equals(notification.get("escalationLevel")))
+            .count());
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("limit", safeLimit);
+        response.put("summary", summary);
+        response.put("channels", notificationChannels());
+        response.put("notifications", notifications);
         return response;
     }
 
@@ -235,6 +272,138 @@ public class DashboardService {
         result.put("maxDurationMs", snapshot.getMaxDurationMs());
         result.put("metrics", snapshot.getMetrics() == null ? Map.of() : snapshot.getMetrics());
         return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> activeAlerts(Map<String, Object> alertSummary) {
+        Object alerts = alertSummary.get("activeAlerts");
+        if (alerts instanceof List<?> list) {
+            return list.stream()
+                .filter(Map.class::isInstance)
+                .map(item -> (Map<String, Object>) item)
+                .toList();
+        }
+        return List.of();
+    }
+
+    private Map<String, Object> recordAlertNotifications(List<Map<String, Object>> activeAlerts) {
+        Map<String, Object> channels = notificationChannels();
+        List<Map<String, Object>> notifications = new ArrayList<>();
+
+        for (Map<String, Object> alert : activeAlerts) {
+            String severity = stringValue(alert.get("severity"), "info");
+            if (!shouldNotify(severity)) {
+                continue;
+            }
+            String escalationLevel = escalationLevel(severity);
+            String alertId = stringValue(alert.get("id"), "unknown_alert");
+            String conditionKey = stringValue(alert.get("conditionKey"), alertId);
+            DashboardAlertNotification notification = dashboardAlertNotificationRepository
+                .findByAlertIdAndConditionKeyAndEscalationLevel(alertId, conditionKey, escalationLevel)
+                .orElseGet(DashboardAlertNotification::new);
+            boolean existing = notification.getId() != null;
+            notification.setAlertId(alertId);
+            notification.setConditionKey(conditionKey);
+            notification.setSeverity(severity);
+            notification.setEscalationLevel(escalationLevel);
+            notification.setStatus(externalChannelConfigured(channels) ? "READY" : "PENDING_CHANNEL");
+            notification.setChannels(channels);
+            notification.setPayload(notificationPayload(alert));
+            notification.setLastSeenAt(LocalDateTime.now());
+            notification.setNotificationCount(existing ? numberValue(notification.getNotificationCount()) + 1 : 1L);
+            notifications.add(notificationMap(dashboardAlertNotificationRepository.save(notification)));
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("generated", notifications.size());
+        summary.put("pendingChannel", notifications.stream()
+            .filter(notification -> "PENDING_CHANNEL".equals(notification.get("status")))
+            .count());
+        summary.put("ready", notifications.stream()
+            .filter(notification -> "READY".equals(notification.get("status")))
+            .count());
+        summary.put("escalated", notifications.stream()
+            .filter(notification -> "ESCALATE".equals(notification.get("escalationLevel")))
+            .count());
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("channels", channels);
+        result.put("notifications", notifications);
+        result.put("summary", summary);
+        return result;
+    }
+
+    private Map<String, Object> notificationChannels() {
+        String webhookUrl = configValue("dashboard.alerts.webhook-url", "DASHBOARD_ALERT_WEBHOOK_URL");
+        String emailTo = configValue("dashboard.alerts.email-to", "DASHBOARD_ALERT_EMAIL_TO");
+        String emailFrom = configValue("dashboard.alerts.email-from", "DASHBOARD_ALERT_EMAIL_FROM");
+        return details(
+            "dashboard", details("enabled", true, "mode", "in_app"),
+            "webhook", details("enabled", !webhookUrl.isBlank(), "configured", !webhookUrl.isBlank()),
+            "email", details("enabled", !emailTo.isBlank(), "configured", !emailTo.isBlank(), "fromConfigured", !emailFrom.isBlank())
+        );
+    }
+
+    private Map<String, Object> notificationPayload(Map<String, Object> alert) {
+        return details(
+            "alertId", alert.get("id"),
+            "severity", alert.get("severity"),
+            "title", alert.get("title"),
+            "message", alert.get("message"),
+            "target", alert.get("target"),
+            "conditionKey", alert.get("conditionKey"),
+            "details", alert.get("details"),
+            "createdAt", String.valueOf(alert.get("createdAt"))
+        );
+    }
+
+    private Map<String, Object> notificationMap(DashboardAlertNotification notification) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("id", notification.getId());
+        result.put("alertId", notification.getAlertId());
+        result.put("conditionKey", notification.getConditionKey());
+        result.put("severity", notification.getSeverity());
+        result.put("escalationLevel", notification.getEscalationLevel());
+        result.put("status", notification.getStatus());
+        result.put("notificationCount", notification.getNotificationCount());
+        result.put("channels", notification.getChannels() == null ? Map.of() : notification.getChannels());
+        result.put("payload", notification.getPayload() == null ? Map.of() : notification.getPayload());
+        result.put("createdAt", notification.getCreatedAt());
+        result.put("lastSeenAt", notification.getLastSeenAt());
+        return result;
+    }
+
+    private boolean shouldNotify(String severity) {
+        return "critical".equals(severity) || "warning".equals(severity);
+    }
+
+    private String escalationLevel(String severity) {
+        return "critical".equals(severity) ? "ESCALATE" : "NOTIFY";
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean externalChannelConfigured(Map<String, Object> channels) {
+        Object webhook = channels.get("webhook");
+        Object email = channels.get("email");
+        Map<String, Object> webhookConfig = webhook instanceof Map<?, ?> map
+            ? (Map<String, Object>) map
+            : Map.of();
+        Map<String, Object> emailConfig = email instanceof Map<?, ?> map
+            ? (Map<String, Object>) map
+            : Map.of();
+        return configured(webhookConfig) || configured(emailConfig);
+    }
+
+    private boolean configured(Map<String, Object> channel) {
+        return Boolean.TRUE.equals(channel.get("configured"));
+    }
+
+    private String configValue(String propertyName, String envName) {
+        String value = environment == null ? null : environment.getProperty(propertyName);
+        if (value == null || value.isBlank()) {
+            value = System.getenv(envName);
+        }
+        return value == null ? "" : value.trim();
     }
 
     private Map<String, Object> taskSummary() {

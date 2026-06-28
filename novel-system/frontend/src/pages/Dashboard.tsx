@@ -98,6 +98,7 @@ const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [dashboard, setDashboard] = useState<any>(null)
   const [trends, setTrends] = useState<any>(null)
+  const [alertNotifications, setAlertNotifications] = useState<any>(null)
 
   useEffect(() => {
     loadDashboard()
@@ -115,6 +116,9 @@ const Dashboard: React.FC = () => {
   const nextActions = dashboard?.nextActions || []
   const alerts = dashboard?.alerts || []
   const alertSummary = dashboard?.alertSummary || {}
+  const notificationSummary = alertNotifications?.summary || dashboard?.alertNotificationSummary || {}
+  const notificationChannels = alertNotifications?.channels || dashboard?.alertNotificationChannels || {}
+  const notificationItems = alertNotifications?.notifications || dashboard?.alertNotifications || []
   const trendSummary = trends?.summary || {}
   const trendSnapshots = trends?.snapshots || []
 
@@ -141,11 +145,14 @@ const Dashboard: React.FC = () => {
       setLoading(true)
       const data = await dashboardApi.getOverview()
       const trendData = await dashboardApi.getTrends({ limit: 24 })
+      const notificationData = await dashboardApi.getAlertNotifications({ limit: 12 })
       setDashboard(data)
       setTrends(trendData)
+      setAlertNotifications(notificationData)
     } catch (error) {
       setDashboard(null)
       setTrends(null)
+      setAlertNotifications(null)
     } finally {
       setLoading(false)
     }
@@ -160,6 +167,8 @@ const Dashboard: React.FC = () => {
     })
     await loadDashboard()
   }
+
+  const channelConfigured = (channel: any) => Boolean(channel?.configured || channel?.enabled)
 
   const quickActions = [
     {
@@ -408,6 +417,61 @@ const Dashboard: React.FC = () => {
       ) : dashboard ? (
         <Alert type="success" showIcon message="暂无告警" />
       ) : null}
+
+      <Card
+        title="告警通知与升级"
+        loading={loading}
+        extra={
+          <Space wrap>
+            <Tag color={notificationSummary.pendingChannel ? 'warning' : 'success'}>
+              待配置 {notificationSummary.pendingChannel || 0}
+            </Tag>
+            <Tag color={notificationSummary.escalated ? 'error' : 'default'}>
+              升级 {notificationSummary.escalated || 0}
+            </Tag>
+          </Space>
+        }
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Space wrap>
+            <Tag color="success">Dashboard</Tag>
+            <Tag color={channelConfigured(notificationChannels.webhook) ? 'processing' : 'default'}>
+              Webhook {channelConfigured(notificationChannels.webhook) ? '已配置' : '未配置'}
+            </Tag>
+            <Tag color={channelConfigured(notificationChannels.email) ? 'processing' : 'default'}>
+              Email {channelConfigured(notificationChannels.email) ? '已配置' : '未配置'}
+            </Tag>
+          </Space>
+          {notificationItems.length ? (
+            <List
+              size="small"
+              dataSource={notificationItems.slice(0, 5)}
+              renderItem={(item: any) => (
+                <List.Item>
+                  <Space direction="vertical" size={0} style={{ width: '100%' }}>
+                    <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
+                      <Space wrap>
+                        <Text strong>{item.payload?.title || item.alertId}</Text>
+                        <Tag color={alertTagColor(item.severity)}>{item.severity}</Tag>
+                        <Tag color={item.escalationLevel === 'ESCALATE' ? 'error' : 'processing'}>
+                          {item.escalationLevel}
+                        </Tag>
+                        <Tag color={item.status === 'READY' ? 'success' : 'warning'}>{item.status}</Tag>
+                      </Space>
+                      <Text type="secondary">{item.lastSeenAt}</Text>
+                    </Space>
+                    <Text type="secondary">
+                      {item.payload?.message || '-'} / 次数 {item.notificationCount || 1}
+                    </Text>
+                  </Space>
+                </List.Item>
+              )}
+            />
+          ) : (
+            <Empty description="暂无通知事件" />
+          )}
+        </Space>
+      </Card>
 
       {(performanceSummary.slowTaskCount || performanceSummary.highRetryTaskCount) ? (
         <Alert

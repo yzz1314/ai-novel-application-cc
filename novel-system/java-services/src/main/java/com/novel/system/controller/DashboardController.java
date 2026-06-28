@@ -30,6 +30,11 @@ public class DashboardController {
         return ResponseEntity.ok(dashboardService.getTrends(limit));
     }
 
+    @GetMapping("/alerts/notifications")
+    public ResponseEntity<Map<String, Object>> getAlertNotifications(@RequestParam(defaultValue = "50") int limit) {
+        return ResponseEntity.ok(dashboardService.getAlertNotifications(limit));
+    }
+
     @PostMapping("/alerts/{alertId}/state")
     public ResponseEntity<Map<String, Object>> updateAlertState(
             @PathVariable String alertId,

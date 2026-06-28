@@ -59,6 +59,12 @@ python:
     url: ${PYTHON_SERVICE_URL:http://localhost:8000}
 
 # 文件存储配置
+dashboard:
+  alerts:
+    webhook-url: ${DASHBOARD_ALERT_WEBHOOK_URL:}
+    email-to: ${DASHBOARD_ALERT_EMAIL_TO:}
+    email-from: ${DASHBOARD_ALERT_EMAIL_FROM:}
+
 file:
   storage:
     base-path: ${PROJECT_BASE_PATH:/workspace}

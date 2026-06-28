@@ -1,11 +1,13 @@
 package com.novel.system.service;
 
 import com.novel.system.entity.Project;
+import com.novel.system.entity.DashboardAlertNotification;
 import com.novel.system.entity.DashboardAlertState;
 import com.novel.system.entity.DashboardMetricSnapshot;
 import com.novel.system.entity.Task;
 import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.repository.ChapterArtifactRepository;
+import com.novel.system.repository.DashboardAlertNotificationRepository;
 import com.novel.system.repository.DashboardAlertStateRepository;
 import com.novel.system.repository.DashboardMetricSnapshotRepository;
 import com.novel.system.repository.GraphArtifactRepository;
@@ -21,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.core.env.Environment;
 import org.springframework.data.domain.Pageable;
 
 import java.time.LocalDateTime;
@@ -44,6 +47,8 @@ class DashboardServiceTest {
     @Mock
     private TaskRepository taskRepository;
     @Mock
+    private DashboardAlertNotificationRepository dashboardAlertNotificationRepository;
+    @Mock
     private DashboardAlertStateRepository dashboardAlertStateRepository;
     @Mock
     private DashboardMetricSnapshotRepository dashboardMetricSnapshotRepository;
@@ -63,6 +68,8 @@ class DashboardServiceTest {
     private PythonClientService pythonClientService;
     @Mock
     private TaskExecutorService taskExecutorService;
+    @Mock
+    private Environment environment;
 
     private DashboardService dashboardService;
 
@@ -72,6 +79,7 @@ class DashboardServiceTest {
             projectRepository,
             sampleRepository,
             taskRepository,
+            dashboardAlertNotificationRepository,
             dashboardAlertStateRepository,
             dashboardMetricSnapshotRepository,
             chapterArtifactRepository,
@@ -81,7 +89,8 @@ class DashboardServiceTest {
             graphArtifactRepository,
             retrievalArtifactRepository,
             pythonClientService,
-            taskExecutorService
+            taskExecutorService,
+            environment
         );
     }
 
@@ -123,6 +132,7 @@ class DashboardServiceTest {
         when(taskRepository.findByStatus(TaskStatus.PARTIAL)).thenReturn(List.of(approvalTask));
         when(taskRepository.findAllByOrderByCreatedAtDesc(any(Pageable.class))).thenReturn(List.of(failedTask, approvalTask));
         when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of());
+        mockNotificationPersistence();
         when(dashboardMetricSnapshotRepository.save(any(DashboardMetricSnapshot.class)))
             .thenAnswer(invocation -> invocation.getArgument(0));
         when(taskRepository.countByProjectId(project.getId())).thenReturn(2L);
@@ -179,6 +189,19 @@ class DashboardServiceTest {
             .containsEntry("healthStatus", "ATTENTION")
             .containsEntry("failedTasks", 1L)
             .containsEntry("activeAlertCount", 5L);
+        Map<String, Object> notificationSummary = (Map<String, Object>) dashboard.get("alertNotificationSummary");
+        assertThat(notificationSummary)
+            .containsEntry("generated", 5)
+            .containsEntry("pendingChannel", 5L)
+            .containsEntry("escalated", 1L);
+        List<Map<String, Object>> notifications = (List<Map<String, Object>>) dashboard.get("alertNotifications");
+        assertThat(notifications)
+            .filteredOn(notification -> "failed_tasks".equals(notification.get("alertId")))
+            .singleElement()
+            .satisfies(notification -> {
+                assertThat(notification.get("escalationLevel")).isEqualTo("ESCALATE");
+                assertThat(notification.get("status")).isEqualTo("PENDING_CHANNEL");
+            });
 
         List<Map<String, Object>> blockedProjects = (List<Map<String, Object>>) dashboard.get("blockedProjects");
         assertThat(blockedProjects).hasSize(1);
@@ -213,6 +236,7 @@ class DashboardServiceTest {
         Task failedTask = task("task_failed", TaskStatus.FAILED, null);
 
         mockDashboardBasics(project, failedTask);
+        mockNotificationPersistence();
         when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of(acknowledgedState(
             "failed_tasks",
             "failed_tasks:" + Integer.toHexString(Map.of("failedTasks", 1L).hashCode())
@@ -289,6 +313,33 @@ class DashboardServiceTest {
             .containsEntry("latestHealthStatus", "ATTENTION");
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void getAlertNotificationsReturnsRecentNotificationSummary() {
+        DashboardAlertNotification notification = notification("notice_1", "failed_tasks", "ESCALATE", "READY");
+        when(dashboardAlertNotificationRepository.findAllByOrderByLastSeenAtDesc(any(Pageable.class)))
+            .thenReturn(List.of(notification));
+        when(environment.getProperty("dashboard.alerts.webhook-url")).thenReturn("https://example.invalid/hook");
+
+        Map<String, Object> response = dashboardService.getAlertNotifications(500);
+
+        assertThat(response.get("limit")).isEqualTo(200);
+        Map<String, Object> summary = (Map<String, Object>) response.get("summary");
+        assertThat(summary)
+            .containsEntry("total", 1)
+            .containsEntry("ready", 1L)
+            .containsEntry("escalated", 1L);
+        List<Map<String, Object>> notifications = (List<Map<String, Object>>) response.get("notifications");
+        assertThat(notifications)
+            .singleElement()
+            .satisfies(item -> {
+                assertThat(item.get("id")).isEqualTo("notice_1");
+                assertThat(item.get("alertId")).isEqualTo("failed_tasks");
+            });
+        Map<String, Object> channels = (Map<String, Object>) response.get("channels");
+        assertThat((Map<String, Object>) channels.get("webhook")).containsEntry("configured", true);
+    }
+
     private Project project(String projectId) {
         Project project = new Project();
         project.setId(projectId);
@@ -351,6 +402,29 @@ class DashboardServiceTest {
         snapshot.setMaxDurationMs(0L);
         snapshot.setMetrics(Map.of());
         return snapshot;
+    }
+
+    private DashboardAlertNotification notification(String id, String alertId, String level, String status) {
+        DashboardAlertNotification notification = new DashboardAlertNotification();
+        notification.setId(id);
+        notification.setAlertId(alertId);
+        notification.setConditionKey(alertId + ":condition");
+        notification.setSeverity("critical");
+        notification.setEscalationLevel(level);
+        notification.setStatus(status);
+        notification.setNotificationCount(1L);
+        notification.setChannels(Map.of("dashboard", Map.of("enabled", true)));
+        notification.setPayload(Map.of("title", "Failed tasks"));
+        notification.setCreatedAt(LocalDateTime.now().minusMinutes(5));
+        notification.setLastSeenAt(LocalDateTime.now());
+        return notification;
+    }
+
+    private void mockNotificationPersistence() {
+        when(dashboardAlertNotificationRepository.findByAlertIdAndConditionKeyAndEscalationLevel(any(), any(), any()))
+            .thenReturn(Optional.empty());
+        when(dashboardAlertNotificationRepository.save(any(DashboardAlertNotification.class)))
+            .thenAnswer(invocation -> invocation.getArgument(0));
     }
 
     private void mockDashboardBasics(Project project, Task failedTask) {

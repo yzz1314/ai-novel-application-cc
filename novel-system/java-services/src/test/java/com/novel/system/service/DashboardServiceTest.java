@@ -2,12 +2,14 @@ package com.novel.system.service;
 
 import com.novel.system.entity.Project;
 import com.novel.system.entity.DashboardAlertNotification;
+import com.novel.system.entity.DashboardAlertNotificationPolicy;
 import com.novel.system.entity.DashboardAlertState;
 import com.novel.system.entity.DashboardMetricSnapshot;
 import com.novel.system.entity.Task;
 import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.repository.ChapterArtifactRepository;
 import com.novel.system.repository.DashboardAlertNotificationRepository;
+import com.novel.system.repository.DashboardAlertNotificationPolicyRepository;
 import com.novel.system.repository.DashboardAlertStateRepository;
 import com.novel.system.repository.DashboardMetricSnapshotRepository;
 import com.novel.system.repository.GraphArtifactRepository;
@@ -51,6 +53,8 @@ class DashboardServiceTest {
     @Mock
     private DashboardAlertNotificationRepository dashboardAlertNotificationRepository;
     @Mock
+    private DashboardAlertNotificationPolicyRepository dashboardAlertNotificationPolicyRepository;
+    @Mock
     private DashboardAlertStateRepository dashboardAlertStateRepository;
     @Mock
     private DashboardMetricSnapshotRepository dashboardMetricSnapshotRepository;
@@ -85,6 +89,7 @@ class DashboardServiceTest {
             sampleRepository,
             taskRepository,
             dashboardAlertNotificationRepository,
+            dashboardAlertNotificationPolicyRepository,
             dashboardAlertStateRepository,
             dashboardMetricSnapshotRepository,
             chapterArtifactRepository,
@@ -415,6 +420,70 @@ class DashboardServiceTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void dashboardAppliesNotificationPolicyRoutingAndTemplate() {
+        Project project = project("project_dashboard");
+        Task failedTask = task("task_failed", TaskStatus.FAILED, null);
+        DashboardAlertNotificationPolicy policy = notificationPolicy();
+        mockDashboardBasics(project, failedTask);
+        mockNotificationPersistence();
+        when(dashboardAlertNotificationPolicyRepository.findById("default")).thenReturn(Optional.of(policy));
+        when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of());
+
+        Map<String, Object> dashboard = dashboardService.getDashboard();
+
+        Map<String, Object> policyResponse = (Map<String, Object>) dashboard.get("alertNotificationPolicy");
+        assertThat(policyResponse)
+            .containsEntry("subscriberCount", 1)
+            .containsEntry("enabledSubscriberCount", 1L);
+        List<Map<String, Object>> notifications = (List<Map<String, Object>>) dashboard.get("alertNotifications");
+        assertThat(notifications)
+            .filteredOn(notification -> "failed_tasks".equals(notification.get("alertId")))
+            .singleElement()
+            .satisfies(notification -> {
+                Map<String, Object> payload = (Map<String, Object>) notification.get("payload");
+                Map<String, Object> routing = (Map<String, Object>) payload.get("routing");
+                Map<String, Object> template = (Map<String, Object>) payload.get("template");
+                assertThat((List<String>) routing.get("groups")).containsExactly("ops");
+                assertThat((List<String>) routing.get("emails")).containsExactly("ops@example.invalid");
+                assertThat(template.get("subject")).isEqualTo("[OPS][ESCALATE] 存在失败任务");
+            });
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void updateAlertNotificationPolicyPersistsSubscribersRoutingAndTemplates() {
+        when(dashboardAlertNotificationPolicyRepository.findById("default")).thenReturn(Optional.empty());
+        when(dashboardAlertNotificationPolicyRepository.save(any(DashboardAlertNotificationPolicy.class)))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+
+        Map<String, Object> response = dashboardService.updateAlertNotificationPolicy(Map.of(
+            "enabled", true,
+            "defaultGroup", "ops",
+            "actor", "tester",
+            "subscribers", List.of(Map.of(
+                "id", "ops-1",
+                "name", "Ops One",
+                "group", "ops",
+                "email", "ops@example.invalid",
+                "enabled", true
+            )),
+            "routingRules", Map.of("critical", List.of("ops")),
+            "templates", Map.of("subject", "[{{escalationLevel}}] {{title}}", "body", "{{message}}"),
+            "channels", Map.of("email", Map.of("enabled", true), "webhook", Map.of("enabled", false))
+        ));
+
+        assertThat(response)
+            .containsEntry("defaultGroup", "ops")
+            .containsEntry("subscriberCount", 1)
+            .containsEntry("updatedBy", "tester");
+        assertThat((Map<String, Object>) response.get("routingRules")).containsEntry("critical", List.of("ops"));
+        assertThat((List<Map<String, Object>>) response.get("subscribers"))
+            .singleElement()
+            .satisfies(subscriber -> assertThat(subscriber).containsEntry("email", "ops@example.invalid"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void dashboardSchedulesDeliveryRetryWhenConfiguredWebhookFails() {
         Project project = project("project_dashboard");
         Task failedTask = task("task_failed", TaskStatus.FAILED, null);
@@ -529,7 +598,40 @@ class DashboardServiceTest {
         return notification;
     }
 
+    private DashboardAlertNotificationPolicy notificationPolicy() {
+        DashboardAlertNotificationPolicy policy = new DashboardAlertNotificationPolicy();
+        policy.setId("default");
+        policy.setEnabled(true);
+        policy.setDefaultGroup("ops");
+        policy.setSubscribers(List.of(Map.of(
+            "id", "ops-1",
+            "name", "Ops One",
+            "group", "ops",
+            "email", "ops@example.invalid",
+            "channels", List.of("dashboard", "email"),
+            "enabled", true
+        )));
+        policy.setRoutingRules(Map.of(
+            "critical", List.of("ops"),
+            "warning", List.of("ops")
+        ));
+        policy.setTemplates(Map.of(
+            "subject", "[OPS][{{escalationLevel}}] {{title}}",
+            "body", "{{message}} -> {{groups}}"
+        ));
+        policy.setChannels(Map.of(
+            "dashboard", Map.of("enabled", true),
+            "email", Map.of("enabled", true),
+            "webhook", Map.of("enabled", false)
+        ));
+        return policy;
+    }
+
     private void mockNotificationPersistence() {
+        lenient().when(dashboardAlertNotificationPolicyRepository.findById("default"))
+            .thenReturn(Optional.empty());
+        lenient().when(dashboardAlertNotificationPolicyRepository.save(any(DashboardAlertNotificationPolicy.class)))
+            .thenAnswer(invocation -> invocation.getArgument(0));
         when(dashboardAlertNotificationRepository.findByAlertIdAndConditionKeyAndEscalationLevel(any(), any(), any()))
             .thenReturn(Optional.empty());
         when(dashboardAlertNotificationRepository.save(any(DashboardAlertNotification.class)))

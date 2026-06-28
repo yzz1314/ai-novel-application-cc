@@ -32,6 +32,9 @@ export const dashboardApi = {
   getOverview: () => request(api.get('/dashboard')),
   getTrends: (params?: any) => request(api.get('/dashboard/trends', { params })),
   getAlertNotifications: (params?: any) => request(api.get('/dashboard/alerts/notifications', { params })),
+  getAlertNotificationPolicy: () => request(api.get('/dashboard/alerts/notification-policy')),
+  updateAlertNotificationPolicy: (data?: any) =>
+    request(api.post('/dashboard/alerts/notification-policy', data || {})),
   updateAlertState: (alertId: string, data?: any) =>
     request(api.post(`/dashboard/alerts/${alertId}/state`, data || {})),
 }

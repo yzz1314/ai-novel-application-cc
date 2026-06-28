@@ -5,11 +5,15 @@ import {
   Card,
   Col,
   Empty,
+  Form,
+  Input,
   List,
+  Modal,
   Progress,
   Row,
   Space,
   Statistic,
+  Switch,
   Table,
   Tag,
   Typography,
@@ -86,6 +90,20 @@ const formatDuration = (value?: number) => {
 
 const formatNumber = (value?: number) => Number(value || 0).toLocaleString()
 
+const parseCsv = (value?: string) => String(value || '')
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean)
+
+const subscribersFromText = (value?: string, group = 'ops') => parseCsv(value).map((email, index) => ({
+  id: `subscriber-${index + 1}`,
+  name: email,
+  group,
+  email,
+  enabled: true,
+  channels: ['dashboard', 'email'],
+}))
+
 const trendValue = (item: any, key: string) => {
   const value = Number(item?.[key] || 0)
   return Number.isFinite(value) ? value : 0
@@ -119,6 +137,9 @@ const Dashboard: React.FC = () => {
   const [dashboard, setDashboard] = useState<any>(null)
   const [trends, setTrends] = useState<any>(null)
   const [alertNotifications, setAlertNotifications] = useState<any>(null)
+  const [policyModalOpen, setPolicyModalOpen] = useState(false)
+  const [savingPolicy, setSavingPolicy] = useState(false)
+  const [policyForm] = Form.useForm()
 
   useEffect(() => {
     loadDashboard()
@@ -138,6 +159,7 @@ const Dashboard: React.FC = () => {
   const alertSummary = dashboard?.alertSummary || {}
   const notificationSummary = alertNotifications?.summary || dashboard?.alertNotificationSummary || {}
   const notificationChannels = alertNotifications?.channels || dashboard?.alertNotificationChannels || {}
+  const notificationPolicy = alertNotifications?.policy || dashboard?.alertNotificationPolicy || {}
   const notificationItems = alertNotifications?.notifications || dashboard?.alertNotifications || []
   const trendSummary = trends?.summary || {}
   const trendSnapshots = trends?.snapshots || []
@@ -189,6 +211,56 @@ const Dashboard: React.FC = () => {
   }
 
   const channelConfigured = (channel: any) => Boolean(channel?.configured || channel?.enabled)
+
+  const openPolicyModal = () => {
+    const subscribers = notificationPolicy.subscribers || []
+    const routingRules = notificationPolicy.routingRules || {}
+    const templates = notificationPolicy.templates || {}
+    const channels = notificationPolicy.channels || {}
+    policyForm.setFieldsValue({
+      enabled: notificationPolicy.enabled !== false,
+      defaultGroup: notificationPolicy.defaultGroup || 'ops',
+      subscriberEmails: subscribers.map((item: any) => item.email).filter(Boolean).join(', '),
+      criticalGroups: (routingRules.critical || ['ops']).join(', '),
+      warningGroups: (routingRules.warning || ['ops']).join(', '),
+      emailEnabled: channels.email?.enabled !== false,
+      webhookEnabled: channels.webhook?.enabled !== false,
+      subject: templates.subject || '[Novel System][{{escalationLevel}}] {{title}}',
+      body: templates.body || '告警：{{title}}\n等级：{{severity}}\n目标：{{target}}\n说明：{{message}}\n条件：{{conditionKey}}\n接收组：{{groups}}',
+    })
+    setPolicyModalOpen(true)
+  }
+
+  const savePolicy = async () => {
+    const values = await policyForm.validateFields()
+    const defaultGroup = values.defaultGroup || 'ops'
+    setSavingPolicy(true)
+    try {
+      await dashboardApi.updateAlertNotificationPolicy({
+        enabled: values.enabled,
+        defaultGroup,
+        actor: 'local-user',
+        subscribers: subscribersFromText(values.subscriberEmails, defaultGroup),
+        routingRules: {
+          critical: parseCsv(values.criticalGroups || defaultGroup),
+          warning: parseCsv(values.warningGroups || defaultGroup),
+        },
+        channels: {
+          dashboard: { enabled: true },
+          email: { enabled: values.emailEnabled },
+          webhook: { enabled: values.webhookEnabled },
+        },
+        templates: {
+          subject: values.subject,
+          body: values.body,
+        },
+      })
+      setPolicyModalOpen(false)
+      await loadDashboard()
+    } finally {
+      setSavingPolicy(false)
+    }
+  }
 
   const quickActions = [
     {
@@ -455,6 +527,9 @@ const Dashboard: React.FC = () => {
             <Tag color={notificationSummary.deliveryFailed ? 'error' : 'default'}>
               失败 {notificationSummary.deliveryFailed || 0}
             </Tag>
+            <Button size="small" onClick={openPolicyModal}>
+              通知策略
+            </Button>
           </Space>
         }
       >
@@ -467,6 +542,19 @@ const Dashboard: React.FC = () => {
             <Tag color={channelConfigured(notificationChannels.email) ? 'processing' : 'default'}>
               Email {channelConfigured(notificationChannels.email) ? '已配置' : '未配置'}
             </Tag>
+            <Tag color={notificationPolicy.enabled === false ? 'default' : 'success'}>
+              策略 {notificationPolicy.enabled === false ? '停用' : '启用'}
+            </Tag>
+            <Tag>订阅人 {notificationPolicy.enabledSubscriberCount || 0}</Tag>
+            <Tag>分组 {notificationPolicy.groupCount || 0}</Tag>
+          </Space>
+          <Space wrap>
+            {(notificationPolicy.subscribers || []).slice(0, 4).map((subscriber: any) => (
+              <Tag key={subscriber.id || subscriber.email} color={subscriber.enabled === false ? 'default' : 'geekblue'}>
+                {subscriber.group || 'ops'} / {subscriber.email || subscriber.name}
+              </Tag>
+            ))}
+            {notificationPolicy.subscriberCount > 4 ? <Tag>+{notificationPolicy.subscriberCount - 4}</Tag> : null}
           </Space>
           {notificationItems.length ? (
             <List
@@ -492,6 +580,11 @@ const Dashboard: React.FC = () => {
                     <Text type="secondary">
                       {item.payload?.message || '-'} / 次数 {item.notificationCount || 1} / 投递 {item.deliveryAttempts || 0}
                     </Text>
+                    {item.payload?.routing?.groups?.length ? (
+                      <Text type="secondary">
+                        接收组 {(item.payload.routing.groups || []).join(', ')} / 收件人 {item.payload.routing.emailRecipientCount || 0}
+                      </Text>
+                    ) : null}
                     {item.nextRetryAt ? <Text type="secondary">下次重试 {item.nextRetryAt}</Text> : null}
                   </Space>
                 </List.Item>
@@ -843,6 +936,61 @@ const Dashboard: React.FC = () => {
           )}
         />
       </Card>
+
+      <Modal
+        title="告警通知策略"
+        open={policyModalOpen}
+        onOk={savePolicy}
+        confirmLoading={savingPolicy}
+        onCancel={() => setPolicyModalOpen(false)}
+        width={760}
+      >
+        <Form form={policyForm} layout="vertical">
+          <Row gutter={16}>
+            <Col xs={24} md={8}>
+              <Form.Item name="enabled" label="启用策略" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="emailEnabled" label="Email 渠道" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="webhookEnabled" label="Webhook 渠道" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col xs={24} md={8}>
+              <Form.Item name="defaultGroup" label="默认分组" rules={[{ required: true }]}>
+                <Input placeholder="ops" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="criticalGroups" label="Critical 分组">
+                <Input placeholder="ops" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="warningGroups" label="Warning 分组">
+                <Input placeholder="ops" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item name="subscriberEmails" label="订阅邮箱">
+            <Input placeholder="ops@example.com, author@example.com" />
+          </Form.Item>
+          <Form.Item name="subject" label="邮件标题模板" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item name="body" label="邮件正文模板" rules={[{ required: true }]}>
+            <Input.TextArea rows={5} />
+          </Form.Item>
+        </Form>
+      </Modal>
     </Space>
   )
 }

@@ -9,8 +9,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 @Service
 @RequiredArgsConstructor
@@ -41,7 +44,13 @@ public class DashboardAlertDeliveryService {
     private Map<String, Object> deliverWebhook(Map<String, Object> payload, String escalationLevel) {
         String webhookUrl = configValue("dashboard.alerts.webhook-url", "DASHBOARD_ALERT_WEBHOOK_URL");
         Map<String, Object> receipt = new LinkedHashMap<>();
-        receipt.put("configured", !webhookUrl.isBlank());
+        boolean enabled = channelEnabled(payload, "webhook");
+        receipt.put("enabled", enabled);
+        receipt.put("configured", enabled && !webhookUrl.isBlank());
+        if (!enabled) {
+            receipt.put("status", "SKIPPED");
+            return receipt;
+        }
         if (webhookUrl.isBlank()) {
             receipt.put("status", "SKIPPED");
             return receipt;
@@ -65,9 +74,16 @@ public class DashboardAlertDeliveryService {
     private Map<String, Object> deliverEmail(Map<String, Object> payload, String escalationLevel) {
         String to = configValue("dashboard.alerts.email-to", "DASHBOARD_ALERT_EMAIL_TO");
         String from = configValue("dashboard.alerts.email-from", "DASHBOARD_ALERT_EMAIL_FROM");
+        List<String> recipients = emailRecipients(to, payload);
         Map<String, Object> receipt = new LinkedHashMap<>();
-        receipt.put("configured", !to.isBlank());
-        if (to.isBlank()) {
+        boolean enabled = channelEnabled(payload, "email");
+        receipt.put("enabled", enabled);
+        receipt.put("configured", enabled && !recipients.isEmpty());
+        if (!enabled) {
+            receipt.put("status", "SKIPPED");
+            return receipt;
+        }
+        if (recipients.isEmpty()) {
             receipt.put("status", "SKIPPED");
             return receipt;
         }
@@ -77,12 +93,12 @@ public class DashboardAlertDeliveryService {
             if (!from.isBlank()) {
                 message.setFrom(from);
             }
-            message.setTo(to.split("\\s*,\\s*"));
-            message.setSubject("[Novel System][" + escalationLevel + "] " + stringValue(payload.get("title"), "Dashboard alert"));
+            message.setTo(recipients.toArray(String[]::new));
+            message.setSubject(emailSubject(payload, escalationLevel));
             message.setText(emailBody(payload));
             mailSender.send(message);
             receipt.put("status", "DELIVERED");
-            receipt.put("recipients", to);
+            receipt.put("recipients", recipients);
         } catch (Exception e) {
             receipt.put("status", "FAILED");
             receipt.put("error", e.getClass().getSimpleName() + ": " + e.getMessage());
@@ -90,7 +106,52 @@ public class DashboardAlertDeliveryService {
         return receipt;
     }
 
+    private boolean channelEnabled(Map<String, Object> payload, String channelName) {
+        Object channels = payload == null ? null : payload.get("channels");
+        if (channels instanceof Map<?, ?> channelMap && channelMap.get(channelName) instanceof Map<?, ?> config) {
+            Object enabled = config.get("enabled");
+            if (enabled instanceof Boolean bool) {
+                return bool;
+            }
+            if (enabled instanceof String text) {
+                return !"false".equalsIgnoreCase(text) && !"0".equals(text);
+            }
+        }
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> emailRecipients(String configuredRecipients, Map<String, Object> payload) {
+        Stream<String> configured = configuredRecipients == null || configuredRecipients.isBlank()
+            ? Stream.empty()
+            : Arrays.stream(configuredRecipients.split("\\s*,\\s*"));
+        Object routing = payload == null ? null : payload.get("routing");
+        Stream<String> policyRecipients = Stream.empty();
+        if (routing instanceof Map<?, ?> routingMap && routingMap.get("emails") instanceof List<?> emails) {
+            policyRecipients = emails.stream().map(item -> stringValue(item, ""));
+        }
+        return Stream.concat(configured, policyRecipients)
+            .map(String::trim)
+            .filter(value -> !value.isBlank())
+            .distinct()
+            .toList();
+    }
+
+    @SuppressWarnings("unchecked")
+    private String emailSubject(Map<String, Object> payload, String escalationLevel) {
+        Object template = payload == null ? null : payload.get("template");
+        if (template instanceof Map<?, ?> map && map.get("subject") != null) {
+            return stringValue(map.get("subject"), "Dashboard alert");
+        }
+        return "[Novel System][" + escalationLevel + "] " + stringValue(payload.get("title"), "Dashboard alert");
+    }
+
+    @SuppressWarnings("unchecked")
     private String emailBody(Map<String, Object> payload) {
+        Object template = payload == null ? null : payload.get("template");
+        if (template instanceof Map<?, ?> map && map.get("body") != null) {
+            return stringValue(map.get("body"), "");
+        }
         return """
             Dashboard alert
 

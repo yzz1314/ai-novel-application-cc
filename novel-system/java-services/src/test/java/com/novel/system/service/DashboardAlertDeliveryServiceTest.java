@@ -14,6 +14,7 @@ import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.Map;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -72,8 +73,26 @@ class DashboardAlertDeliveryServiceTest {
         assertThat(message.getValue().getFrom()).isEqualTo("system@example.invalid");
         assertThat((Map<String, Object>) receipt.get("email"))
             .containsEntry("status", "DELIVERED")
-            .containsEntry("recipients", "ops@example.invalid");
+            .containsEntry("recipients", List.of("ops@example.invalid"));
         assertThat(receipt).containsEntry("status", "DELIVERED");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void emailDeliveryUsesPolicyRecipientsAndTemplate() {
+        when(environment.getProperty("dashboard.alerts.webhook-url")).thenReturn("");
+        when(environment.getProperty("dashboard.alerts.email-to")).thenReturn("");
+
+        Map<String, Object> receipt = deliveryService.deliver(policyPayload(), "ESCALATE");
+
+        ArgumentCaptor<SimpleMailMessage> message = ArgumentCaptor.forClass(SimpleMailMessage.class);
+        verify(mailSender).send(message.capture());
+        assertThat(message.getValue().getTo()).containsExactly("policy@example.invalid");
+        assertThat(message.getValue().getSubject()).isEqualTo("[OPS] Failed tasks");
+        assertThat(message.getValue().getText()).isEqualTo("Policy body");
+        assertThat((Map<String, Object>) receipt.get("email"))
+            .containsEntry("status", "DELIVERED")
+            .containsEntry("recipients", List.of("policy@example.invalid"));
     }
 
     @Test
@@ -100,6 +119,19 @@ class DashboardAlertDeliveryServiceTest {
             "message", "Task failed",
             "conditionKey", "failed_tasks:1",
             "details", Map.of("failedTasks", 1)
+        );
+    }
+
+    private Map<String, Object> policyPayload() {
+        return Map.of(
+            "title", "Failed tasks",
+            "severity", "critical",
+            "target", "tasks",
+            "message", "Task failed",
+            "conditionKey", "failed_tasks:1",
+            "routing", Map.of("emails", List.of("policy@example.invalid")),
+            "template", Map.of("subject", "[OPS] Failed tasks", "body", "Policy body"),
+            "channels", Map.of("email", Map.of("enabled", true), "webhook", Map.of("enabled", false))
         );
     }
 }

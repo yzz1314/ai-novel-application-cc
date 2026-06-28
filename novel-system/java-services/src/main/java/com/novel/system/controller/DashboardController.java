@@ -35,6 +35,17 @@ public class DashboardController {
         return ResponseEntity.ok(dashboardService.getAlertNotifications(limit));
     }
 
+    @GetMapping("/alerts/notification-policy")
+    public ResponseEntity<Map<String, Object>> getAlertNotificationPolicy() {
+        return ResponseEntity.ok(dashboardService.getAlertNotificationPolicy());
+    }
+
+    @PostMapping("/alerts/notification-policy")
+    public ResponseEntity<Map<String, Object>> updateAlertNotificationPolicy(
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(dashboardService.updateAlertNotificationPolicy(request == null ? Map.of() : request));
+    }
+
     @PostMapping("/alerts/{alertId}/state")
     public ResponseEntity<Map<String, Object>> updateAlertState(
             @PathVariable String alertId,

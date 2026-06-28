@@ -3,6 +3,7 @@ package com.novel.system.service;
 import com.novel.system.dto.response.ProjectResponse;
 import com.novel.system.dto.response.TaskResponse;
 import com.novel.system.entity.DashboardAlertNotification;
+import com.novel.system.entity.DashboardAlertNotificationPolicy;
 import com.novel.system.entity.DashboardAlertState;
 import com.novel.system.entity.DashboardAlertState.AlertStatus;
 import com.novel.system.entity.DashboardMetricSnapshot;
@@ -13,6 +14,7 @@ import com.novel.system.entity.Task;
 import com.novel.system.entity.Task.TaskStatus;
 import com.novel.system.repository.ChapterArtifactRepository;
 import com.novel.system.repository.DashboardAlertNotificationRepository;
+import com.novel.system.repository.DashboardAlertNotificationPolicyRepository;
 import com.novel.system.repository.DashboardAlertStateRepository;
 import com.novel.system.repository.DashboardMetricSnapshotRepository;
 import com.novel.system.repository.GraphArtifactRepository;
@@ -46,11 +48,13 @@ public class DashboardService {
     private static final int HIGH_RETRY_THRESHOLD = 2;
     private static final int MONITORED_TASK_LIMIT = 50;
     private static final int RECENT_TASK_LIMIT = 8;
+    private static final String DEFAULT_NOTIFICATION_POLICY_ID = "default";
 
     private final ProjectRepository projectRepository;
     private final SampleRepository sampleRepository;
     private final TaskRepository taskRepository;
     private final DashboardAlertNotificationRepository dashboardAlertNotificationRepository;
+    private final DashboardAlertNotificationPolicyRepository dashboardAlertNotificationPolicyRepository;
     private final DashboardAlertStateRepository dashboardAlertStateRepository;
     private final DashboardMetricSnapshotRepository dashboardMetricSnapshotRepository;
     private final ChapterArtifactRepository chapterArtifactRepository;
@@ -95,6 +99,7 @@ public class DashboardService {
         response.put("alertNotifications", notificationSummary.get("notifications"));
         response.put("alertNotificationSummary", notificationSummary.get("summary"));
         response.put("alertNotificationChannels", notificationSummary.get("channels"));
+        response.put("alertNotificationPolicy", notificationSummary.get("policy"));
         response.put("workflowSummary", workflowSummary(recentProjects));
         response.put("blockedProjects", blockedProjects);
         response.put("nextActions", nextActions(stats, taskSummary, partialTasks, serviceStatus));
@@ -174,8 +179,39 @@ public class DashboardService {
         response.put("limit", safeLimit);
         response.put("summary", summary);
         response.put("channels", notificationChannels());
+        response.put("policy", getAlertNotificationPolicy());
         response.put("notifications", notifications);
         return response;
+    }
+
+    public Map<String, Object> getAlertNotificationPolicy() {
+        return policyMap(notificationPolicy());
+    }
+
+    public Map<String, Object> updateAlertNotificationPolicy(Map<String, Object> request) {
+        Map<String, Object> safeRequest = request == null ? Map.of() : request;
+        DashboardAlertNotificationPolicy policy = notificationPolicy();
+        if (safeRequest.containsKey("enabled")) {
+            policy.setEnabled(booleanObject(safeRequest.get("enabled"), true));
+        }
+        if (safeRequest.containsKey("defaultGroup")) {
+            String defaultGroup = stringValue(safeRequest.get("defaultGroup"), "ops");
+            policy.setDefaultGroup(defaultGroup.isBlank() ? "ops" : defaultGroup);
+        }
+        if (safeRequest.get("subscribers") instanceof List<?> subscribers) {
+            policy.setSubscribers(normalizeSubscribers(subscribers));
+        }
+        if (safeRequest.get("routingRules") instanceof Map<?, ?> routingRules) {
+            policy.setRoutingRules(normalizeStringMap(routingRules));
+        }
+        if (safeRequest.get("templates") instanceof Map<?, ?> templates) {
+            policy.setTemplates(normalizeStringMap(templates));
+        }
+        if (safeRequest.get("channels") instanceof Map<?, ?> channels) {
+            policy.setChannels(normalizeStringMap(channels));
+        }
+        policy.setUpdatedBy(stringValue(safeRequest.get("actor"), "local-user"));
+        return policyMap(dashboardAlertNotificationPolicyRepository.save(policy));
     }
 
     public Map<String, Object> updateAlertState(String alertId, Map<String, Object> request) {
@@ -329,17 +365,20 @@ public class DashboardService {
     }
 
     private Map<String, Object> recordAlertNotifications(List<Map<String, Object>> activeAlerts) {
-        Map<String, Object> channels = notificationChannels();
+        DashboardAlertNotificationPolicy policy = notificationPolicy();
+        Map<String, Object> policyMap = policyMap(policy);
+        Map<String, Object> channels = notificationChannels(policy);
         List<Map<String, Object>> notifications = new ArrayList<>();
 
         for (Map<String, Object> alert : activeAlerts) {
             String severity = stringValue(alert.get("severity"), "info");
-            if (!shouldNotify(severity)) {
+            if (!shouldNotify(severity) || !Boolean.TRUE.equals(policy.getEnabled())) {
                 continue;
             }
             String escalationLevel = escalationLevel(severity);
             String alertId = stringValue(alert.get("id"), "unknown_alert");
             String conditionKey = stringValue(alert.get("conditionKey"), alertId);
+            Map<String, Object> routing = notificationRouting(policy, severity);
             DashboardAlertNotification notification = dashboardAlertNotificationRepository
                 .findByAlertIdAndConditionKeyAndEscalationLevel(alertId, conditionKey, escalationLevel)
                 .orElseGet(DashboardAlertNotification::new);
@@ -350,7 +389,7 @@ public class DashboardService {
             notification.setEscalationLevel(escalationLevel);
             notification.setStatus(externalChannelConfigured(channels) ? "READY" : "PENDING_CHANNEL");
             notification.setChannels(channels);
-            notification.setPayload(notificationPayload(alert));
+            notification.setPayload(notificationPayload(alert, escalationLevel, policy, routing, channels));
             notification.setLastSeenAt(LocalDateTime.now());
             notification.setNotificationCount(existing ? numberValue(notification.getNotificationCount()) + 1 : 1L);
             DashboardAlertNotification saved = dashboardAlertNotificationRepository.save(notification);
@@ -380,26 +419,48 @@ public class DashboardService {
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("channels", channels);
+        result.put("policy", policyMap);
         result.put("notifications", notifications);
         result.put("summary", summary);
         return result;
     }
 
     private Map<String, Object> notificationChannels() {
+        return notificationChannels(notificationPolicy());
+    }
+
+    private Map<String, Object> notificationChannels(DashboardAlertNotificationPolicy policy) {
         String webhookUrl = configValue("dashboard.alerts.webhook-url", "DASHBOARD_ALERT_WEBHOOK_URL");
         String emailTo = configValue("dashboard.alerts.email-to", "DASHBOARD_ALERT_EMAIL_TO");
         String emailFrom = configValue("dashboard.alerts.email-from", "DASHBOARD_ALERT_EMAIL_FROM");
+        Map<String, Object> policyChannels = policy.getChannels() == null ? Map.of() : policy.getChannels();
+        boolean webhookPolicyEnabled = channelEnabled(policyChannels.get("webhook"), true);
+        boolean emailPolicyEnabled = channelEnabled(policyChannels.get("email"), true);
+        boolean dashboardPolicyEnabled = channelEnabled(policyChannels.get("dashboard"), true);
+        List<String> policyRecipients = allPolicyRecipients(policy);
+        boolean emailConfigured = emailPolicyEnabled && (!emailTo.isBlank() || !policyRecipients.isEmpty());
         return details(
-            "dashboard", details("enabled", true, "mode", "in_app"),
-            "webhook", details("enabled", !webhookUrl.isBlank(), "configured", !webhookUrl.isBlank()),
-            "email", details("enabled", !emailTo.isBlank(), "configured", !emailTo.isBlank(), "fromConfigured", !emailFrom.isBlank())
+            "dashboard", details("enabled", dashboardPolicyEnabled, "mode", "in_app"),
+            "webhook", details("enabled", webhookPolicyEnabled, "configured", webhookPolicyEnabled && !webhookUrl.isBlank()),
+            "email", details(
+                "enabled", emailPolicyEnabled,
+                "configured", emailConfigured,
+                "fromConfigured", !emailFrom.isBlank(),
+                "policyRecipientCount", policyRecipients.size()
+            )
         );
     }
 
-    private Map<String, Object> notificationPayload(Map<String, Object> alert) {
-        return details(
+    private Map<String, Object> notificationPayload(
+            Map<String, Object> alert,
+            String escalationLevel,
+            DashboardAlertNotificationPolicy policy,
+            Map<String, Object> routing,
+            Map<String, Object> channels) {
+        Map<String, Object> payload = details(
             "alertId", alert.get("id"),
             "severity", alert.get("severity"),
+            "escalationLevel", escalationLevel,
             "title", alert.get("title"),
             "message", alert.get("message"),
             "target", alert.get("target"),
@@ -407,6 +468,264 @@ public class DashboardService {
             "details", alert.get("details"),
             "createdAt", String.valueOf(alert.get("createdAt"))
         );
+        payload.put("routing", routing);
+        payload.put("template", renderNotificationTemplate(policy, alert, escalationLevel, routing));
+        payload.put("channels", channels);
+        return payload;
+    }
+
+    private DashboardAlertNotificationPolicy notificationPolicy() {
+        return dashboardAlertNotificationPolicyRepository.findById(DEFAULT_NOTIFICATION_POLICY_ID)
+            .orElseGet(this::defaultNotificationPolicy);
+    }
+
+    private DashboardAlertNotificationPolicy defaultNotificationPolicy() {
+        DashboardAlertNotificationPolicy policy = new DashboardAlertNotificationPolicy();
+        policy.setId(DEFAULT_NOTIFICATION_POLICY_ID);
+        policy.setEnabled(true);
+        policy.setDefaultGroup("ops");
+        policy.setSubscribers(List.of(defaultSubscriber()));
+        policy.setRoutingRules(defaultRoutingRules());
+        policy.setTemplates(defaultNotificationTemplates());
+        policy.setChannels(details(
+            "dashboard", details("enabled", true),
+            "webhook", details("enabled", true),
+            "email", details("enabled", true)
+        ));
+        return policy;
+    }
+
+    private Map<String, Object> defaultSubscriber() {
+        return details(
+            "id", "local-ops",
+            "name", "本地运维",
+            "group", "ops",
+            "email", "",
+            "channels", List.of("dashboard", "email"),
+            "enabled", true
+        );
+    }
+
+    private Map<String, Object> defaultRoutingRules() {
+        return details(
+            "critical", List.of("ops"),
+            "warning", List.of("ops")
+        );
+    }
+
+    private Map<String, Object> defaultNotificationTemplates() {
+        return details(
+            "subject", "[Novel System][{{escalationLevel}}] {{title}}",
+            "body", "告警：{{title}}\n等级：{{severity}}\n目标：{{target}}\n说明：{{message}}\n条件：{{conditionKey}}\n接收组：{{groups}}"
+        );
+    }
+
+    private Map<String, Object> policyMap(DashboardAlertNotificationPolicy policy) {
+        List<Map<String, Object>> subscribers = policy.getSubscribers() == null
+            ? List.of()
+            : policy.getSubscribers();
+        Map<String, Object> routingRules = policy.getRoutingRules() == null
+            ? Map.of()
+            : policy.getRoutingRules();
+        Map<String, Object> channels = policy.getChannels() == null
+            ? Map.of()
+            : policy.getChannels();
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("id", policy.getId());
+        response.put("enabled", Boolean.TRUE.equals(policy.getEnabled()));
+        response.put("defaultGroup", stringValue(policy.getDefaultGroup(), "ops"));
+        response.put("subscribers", subscribers);
+        response.put("routingRules", routingRules);
+        response.put("templates", policy.getTemplates() == null ? Map.of() : policy.getTemplates());
+        response.put("channels", channels);
+        response.put("subscriberCount", subscribers.size());
+        response.put("enabledSubscriberCount", subscribers.stream()
+            .filter(subscriber -> booleanObject(subscriber.get("enabled"), true))
+            .count());
+        response.put("groupCount", subscribers.stream()
+            .map(subscriber -> stringValue(subscriber.get("group"), "ops"))
+            .filter(group -> !group.isBlank())
+            .distinct()
+            .count());
+        response.put("updatedBy", policy.getUpdatedBy());
+        response.put("updatedAt", policy.getUpdatedAt());
+        return response;
+    }
+
+    private Map<String, Object> notificationRouting(
+            DashboardAlertNotificationPolicy policy,
+            String severity) {
+        List<String> groups = routeGroups(policy, severity);
+        List<Map<String, Object>> subscribers = subscribersForGroups(policy, groups);
+        List<String> emails = subscribers.stream()
+            .map(subscriber -> stringValue(subscriber.get("email"), ""))
+            .filter(email -> !email.isBlank())
+            .distinct()
+            .toList();
+        return details(
+            "groups", groups,
+            "subscribers", subscribers,
+            "emails", emails,
+            "subscriberCount", subscribers.size(),
+            "emailRecipientCount", emails.size()
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> routeGroups(DashboardAlertNotificationPolicy policy, String severity) {
+        Map<String, Object> routingRules = policy.getRoutingRules() == null ? Map.of() : policy.getRoutingRules();
+        Object value = routingRules.getOrDefault(severity, routingRules.get(escalationLevel(severity)));
+        if (value instanceof List<?> list) {
+            List<String> groups = list.stream()
+                .map(item -> stringValue(item, ""))
+                .filter(group -> !group.isBlank())
+                .distinct()
+                .toList();
+            if (!groups.isEmpty()) {
+                return groups;
+            }
+        }
+        if (value instanceof String text && !text.isBlank()) {
+            return List.of(text);
+        }
+        return List.of(stringValue(policy.getDefaultGroup(), "ops"));
+    }
+
+    private List<Map<String, Object>> subscribersForGroups(
+            DashboardAlertNotificationPolicy policy,
+            List<String> groups) {
+        List<Map<String, Object>> subscribers = policy.getSubscribers() == null ? List.of() : policy.getSubscribers();
+        List<String> targetGroups = groups == null || groups.isEmpty()
+            ? List.of(stringValue(policy.getDefaultGroup(), "ops"))
+            : groups;
+        return subscribers.stream()
+            .filter(subscriber -> booleanObject(subscriber.get("enabled"), true))
+            .filter(subscriber -> targetGroups.contains(stringValue(subscriber.get("group"), "ops")))
+            .map(this::sanitizeSubscriber)
+            .toList();
+    }
+
+    private List<String> policyRecipients(DashboardAlertNotificationPolicy policy) {
+        if (policy == null) {
+            return List.of();
+        }
+        return subscribersForGroups(policy, routeGroups(policy, "critical")).stream()
+            .map(subscriber -> stringValue(subscriber.get("email"), ""))
+            .filter(email -> !email.isBlank())
+            .distinct()
+            .toList();
+    }
+
+    private List<String> allPolicyRecipients(DashboardAlertNotificationPolicy policy) {
+        if (policy == null || policy.getSubscribers() == null) {
+            return List.of();
+        }
+        return policy.getSubscribers().stream()
+            .filter(subscriber -> booleanObject(subscriber.get("enabled"), true))
+            .map(subscriber -> stringValue(subscriber.get("email"), ""))
+            .filter(email -> !email.isBlank())
+            .distinct()
+            .toList();
+    }
+
+    private Map<String, Object> renderNotificationTemplate(
+            DashboardAlertNotificationPolicy policy,
+            Map<String, Object> alert,
+            String escalationLevel,
+            Map<String, Object> routing) {
+        Map<String, Object> templates = policy.getTemplates() == null ? defaultNotificationTemplates() : policy.getTemplates();
+        Map<String, String> variables = new LinkedHashMap<>();
+        variables.put("alertId", stringValue(alert.get("id"), ""));
+        variables.put("severity", stringValue(alert.get("severity"), ""));
+        variables.put("escalationLevel", escalationLevel);
+        variables.put("title", stringValue(alert.get("title"), "Dashboard alert"));
+        variables.put("message", stringValue(alert.get("message"), ""));
+        variables.put("target", stringValue(alert.get("target"), ""));
+        variables.put("conditionKey", stringValue(alert.get("conditionKey"), ""));
+        variables.put("groups", joinStrings(routing.get("groups")));
+        variables.put("emails", joinStrings(routing.get("emails")));
+        String subject = renderTemplate(stringValue(templates.get("subject"), "[Novel System][{{escalationLevel}}] {{title}}"), variables);
+        String body = renderTemplate(stringValue(templates.get("body"), stringValue(defaultNotificationTemplates().get("body"), "")), variables);
+        return details("subject", subject, "body", body);
+    }
+
+    private String renderTemplate(String template, Map<String, String> variables) {
+        String result = template == null ? "" : template;
+        for (Map.Entry<String, String> entry : variables.entrySet()) {
+            result = result.replace("{{" + entry.getKey() + "}}", entry.getValue());
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean channelEnabled(Object config, boolean fallback) {
+        if (config instanceof Map<?, ?> map) {
+            return booleanObject(map.get("enabled"), fallback);
+        }
+        return booleanObject(config, fallback);
+    }
+
+    private List<Map<String, Object>> normalizeSubscribers(List<?> subscribers) {
+        return subscribers.stream()
+            .filter(Map.class::isInstance)
+            .map(item -> normalizeSubscriber((Map<?, ?>) item))
+            .filter(subscriber -> !stringValue(subscriber.get("id"), "").isBlank())
+            .toList();
+    }
+
+    private Map<String, Object> normalizeSubscriber(Map<?, ?> input) {
+        String id = stringValue(input.get("id"), "");
+        String name = stringValue(input.get("name"), id);
+        String group = stringValue(input.get("group"), "ops");
+        String email = stringValue(input.get("email"), "");
+        Object channels = input.get("channels");
+        return details(
+            "id", id,
+            "name", name,
+            "group", group.isBlank() ? "ops" : group,
+            "email", email,
+            "channels", channels instanceof List<?> list ? list.stream().map(item -> stringValue(item, "")).filter(value -> !value.isBlank()).toList() : List.of("dashboard", "email"),
+            "enabled", booleanObject(input.get("enabled"), true)
+        );
+    }
+
+    private Map<String, Object> sanitizeSubscriber(Map<String, Object> subscriber) {
+        return details(
+            "id", subscriber.get("id"),
+            "name", subscriber.get("name"),
+            "group", subscriber.get("group"),
+            "email", subscriber.get("email"),
+            "channels", subscriber.get("channels"),
+            "enabled", subscriber.get("enabled")
+        );
+    }
+
+    private Map<String, Object> normalizeStringMap(Map<?, ?> input) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        input.forEach((key, value) -> result.put(stringValue(key, ""), normalizeJsonValue(value)));
+        result.remove("");
+        return result;
+    }
+
+    private Object normalizeJsonValue(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            return normalizeStringMap(map);
+        }
+        if (value instanceof List<?> list) {
+            return list.stream().map(this::normalizeJsonValue).toList();
+        }
+        return value;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String joinStrings(Object value) {
+        if (value instanceof List<?> list) {
+            return list.stream()
+                .map(item -> stringValue(item, ""))
+                .filter(text -> !text.isBlank())
+                .collect(Collectors.joining(","));
+        }
+        return stringValue(value, "");
     }
 
     private Map<String, Object> notificationMap(DashboardAlertNotification notification) {
@@ -988,6 +1307,22 @@ public class DashboardService {
 
     private String stringValue(Object value, String fallback) {
         return value == null || String.valueOf(value).isBlank() ? fallback : String.valueOf(value);
+    }
+
+    private boolean booleanObject(Object value, boolean fallback) {
+        if (value instanceof Boolean bool) {
+            return bool;
+        }
+        if (value instanceof Number number) {
+            return number.longValue() != 0;
+        }
+        if (value instanceof String text) {
+            if (text.isBlank()) {
+                return fallback;
+            }
+            return "true".equalsIgnoreCase(text) || "1".equals(text) || "yes".equalsIgnoreCase(text);
+        }
+        return fallback;
     }
 
     private Map<String, Object> alert(

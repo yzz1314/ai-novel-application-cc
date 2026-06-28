@@ -95,6 +95,12 @@ const RetrievalView: React.FC = () => {
         use_rerank: data?.config?.use_rerank ?? true,
         use_model_embeddings: data?.config?.use_model_embeddings ?? false,
         vector_backend: data?.config?.vector_backend ?? 'auto',
+        pgvector_ann_index: data?.config?.pgvector_ann_index ?? 'auto',
+        pgvector_lists: data?.config?.pgvector_lists ?? null,
+        pgvector_probes: data?.config?.pgvector_probes ?? null,
+        pgvector_hnsw_m: data?.config?.pgvector_hnsw_m ?? 16,
+        pgvector_hnsw_ef_construction: data?.config?.pgvector_hnsw_ef_construction ?? 64,
+        pgvector_hnsw_ef_search: data?.config?.pgvector_hnsw_ef_search ?? 40,
         rerank_backend: data?.config?.rerank_backend ?? 'rules',
         graph_hops: data?.config?.graph_hops ?? 2,
         top_k: data?.config?.top_k ?? 12,
@@ -335,10 +341,18 @@ const RetrievalView: React.FC = () => {
       key: 'backendStatus',
       render: (_: any, record: any) => {
         const status = record.backend_status || record.embedding_metadata?.backend_status
+        const ann = status?.ann
         return status?.status ? (
-          <Tag color={['lancedb', 'pgvector'].includes(status.active) ? 'success' : status.status === 'fallback' ? 'warning' : 'default'}>
-            {status.status}
-          </Tag>
+          <Space size={4} wrap>
+            <Tag color={['lancedb', 'pgvector'].includes(status.active) ? 'success' : status.status === 'fallback' ? 'warning' : 'default'}>
+              {status.status}
+            </Tag>
+            {ann?.status ? (
+              <Tag color={ann.status === 'active' ? 'processing' : ann.status === 'fallback_exact' ? 'warning' : 'default'}>
+                ANN {ann.active || ann.status}
+              </Tag>
+            ) : null}
+          </Space>
         ) : '-'
       },
     },
@@ -689,6 +703,32 @@ const RetrievalView: React.FC = () => {
                 { value: 'pgvector', label: 'pgvector' },
               ]}
             />
+          </Form.Item>
+          <Form.Item name="pgvector_ann_index" label="pgvector ANN">
+            <Select
+              style={{ width: 120 }}
+              options={[
+                { value: 'auto', label: 'Auto' },
+                { value: 'hnsw', label: 'HNSW' },
+                { value: 'ivfflat', label: 'IVFFlat' },
+                { value: 'none', label: 'None' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="pgvector_lists" label="IVF lists">
+            <InputNumber min={1} max={100000} style={{ width: 100 }} />
+          </Form.Item>
+          <Form.Item name="pgvector_probes" label="IVF probes">
+            <InputNumber min={1} max={10000} style={{ width: 100 }} />
+          </Form.Item>
+          <Form.Item name="pgvector_hnsw_m" label="HNSW m">
+            <InputNumber min={4} max={64} style={{ width: 90 }} />
+          </Form.Item>
+          <Form.Item name="pgvector_hnsw_ef_construction" label="HNSW build">
+            <InputNumber min={8} max={512} style={{ width: 105 }} />
+          </Form.Item>
+          <Form.Item name="pgvector_hnsw_ef_search" label="HNSW search">
+            <InputNumber min={1} max={10000} style={{ width: 110 }} />
           </Form.Item>
           <Form.Item name="rerank_backend" label="Rerank backend">
             <Select

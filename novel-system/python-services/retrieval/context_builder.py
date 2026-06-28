@@ -157,6 +157,7 @@ class ContextBuilder:
             documents,
             graph_context,
             vector_backend=self._vector_backend(retrieval_config),
+            vector_config=retrieval_config,
         )
         hybrid_retrieval = hybrid_engine.retrieve(query, retrieval_plan, top_k=top_k)
         rerank_application = await apply_gateway_rerank(

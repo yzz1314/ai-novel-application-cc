@@ -153,6 +153,31 @@ class RetrievalArtifactServiceTest {
     }
 
     @Test
+    void updateConfigPersistsPgvectorAnnTuningOptions() throws Exception {
+        Map<String, Object> config = retrievalArtifactService.updateConfig(PROJECT_ID, Map.of(
+            "vector_backend", "pgvector",
+            "pgvector_ann_index", "ivfflat",
+            "pgvector_lists", 128,
+            "pgvector_probes", 8,
+            "pgvector_hnsw_m", 24,
+            "pgvector_hnsw_ef_construction", 128,
+            "pgvector_hnsw_ef_search", 80
+        ));
+
+        assertThat(config)
+            .containsEntry("vector_backend", "pgvector")
+            .containsEntry("pgvector_ann_index", "ivfflat")
+            .containsEntry("pgvector_lists", 128)
+            .containsEntry("pgvector_probes", 8)
+            .containsEntry("pgvector_hnsw_m", 24)
+            .containsEntry("pgvector_hnsw_ef_construction", 128)
+            .containsEntry("pgvector_hnsw_ef_search", 80);
+        assertThat(Files.readString(projectRoot().resolve("indexes/retrieval_config.json"), StandardCharsets.UTF_8))
+            .contains("pgvector_ann_index")
+            .contains("pgvector_hnsw_ef_search");
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void createIndexVersionListsDetailsAndRebuildSnapshotsPreviousIndexes() throws Exception {
         writeProjectFile("indexes/retrieval_config.json", "{\"top_k\":8}");

@@ -51,6 +51,7 @@ class RetrievalIndexAgent(BaseAgent):
                 graph_context,
                 embedding_bundle=embedding_bundle,
                 vector_backend=vector_backend,
+                vector_config=self._config_values(builder.project_root),
             )
             retrieval = engine.retrieve(query, plan, top_k=top_k)
             rerank_application = await apply_gateway_rerank(
@@ -243,6 +244,7 @@ class RetrievalIndexAgent(BaseAgent):
             "status": "skipped",
             "vector_mode": "hash_fallback",
             "vector_backend": vector_backend,
+            "vector_config": self._config_values(project_root) if project_root is not None else {},
             "document_count": len(vector_documents),
         }
         if not metadata["enabled"]:

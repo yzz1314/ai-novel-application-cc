@@ -467,6 +467,7 @@ def test_hash_vector_index_falls_back_when_pgvector_dsn_missing(tmp_path, monkey
 
 def test_hash_vector_index_uses_pgvector_backend_when_available(tmp_path, monkeypatch):
     stored_doc_ids = []
+    executed_queries = []
 
     class FakeCursor:
         def __enter__(self):
@@ -477,6 +478,7 @@ def test_hash_vector_index_uses_pgvector_backend_when_available(tmp_path, monkey
 
         def execute(self, query, params=None):
             normalized = " ".join(str(query).split()).lower()
+            executed_queries.append(normalized)
             if normalized.startswith("insert into retrieval_vectors"):
                 stored_doc_ids.append(params[2])
 
@@ -536,7 +538,84 @@ def test_hash_vector_index_uses_pgvector_backend_when_available(tmp_path, monkey
     assert summary["vector_backend"] == "pgvector"
     assert summary["backend_status"]["status"] == "active"
     assert summary["backend_status"]["table"] == "retrieval_vectors"
+    assert summary["backend_status"]["ann"]["active"] == "hnsw"
+    assert summary["backend_status"]["ann"]["status"] == "active"
     assert summary["embedding_metadata"]["vector_backend"] == "pgvector"
+    assert any("using hnsw" in query for query in executed_queries)
+    assert any("set hnsw.ef_search = 40" in query for query in executed_queries)
+
+
+def test_hash_vector_index_can_tune_pgvector_ivfflat_ann(tmp_path, monkeypatch):
+    executed_queries = []
+    stored_doc_ids = []
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query, params=None):
+            normalized = " ".join(str(query).split()).lower()
+            executed_queries.append(normalized)
+            if normalized.startswith("insert into retrieval_vectors"):
+                stored_doc_ids.append(params[2])
+
+        def fetchall(self):
+            return [(doc_id, 0.9 - index * 0.05) for index, doc_id in enumerate(stored_doc_ids)]
+
+    class FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return FakeCursor()
+
+    fake_module = types.SimpleNamespace(connect=lambda *_args, **_kwargs: FakeConnection())
+    monkeypatch.setitem(sys.modules, "psycopg", fake_module)
+    monkeypatch.setattr(settings, "PGVECTOR_DSN", "postgresql://user:pass@localhost:5432/novel")
+    documents = [
+        SimpleNamespace(
+            doc_id=f"doc:{index}",
+            source_type="memory",
+            path=f"memory/{index}.md",
+            title=f"Doc {index}",
+            text="jade token trial",
+            metadata={},
+        )
+        for index in range(3)
+    ]
+
+    index = HashVectorIndex(
+        documents,
+        tokenizer=lambda text: str(text).lower().split(),
+        embedding_bundle={
+            "query_vectors": [[1.0, 0.0]],
+            "document_vectors": [[1.0, 0.0], [0.8, 0.2], [0.2, 0.8]],
+            "metadata": {"vector_mode": "model_embedding"},
+        },
+        vector_backend="pgvector",
+        vector_config={
+            "pgvector_ann_index": "ivfflat",
+            "pgvector_lists": 7,
+            "pgvector_probes": 3,
+        },
+        project_root=tmp_path,
+    )
+
+    results = index.search("jade", top_k=2)
+    summary = index.summary()
+
+    assert results
+    assert summary["backend_status"]["ann"]["active"] == "ivfflat"
+    assert summary["backend_status"]["ann"]["build_parameters"]["lists"] == 7
+    assert summary["backend_status"]["ann"]["query_parameters"]["probes"] == 3
+    assert any("using ivfflat" in query and "with (lists = 7)" in query for query in executed_queries)
+    assert any("set ivfflat.probes = 3" in query for query in executed_queries)
 
 
 def test_retrieval_config_accepts_pgvector_backend(tmp_path):
@@ -623,6 +702,7 @@ async def test_retrieval_index_writes_benchmark_report(tmp_path):
     assert benchmark["case_count"] == 2
     assert benchmark["hit_count"] >= 1
     assert benchmark["mean_reciprocal_rank"] > 0
+    assert benchmark["vector_index"]["vector_backend"] in {"memory", "lancedb", "pgvector"}
     assert {case["id"] for case in benchmark["cases"]} == {"jade_token", "scene_skill"}
     assert all(case["top_results"] for case in benchmark["cases"])
     assert hybrid_summary["benchmark"]["report_path"] == "indexes/retrieval_benchmark_report.json"

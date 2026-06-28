@@ -336,6 +336,12 @@ public class RetrievalArtifactService {
                     "use_rerank",
                     "use_model_embeddings",
                     "vector_backend",
+                    "pgvector_ann_index",
+                    "pgvector_lists",
+                    "pgvector_probes",
+                    "pgvector_hnsw_m",
+                    "pgvector_hnsw_ef_construction",
+                    "pgvector_hnsw_ef_search",
                     "rerank_backend",
                     "graph_relation",
                     "graph_hops",
@@ -958,6 +964,12 @@ public class RetrievalArtifactService {
         config.put("use_rerank", true);
         config.put("use_model_embeddings", false);
         config.put("vector_backend", "auto");
+        config.put("pgvector_ann_index", "auto");
+        config.put("pgvector_lists", null);
+        config.put("pgvector_probes", null);
+        config.put("pgvector_hnsw_m", 16);
+        config.put("pgvector_hnsw_ef_construction", 64);
+        config.put("pgvector_hnsw_ef_search", 40);
         config.put("rerank_backend", "rules");
         config.put("graph_relation", null);
         config.put("graph_hops", 2);

@@ -42,12 +42,19 @@ class HashVectorIndex:
             dimensions: int = 96,
             embedding_bundle: Optional[Dict[str, Any]] = None,
             vector_backend: Optional[str] = None,
+            vector_config: Optional[Dict[str, Any]] = None,
             project_root: Optional[Path] = None):
         self.documents = [doc for doc in documents if doc.text.strip()]
         self.documents_by_id = {doc.doc_id: doc for doc in self.documents}
         self.tokenizer = tokenizer
         self.project_root = project_root
         self.embedding_bundle = embedding_bundle or {}
+        self.vector_config = self._normalize_vector_config(
+            vector_config
+            or self.embedding_bundle.get("vector_config")
+            or self.embedding_bundle.get("config")
+            or {}
+        )
         self.embedding_metadata = self._normalize_embedding_metadata(self.embedding_bundle.get("metadata"))
         self.requested_backend = self._normalize_backend(
             vector_backend
@@ -236,6 +243,7 @@ class HashVectorIndex:
             import psycopg  # type: ignore
             project_id = self._project_id()
             rows = self._pgvector_rows()
+            ann_status: Dict[str, Any] = self._pgvector_ann_status("pending")
             with psycopg.connect(dsn, autocommit=True) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -300,6 +308,7 @@ class HashVectorIndex:
                             row["dimensions"],
                             row["embedding_literal"],
                         ))
+                    ann_status = self._ensure_pgvector_ann_index(cursor, len(rows))
             self.vector_backend = "pgvector"
             self.backend_status = {
                 "requested": self.requested_backend,
@@ -309,6 +318,7 @@ class HashVectorIndex:
                 "project_id": project_id,
                 "document_count": len(rows),
                 "dimensions": self.dimensions,
+                "ann": ann_status,
             }
         except Exception as exc:
             self.vector_backend = "memory"
@@ -436,15 +446,17 @@ class HashVectorIndex:
         project_id = self._project_id()
         query_literal = self._vector_literal(query_vector)
         limit = max(top_k * 4, top_k)
+        embedding_expr, query_expr = self._pgvector_distance_expressions()
         with psycopg.connect(dsn, autocommit=True) as connection:
             with connection.cursor() as cursor:
-                cursor.execute("""
-                    SELECT doc_id, 1 - (embedding <=> %s::vector) AS score
+                self._apply_pgvector_query_tuning(cursor)
+                cursor.execute(f"""
+                    SELECT doc_id, 1 - ({embedding_expr} <=> {query_expr}) AS score
                     FROM retrieval_vectors
-                    WHERE project_id = %s
-                    ORDER BY embedding <=> %s::vector
+                    WHERE project_id = %s AND dimensions = %s
+                    ORDER BY {embedding_expr} <=> {query_expr}
                     LIMIT %s
-                """, (query_literal, project_id, query_literal, limit))
+                """, (query_literal, project_id, self.dimensions, query_literal, limit))
                 raw_results = cursor.fetchall()
         results: List[Dict[str, Any]] = []
         for doc_id, score in raw_results:
@@ -474,6 +486,167 @@ class HashVectorIndex:
         digest = hashlib.sha1(f"{project_id}:{doc_id}".encode("utf-8")).hexdigest()[:24]
         safe_doc_id = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in doc_id)[:80]
         return f"{project_id}:{safe_doc_id}:{digest}"[:220]
+
+    def _ensure_pgvector_ann_index(self, cursor, row_count: int) -> Dict[str, Any]:
+        ann = self._pgvector_ann_status("configured")
+        if ann["requested"] == "none":
+            ann.update({"active": "none", "status": "disabled", "reason": "ann_disabled"})
+            return ann
+        if self.dimensions <= 0:
+            ann.update({"active": "none", "status": "skipped", "reason": "invalid_dimensions"})
+            return ann
+        if self.dimensions > 2000:
+            ann.update({
+                "active": "none",
+                "status": "skipped",
+                "reason": "dimensions_exceed_pgvector_index_limit",
+            })
+            return ann
+
+        expression = f"(embedding::vector({self.dimensions})) vector_cosine_ops"
+        try:
+            active = ann["requested"] if ann["requested"] in {"hnsw", "ivfflat"} else "hnsw"
+            if active == "ivfflat":
+                lists = self._pgvector_lists(row_count)
+                index_name = self._pgvector_ann_index_name(active, {"lists": lists})
+                cursor.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {index_name}
+                    ON retrieval_vectors
+                    USING ivfflat ({expression})
+                    WITH (lists = {lists})
+                    WHERE dimensions = {self.dimensions}
+                """)
+                ann.update({
+                    "active": "ivfflat",
+                    "status": "active",
+                    "index_name": index_name,
+                    "build_parameters": {"lists": lists},
+                    "query_parameters": {"probes": self._pgvector_probes(lists)},
+                })
+            else:
+                m = self._bounded_int(self._config_value("pgvector_hnsw_m", "pgvectorHnswM"), 16, 4, 64)
+                ef_construction = self._bounded_int(
+                    self._config_value("pgvector_hnsw_ef_construction", "pgvectorHnswEfConstruction"),
+                    64,
+                    8,
+                    512,
+                )
+                index_name = self._pgvector_ann_index_name(active, {
+                    "m": m,
+                    "ef_construction": ef_construction,
+                })
+                cursor.execute(f"""
+                    CREATE INDEX IF NOT EXISTS {index_name}
+                    ON retrieval_vectors
+                    USING hnsw ({expression})
+                    WITH (m = {m}, ef_construction = {ef_construction})
+                    WHERE dimensions = {self.dimensions}
+                """)
+                ann.update({
+                    "active": "hnsw",
+                    "status": "active",
+                    "index_name": index_name,
+                    "build_parameters": {"m": m, "ef_construction": ef_construction},
+                    "query_parameters": {"ef_search": self._pgvector_hnsw_ef_search()},
+                })
+        except Exception as exc:
+            ann.update({
+                "active": "none",
+                "status": "fallback_exact",
+                "reason": "ann_index_error",
+                "error": str(exc),
+            })
+            self.embedding_metadata.setdefault("warnings", []).append(
+                f"pgvector ANN index could not be created; exact pgvector search remains active: {exc}"
+            )
+        return ann
+
+    def _apply_pgvector_query_tuning(self, cursor):
+        ann = (self.backend_status or {}).get("ann") or {}
+        if ann.get("status") != "active":
+            return
+        if ann.get("active") == "hnsw":
+            cursor.execute(f"SET hnsw.ef_search = {self._pgvector_hnsw_ef_search()}")
+        elif ann.get("active") == "ivfflat":
+            probes = (ann.get("query_parameters") or {}).get("probes")
+            cursor.execute(f"SET ivfflat.probes = {self._bounded_int(probes, 1, 1, 10000)}")
+
+    def _pgvector_distance_expressions(self) -> tuple:
+        if 0 < self.dimensions <= 2000:
+            return f"embedding::vector({self.dimensions})", f"%s::vector({self.dimensions})"
+        return "embedding", "%s::vector"
+
+    def _pgvector_ann_status(self, status: str) -> Dict[str, Any]:
+        requested = self._normalize_pgvector_ann(self._config_value("pgvector_ann_index", "pgvectorAnnIndex"))
+        return {
+            "requested": requested,
+            "active": "none",
+            "status": status,
+            "distance": "cosine",
+            "operator_class": "vector_cosine_ops",
+            "dimensions": self.dimensions,
+        }
+
+    def _normalize_pgvector_ann(self, value: Any) -> str:
+        text = str(value or "auto").strip().lower()
+        if text in {"off", "none", "disabled", "disable", "false", "0"}:
+            return "none"
+        if text in {"ivfflat", "ivf", "ivf_flat"}:
+            return "ivfflat"
+        if text in {"hnsw"}:
+            return "hnsw"
+        return "auto"
+
+    def _pgvector_ann_index_name(self, active: str, parameters: Optional[Dict[str, Any]] = None) -> str:
+        params = parameters or {}
+        if active == "ivfflat":
+            suffix = f"l{self._bounded_int(params.get('lists'), 0, 0, 100000)}"
+            return f"idx_rv_ivf_d{self.dimensions}_{suffix}_cos"
+        suffix = "_".join([
+            f"m{self._bounded_int(params.get('m'), 0, 0, 100000)}",
+            f"efc{self._bounded_int(params.get('ef_construction'), 0, 0, 100000)}",
+        ])
+        return f"idx_rv_hnsw_d{self.dimensions}_{suffix}_cos"
+
+    def _pgvector_lists(self, row_count: int) -> int:
+        configured = self._config_value("pgvector_lists", "pgvectorLists")
+        if configured is not None:
+            return self._bounded_int(configured, 1, 1, 100000)
+        if row_count <= 0:
+            return 1
+        if row_count <= 1_000_000:
+            return max(1, row_count // 1000)
+        return max(1, int(math.sqrt(row_count)))
+
+    def _pgvector_probes(self, lists: int) -> int:
+        configured = self._config_value("pgvector_probes", "pgvectorProbes")
+        if configured is not None:
+            return self._bounded_int(configured, 1, 1, max(1, lists))
+        return max(1, int(math.sqrt(max(1, lists))))
+
+    def _pgvector_hnsw_ef_search(self) -> int:
+        return self._bounded_int(
+            self._config_value("pgvector_hnsw_ef_search", "pgvectorHnswEfSearch"),
+            40,
+            1,
+            10000,
+        )
+
+    def _normalize_vector_config(self, value: Any) -> Dict[str, Any]:
+        return dict(value) if isinstance(value, dict) else {}
+
+    def _config_value(self, *keys: str) -> Any:
+        for key in keys:
+            if key in self.vector_config:
+                return self.vector_config.get(key)
+        return None
+
+    def _bounded_int(self, value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = default
+        return max(minimum, min(maximum, number))
 
     def _vector_literal(self, vector: List[float]) -> str:
         return "[" + ",".join(f"{float(value):.8f}" for value in vector) + "]"
@@ -581,7 +754,8 @@ class HybridRetrievalEngine:
             documents: List[RetrievalDocument],
             graph_context: Dict[str, Any],
             embedding_bundle: Optional[Dict[str, Any]] = None,
-            vector_backend: Optional[str] = None):
+            vector_backend: Optional[str] = None,
+            vector_config: Optional[Dict[str, Any]] = None):
         self.project_root = project_root
         self.documents = documents
         self.keyword = KeywordRetriever(documents)
@@ -590,6 +764,7 @@ class HybridRetrievalEngine:
             self.keyword._tokenize,
             embedding_bundle=embedding_bundle,
             vector_backend=vector_backend,
+            vector_config=vector_config,
             project_root=project_root,
         )
         self.graph_context = graph_context or {}
@@ -727,6 +902,7 @@ class HybridRetrievalEngine:
             "average_quality_score": round(average_quality_score, 2),
             "warnings": warnings,
             "recommendations": sorted(set(recommendations)),
+            "vector_index": self.vector.summary(),
             "cases": evaluated_cases,
         }
 

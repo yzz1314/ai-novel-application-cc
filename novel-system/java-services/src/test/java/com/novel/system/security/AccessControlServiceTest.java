@@ -1,18 +1,21 @@
 package com.novel.system.security;
 
 import com.novel.system.exception.AccessDeniedException;
+import com.novel.system.service.ProjectAccessService;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import static org.mockito.Mockito.mock;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.when;
 
 class AccessControlServiceTest {
 
     @Test
     void buildsRequestContextFromHeaders() {
-        AccessControlService service = new AccessControlService();
+        AccessControlService service = new AccessControlService(mock(ProjectAccessService.class));
         MockHttpServletRequest request = new MockHttpServletRequest();
         request.addHeader("X-User-Id", "u-1");
         request.addHeader("X-Actor", "Alice");
@@ -33,7 +36,7 @@ class AccessControlServiceTest {
 
     @Test
     void rejectsMissingAuthenticationWhenRequired() {
-        AccessControlService service = new AccessControlService();
+        AccessControlService service = new AccessControlService(mock(ProjectAccessService.class));
         ReflectionTestUtils.setField(service, "requireAuthentication", true);
 
         assertThatThrownBy(() -> service.fromRequest(new MockHttpServletRequest()))
@@ -43,7 +46,7 @@ class AccessControlServiceTest {
 
     @Test
     void rejectsUnauthorizedProjectWhenEnforced() {
-        AccessControlService service = new AccessControlService();
+        AccessControlService service = new AccessControlService(mock(ProjectAccessService.class));
         ReflectionTestUtils.setField(service, "enforceAccess", true);
         RequestAccessContext context = new RequestAccessContext(
             "u-1",
@@ -61,7 +64,7 @@ class AccessControlServiceTest {
 
     @Test
     void rejectsViewerMutationWhenEnforced() {
-        AccessControlService service = new AccessControlService();
+        AccessControlService service = new AccessControlService(mock(ProjectAccessService.class));
         ReflectionTestUtils.setField(service, "enforceAccess", true);
         RequestAccessContext context = new RequestAccessContext(
             "u-1",
@@ -75,5 +78,23 @@ class AccessControlServiceTest {
         assertThatThrownBy(() -> service.assertMutationAllowed(context, "project-a", "delete project"))
             .isInstanceOf(AccessDeniedException.class)
             .hasMessageContaining("cannot perform action");
+    }
+
+    @Test
+    void resolvesProjectAccessThroughMembershipService() {
+        ProjectAccessService projectAccessService = mock(ProjectAccessService.class);
+        AccessControlService service = new AccessControlService(projectAccessService);
+        RequestAccessContext context = new RequestAccessContext(
+            "u-1",
+            "Alice",
+            "org-1",
+            RequestAccessContext.normalizeRoles("viewer"),
+            RequestAccessContext.normalizeProjectIds("project-a"),
+            true
+        );
+        RequestAccessContext resolved = context.withProjectAccess("project-b", "editor");
+        when(projectAccessService.resolveProjectAccess(context, "project-b")).thenReturn(resolved);
+
+        assertThat(service.resolveProjectAccess(context, "project-b")).isSameAs(resolved);
     }
 }

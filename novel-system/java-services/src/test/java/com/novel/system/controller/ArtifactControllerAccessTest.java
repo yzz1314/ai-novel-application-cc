@@ -3,6 +3,8 @@ package com.novel.system.controller;
 import com.novel.system.exception.GlobalExceptionHandler;
 import com.novel.system.security.AccessControlService;
 import com.novel.system.security.AccessControlInterceptor;
+import com.novel.system.security.RequestAccessContext;
+import com.novel.system.service.ProjectAccessService;
 import com.novel.system.service.ArtifactService;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -13,8 +15,8 @@ import java.util.Map;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -77,7 +79,10 @@ class ArtifactControllerAccessTest {
 
     private MockMvc mockMvc(ArtifactService artifactService, boolean enforceAccess, boolean requireAuthentication) {
         ArtifactController controller = new ArtifactController(artifactService);
-        AccessControlService accessControlService = new AccessControlService();
+        ProjectAccessService projectAccessService = mock(ProjectAccessService.class);
+        when(projectAccessService.resolveProjectAccess(any(RequestAccessContext.class), any()))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+        AccessControlService accessControlService = new AccessControlService(projectAccessService);
         ReflectionTestUtils.setField(accessControlService, "enforceAccess", enforceAccess);
         ReflectionTestUtils.setField(accessControlService, "requireAuthentication", requireAuthentication);
         return standaloneSetup(controller)

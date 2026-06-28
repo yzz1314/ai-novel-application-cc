@@ -5,6 +5,8 @@ import com.novel.system.entity.Project.ProjectStatus;
 import com.novel.system.entity.Project.SampleGroupType;
 import com.novel.system.repository.ProjectRepository;
 import com.novel.system.exception.ResourceNotFoundException;
+import com.novel.system.security.RequestAccessContext;
+import com.novel.system.security.RequestAccessContextHolder;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,6 +24,7 @@ import java.util.List;
 public class ProjectService {
 
     private final ProjectRepository projectRepository;
+    private final ProjectAccessService projectAccessService;
 
     @Value("${file.storage.base-path:/workspace}")
     private String basePath;
@@ -50,6 +53,7 @@ public class ProjectService {
 
         // 保存到数据库（触发ID生成）
         project = projectRepository.save(project);
+        grantOwnerAccess(project);
 
         // 创建项目目录结构
         try {
@@ -61,6 +65,18 @@ public class ProjectService {
 
         log.info("Project created with ID: {}", project.getId());
         return project;
+    }
+
+    private void grantOwnerAccess(Project project) {
+        RequestAccessContext context = RequestAccessContextHolder.current();
+        projectAccessService.grantProjectAccess(
+            project.getId(),
+            context.userId(),
+            context.actor(),
+            context.organizationId(),
+            "owner",
+            context.actor()
+        );
     }
 
     private String normalizeBlank(String value) {

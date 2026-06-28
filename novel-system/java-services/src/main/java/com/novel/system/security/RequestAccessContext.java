@@ -37,6 +37,23 @@ public record RequestAccessContext(
         return roles.stream().anyMatch(allowedRoles::contains);
     }
 
+    public RequestAccessContext withProjectAccess(String projectId, String role) {
+        Set<String> newProjects = new LinkedHashSet<>(projectIds);
+        if (projectId != null && !projectId.isBlank()) {
+            newProjects.add(projectId);
+        }
+        Set<String> newRoles = new LinkedHashSet<>(roles);
+        newRoles.add(normalizeRole(role));
+        return new RequestAccessContext(
+            userId,
+            actor,
+            organizationId,
+            Collections.unmodifiableSet(newRoles),
+            Collections.unmodifiableSet(newProjects),
+            authenticated
+        );
+    }
+
     public static String normalizeRole(String value) {
         String role = value == null || value.isBlank() ? "viewer" : value.trim().toLowerCase(Locale.ROOT);
         return switch (role) {

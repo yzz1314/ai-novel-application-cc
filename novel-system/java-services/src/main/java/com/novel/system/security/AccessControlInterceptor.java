@@ -18,8 +18,9 @@ public class AccessControlInterceptor implements HandlerInterceptor {
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) {
         RequestAccessContext context = accessControlService.fromRequest(request);
-        RequestAccessContextHolder.set(context);
         String projectId = projectId(request);
+        context = accessControlService.resolveProjectAccess(context, projectId);
+        RequestAccessContextHolder.set(context);
         accessControlService.assertProjectAccess(context, projectId);
         if (projectId != null && isMutation(request.getMethod())) {
             accessControlService.assertMutationAllowed(context, projectId, request.getMethod() + " " + request.getRequestURI());

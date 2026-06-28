@@ -1,16 +1,21 @@
 package com.novel.system.security;
 
 import com.novel.system.exception.AccessDeniedException;
+import com.novel.system.service.ProjectAccessService;
 import jakarta.servlet.http.HttpServletRequest;
+import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.Set;
 
 @Service
+@RequiredArgsConstructor
 public class AccessControlService {
 
     private static final Set<String> DEFAULT_MUTATION_ROLES = Set.of("owner", "admin", "editor", "artifact_manager");
+
+    private final ProjectAccessService projectAccessService;
 
     @Value("${security.access.enforce:false}")
     private boolean enforceAccess;
@@ -41,6 +46,13 @@ public class AccessControlService {
             RequestAccessContext.normalizeProjectIds(projectHeader),
             true
         );
+    }
+
+    public RequestAccessContext resolveProjectAccess(RequestAccessContext context, String projectId) {
+        if (projectId == null || projectId.isBlank()) {
+            return context;
+        }
+        return projectAccessService.resolveProjectAccess(context, projectId);
     }
 
     public void assertProjectAccess(RequestAccessContext context, String projectId) {

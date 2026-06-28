@@ -117,6 +117,8 @@ public class DashboardService {
 
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("snapshotCount", snapshots.size());
+        summary.put("sampleIntervalMinutes", trendSampleIntervalMinutes());
+        summary.put("retentionDays", trendRetentionDays());
         if (!snapshots.isEmpty()) {
             Map<String, Object> latest = snapshots.get(0);
             Map<String, Object> oldest = snapshots.get(snapshots.size() - 1);
@@ -126,6 +128,10 @@ public class DashboardService {
             summary.put("activeAlertDelta", numberValue(latest.get("activeAlertCount")) - numberValue(oldest.get("activeAlertCount")));
             summary.put("totalTokenDelta", numberValue(latest.get("totalTokens")) - numberValue(oldest.get("totalTokens")));
             summary.put("latestHealthStatus", latest.get("healthStatus"));
+            summary.put("healthStatusSeries", snapshots.stream()
+                .map(snapshot -> snapshot.get("healthStatus"))
+                .distinct()
+                .toList());
         }
 
         Map<String, Object> response = new LinkedHashMap<>();
@@ -241,6 +247,17 @@ public class DashboardService {
             Map<String, Object> stats,
             Map<String, Object> taskSummary) {
         Map<String, Object> alertCounts = (Map<String, Object>) alertSummary.getOrDefault("summary", Map.of());
+        Map<String, Object> retention = applyTrendRetentionPolicy();
+        DashboardMetricSnapshot latest = dashboardMetricSnapshotRepository.findFirstByOrderByCapturedAtDesc().orElse(null);
+        long sampleIntervalMinutes = trendSampleIntervalMinutes();
+        if (latest != null && latest.getCapturedAt() != null
+            && latest.getCapturedAt().isAfter(LocalDateTime.now().minusMinutes(sampleIntervalMinutes))) {
+            Map<String, Object> skipped = snapshotMap(latest);
+            skipped.put("sampleSkipped", true);
+            skipped.put("sampleIntervalMinutes", sampleIntervalMinutes);
+            skipped.put("retention", retention);
+            return skipped;
+        }
         DashboardMetricSnapshot snapshot = new DashboardMetricSnapshot();
         snapshot.setCapturedAt(LocalDateTime.now());
         snapshot.setHealthStatus(stringValue(healthSummary.get("status"), "UNKNOWN"));
@@ -261,7 +278,22 @@ public class DashboardService {
             "performanceWindowTaskCount", performanceSummary.get("windowTaskCount"),
             "generatedBy", "dashboard_overview"
         ));
-        return snapshotMap(dashboardMetricSnapshotRepository.save(snapshot));
+        Map<String, Object> result = snapshotMap(dashboardMetricSnapshotRepository.save(snapshot));
+        result.put("sampleSkipped", false);
+        result.put("sampleIntervalMinutes", sampleIntervalMinutes);
+        result.put("retention", retention);
+        return result;
+    }
+
+    private Map<String, Object> applyTrendRetentionPolicy() {
+        long retentionDays = trendRetentionDays();
+        LocalDateTime cutoff = LocalDateTime.now().minusDays(retentionDays);
+        long deleted = dashboardMetricSnapshotRepository.deleteByCapturedAtBefore(cutoff);
+        return details(
+            "retentionDays", retentionDays,
+            "cutoff", cutoff,
+            "deletedCount", deleted
+        );
     }
 
     private Map<String, Object> snapshotMap(DashboardMetricSnapshot snapshot) {
@@ -480,6 +512,16 @@ public class DashboardService {
     private long deliveryRetryDelayMinutes() {
         long value = numberValue(configValue("dashboard.alerts.delivery-retry-delay-minutes", "DASHBOARD_ALERT_DELIVERY_RETRY_DELAY_MINUTES"));
         return value > 0 ? Math.min(value, 24 * 60) : 15;
+    }
+
+    private long trendSampleIntervalMinutes() {
+        long value = numberValue(configValue("dashboard.trends.sample-interval-minutes", "DASHBOARD_TREND_SAMPLE_INTERVAL_MINUTES"));
+        return value > 0 ? Math.min(value, 24 * 60) : 5;
+    }
+
+    private long trendRetentionDays() {
+        long value = numberValue(configValue("dashboard.trends.retention-days", "DASHBOARD_TREND_RETENTION_DAYS"));
+        return value > 0 ? Math.min(value, 3650) : 30;
     }
 
     private boolean booleanValue(String value, boolean fallback) {

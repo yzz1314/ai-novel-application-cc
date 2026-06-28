@@ -86,6 +86,26 @@ const formatDuration = (value?: number) => {
 
 const formatNumber = (value?: number) => Number(value || 0).toLocaleString()
 
+const trendValue = (item: any, key: string) => {
+  const value = Number(item?.[key] || 0)
+  return Number.isFinite(value) ? value : 0
+}
+
+const sparklinePoints = (items: any[], key: string, width = 300, height = 72) => {
+  const ordered = [...items].reverse()
+  if (!ordered.length) return ''
+  const values = ordered.map((item) => trendValue(item, key))
+  const max = Math.max(...values, 1)
+  const step = ordered.length > 1 ? width / (ordered.length - 1) : width
+  return values
+    .map((value, index) => {
+      const x = Math.round(index * step)
+      const y = Math.round(height - (value / max) * (height - 8) - 4)
+      return `${x},${y}`
+    })
+    .join(' ')
+}
+
 const actionPath = (target?: string) => {
   if (target === 'tasks') return '/tasks'
   if (target === 'projects') return '/projects'
@@ -726,6 +746,36 @@ const Dashboard: React.FC = () => {
                     <Statistic title="Token变化" value={formatNumber(trendSummary.totalTokenDelta)} />
                   </Col>
                 </Row>
+                <div style={{ width: '100%', overflow: 'hidden' }}>
+                  <svg width="100%" height="96" viewBox="0 0 300 96" role="img" aria-label="Dashboard trend chart">
+                    <line x1="0" y1="76" x2="300" y2="76" stroke="#f0f0f0" />
+                    <polyline
+                      fill="none"
+                      stroke="#cf1322"
+                      strokeWidth="2"
+                      points={sparklinePoints(trendSnapshots, 'failedTasks')}
+                    />
+                    <polyline
+                      fill="none"
+                      stroke="#faad14"
+                      strokeWidth="2"
+                      points={sparklinePoints(trendSnapshots, 'activeAlertCount')}
+                    />
+                    <polyline
+                      fill="none"
+                      stroke="#1677ff"
+                      strokeWidth="2"
+                      points={sparklinePoints(trendSnapshots, 'totalTokens')}
+                    />
+                  </svg>
+                </div>
+                <Space wrap>
+                  <Tag color="error">失败任务</Tag>
+                  <Tag color="warning">活跃告警</Tag>
+                  <Tag color="processing">Token</Tag>
+                  <Tag>采样 {trendSummary.sampleIntervalMinutes || 5} 分钟</Tag>
+                  <Tag>保留 {trendSummary.retentionDays || 30} 天</Tag>
+                </Space>
                 <List
                   size="small"
                   dataSource={trendSnapshots.slice(0, 5)}

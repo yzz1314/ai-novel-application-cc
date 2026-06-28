@@ -72,6 +72,9 @@ dashboard:
     webhook-url: ${DASHBOARD_ALERT_WEBHOOK_URL:}
     email-to: ${DASHBOARD_ALERT_EMAIL_TO:}
     email-from: ${DASHBOARD_ALERT_EMAIL_FROM:}
+  trends:
+    sample-interval-minutes: ${DASHBOARD_TREND_SAMPLE_INTERVAL_MINUTES:5}
+    retention-days: ${DASHBOARD_TREND_RETENTION_DAYS:30}
 
 file:
   storage:

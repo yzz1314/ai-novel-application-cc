@@ -139,7 +139,9 @@ class DashboardServiceTest {
         when(taskRepository.findAllByOrderByCreatedAtDesc(any(Pageable.class))).thenReturn(List.of(failedTask, approvalTask));
         when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of());
         mockNotificationPersistence();
-        when(dashboardMetricSnapshotRepository.save(any(DashboardMetricSnapshot.class)))
+        when(dashboardMetricSnapshotRepository.findFirstByOrderByCapturedAtDesc()).thenReturn(Optional.empty());
+        when(dashboardMetricSnapshotRepository.deleteByCapturedAtBefore(any())).thenReturn(0L);
+        lenient().when(dashboardMetricSnapshotRepository.save(any(DashboardMetricSnapshot.class)))
             .thenAnswer(invocation -> invocation.getArgument(0));
         when(taskRepository.countByProjectId(project.getId())).thenReturn(2L);
         when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.FAILED)).thenReturn(1L);
@@ -194,7 +196,12 @@ class DashboardServiceTest {
         assertThat(latestTrend)
             .containsEntry("healthStatus", "ATTENTION")
             .containsEntry("failedTasks", 1L)
-            .containsEntry("activeAlertCount", 5L);
+            .containsEntry("activeAlertCount", 5L)
+            .containsEntry("sampleSkipped", false)
+            .containsEntry("sampleIntervalMinutes", 5L);
+        assertThat((Map<String, Object>) latestTrend.get("retention"))
+            .containsEntry("retentionDays", 30L)
+            .containsEntry("deletedCount", 0L);
         Map<String, Object> notificationSummary = (Map<String, Object>) dashboard.get("alertNotificationSummary");
         assertThat(notificationSummary)
             .containsEntry("generated", 5)
@@ -318,7 +325,31 @@ class DashboardServiceTest {
             .containsEntry("failedTaskDelta", 2L)
             .containsEntry("activeAlertDelta", 1L)
             .containsEntry("totalTokenDelta", 150L)
-            .containsEntry("latestHealthStatus", "ATTENTION");
+            .containsEntry("latestHealthStatus", "ATTENTION")
+            .containsEntry("sampleIntervalMinutes", 5L)
+            .containsEntry("retentionDays", 30L);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void dashboardSkipsTrendSnapshotInsideSamplingWindow() {
+        Project project = project("project_dashboard");
+        Task failedTask = task("task_failed", TaskStatus.FAILED, null);
+        DashboardMetricSnapshot latestSnapshot = snapshot("latest_snapshot", LocalDateTime.now().minusMinutes(1), "ATTENTION", 1, 1, 100);
+        mockDashboardBasics(project, failedTask);
+        mockNotificationPersistence();
+        when(dashboardAlertStateRepository.findByAlertIdIn(any())).thenReturn(List.of());
+        when(dashboardMetricSnapshotRepository.findFirstByOrderByCapturedAtDesc()).thenReturn(Optional.of(latestSnapshot));
+        when(dashboardMetricSnapshotRepository.deleteByCapturedAtBefore(any())).thenReturn(2L);
+
+        Map<String, Object> dashboard = dashboardService.getDashboard();
+
+        Map<String, Object> latestTrend = (Map<String, Object>) dashboard.get("latestTrend");
+        assertThat(latestTrend)
+            .containsEntry("id", "latest_snapshot")
+            .containsEntry("sampleSkipped", true)
+            .containsEntry("sampleIntervalMinutes", 5L);
+        assertThat((Map<String, Object>) latestTrend.get("retention")).containsEntry("deletedCount", 2L);
     }
 
     @Test
@@ -524,7 +555,9 @@ class DashboardServiceTest {
         when(taskRepository.countByStatus(TaskStatus.CANCELLED)).thenReturn(0L);
         when(taskRepository.findByStatus(TaskStatus.PARTIAL)).thenReturn(List.of());
         when(taskRepository.findAllByOrderByCreatedAtDesc(any(Pageable.class))).thenReturn(List.of(failedTask));
-        when(dashboardMetricSnapshotRepository.save(any(DashboardMetricSnapshot.class)))
+        when(dashboardMetricSnapshotRepository.findFirstByOrderByCapturedAtDesc()).thenReturn(Optional.empty());
+        when(dashboardMetricSnapshotRepository.deleteByCapturedAtBefore(any())).thenReturn(0L);
+        lenient().when(dashboardMetricSnapshotRepository.save(any(DashboardMetricSnapshot.class)))
             .thenAnswer(invocation -> invocation.getArgument(0));
         when(taskRepository.countByProjectId(project.getId())).thenReturn(1L);
         when(taskRepository.countByProjectIdAndStatus(project.getId(), TaskStatus.FAILED)).thenReturn(1L);

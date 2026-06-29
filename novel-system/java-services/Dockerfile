@@ -17,7 +17,7 @@ COPY src ./src
 RUN mvn clean package -DskipTests
 
 # 运行阶段
-FROM ${DOCKER_REGISTRY}/eclipse-temurin:17-jre-alpine
+FROM ${DOCKER_REGISTRY}/eclipse-temurin:17-jre
 
 WORKDIR /app
 

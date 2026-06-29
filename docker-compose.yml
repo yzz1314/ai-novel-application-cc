@@ -7,29 +7,29 @@ services:
     container_name: novel-postgres
     restart: always
     environment:
-      POSTGRES_DB: novel_system
+      POSTGRES_DB: ${POSTGRES_DB:-novel_system}
       POSTGRES_USER: novel_user
       POSTGRES_PASSWORD: novel_pass
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./novel-system/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - novel-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U novel_user -d novel_system"]
+      test: ["CMD-SHELL", "pg_isready -U novel_user -d ${POSTGRES_DB:-novel_system}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   # Redis缓存
   redis:
-    image: redis:7-alpine
+    image: i-connect-redis:gt-0.1
     container_name: novel-redis
     restart: always
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-16379}:6379"
     volumes:
       - redis-data:/data
     networks:
@@ -42,21 +42,25 @@ services:
 
   # Python AI服务
   python-ai:
+    image: ai-novel-python_service:latest
     build:
       context: ./novel-system/python-services
       dockerfile: Dockerfile
     container_name: novel-python-ai
     restart: always
     ports:
-      - "8000:8000"
+      - "${PYTHON_SERVICE_PORT:-18000}:8000"
     env_file:
       - ./novel-system/python-services/.env
     environment:
       MOCK_LLM: ${MOCK_LLM:-false}
-      PGVECTOR_DSN: postgresql://novel_user:novel_pass@postgres:5432/novel_system
+      PGVECTOR_DSN: postgresql://novel_user:novel_pass@postgres:5432/${POSTGRES_DB:-novel_system}
     volumes:
       - workspace-data:/workspace
       - ./novel-system/python-services:/app
+    command: >
+      sh -c "sh /app/scripts/bootstrap-runtime-deps.sh &&
+             uvicorn api.main:app --host 0.0.0.0 --port 8000"
     networks:
       - novel-network
     depends_on:
@@ -65,22 +69,23 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()\""]
       interval: 30s
       timeout: 10s
       retries: 3
 
   # Java后端服务
   java-backend:
+    image: ai-novel-java_service:latest
     build:
       context: ./novel-system/java-services
       dockerfile: Dockerfile
     container_name: novel-java-backend
     restart: always
     ports:
-      - "8080:8080"
+      - "${JAVA_SERVICE_PORT:-18080}:8080"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/novel_system
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-novel_system}
       SPRING_DATASOURCE_USERNAME: novel_user
       SPRING_DATASOURCE_PASSWORD: novel_pass
       SPRING_REDIS_HOST: redis
@@ -92,7 +97,9 @@ services:
     volumes:
       - workspace-data:/workspace
     networks:
-      - novel-network
+      novel-network:
+        aliases:
+          - java-service
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,20 +108,21 @@ services:
       python-ai:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/health >/dev/null 2>&1 || wget -qO- http://localhost:8080/api/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
 
   # React前端
   frontend:
+    image: ai-novel-frontend:latest
     build:
       context: ./novel-system/frontend
       dockerfile: Dockerfile
     container_name: novel-frontend
     restart: always
     ports:
-      - "80:80"
+      - "${FRONTEND_PORT:-3000}:80"
     networks:
       - novel-network
     depends_on:

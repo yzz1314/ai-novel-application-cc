@@ -59,6 +59,7 @@ public class ModelProfileService {
     private final ModelProfileRepository modelProfileRepository;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final SecureRandom secureRandom = new SecureRandom();
+    private final Object initializationLock = new Object();
 
     @Value("${file.storage.base-path:/workspace}")
     private String basePath;
@@ -298,6 +299,15 @@ public class ModelProfileService {
         if (modelProfileRepository.count() > 0) {
             return;
         }
+        synchronized (initializationLock) {
+            if (modelProfileRepository.count() > 0) {
+                return;
+            }
+            initializeProfiles();
+        }
+    }
+
+    private void initializeProfiles() {
         Map<String, Object> store = readLegacyStoreOrDefault();
         for (Map<String, Object> profile : profileList(store)) {
             String profileId = asString(profile.get("profileId"), "");

@@ -11,10 +11,11 @@ from contextvars import ContextVar
 from pathlib import Path
 import time
 from typing import Dict, Any, Optional, List
-from litellm import acompletion
+from urllib.parse import urlsplit, urlunsplit
 try:
-    from litellm import aembedding
+    from litellm import acompletion, aembedding
 except Exception:  # pragma: no cover - optional LiteLLM capability
+    acompletion = None
     aembedding = None
 import json
 import re
@@ -439,6 +440,10 @@ class LLMClient:
         if not model:
             return {}
         provider = model.get("provider", "")
+        api_base = self._normalize_api_base(
+            provider,
+            model.get("api_base", model.get("endpoint") or self._provider_api_base(provider))
+        )
         normalized = {
             "provider": provider or "openai",
             "model": model.get("model") or self.model_config.get("model"),
@@ -447,7 +452,7 @@ class LLMClient:
             "top_p": model.get("top_p", model.get("topP")),
             "timeout": model.get("timeout"),
             "api_key": self._model_api_key(model, provider),
-            "api_base": model.get("api_base", model.get("endpoint") or self._provider_api_base(provider)),
+            "api_base": api_base,
             "mock": bool(model.get("mock") or provider == "mock"),
             "cache_enabled": model.get("cache_enabled", model.get("cacheEnabled", True)),
             "cache_ttl_seconds": model.get("cache_ttl_seconds", model.get("cacheTtlSeconds", 3600)),
@@ -539,10 +544,17 @@ class LLMClient:
             call_kwargs["top_p"] = config.get("top_p")
         if config.get("timeout") is not None:
             call_kwargs["timeout"] = config.get("timeout")
+        if config.get("num_retries") is not None:
+            call_kwargs["num_retries"] = config.get("num_retries")
+        if config.get("sdk_max_retries") is not None:
+            call_kwargs["max_retries"] = config.get("sdk_max_retries")
 
         if response_format == "json":
             call_kwargs["response_format"] = {"type": "json_object"}
             messages[0]["content"] = f"{prompt}\n\n请以JSON格式返回结果。"
+
+        if acompletion is None:
+            raise RuntimeError("LiteLLM is unavailable and mock mode is disabled")
 
         await self._apply_rate_limit(config)
         self.logger.info(f"Calling LLM: {config['model']}")
@@ -827,6 +839,16 @@ class LLMClient:
         if provider == "openai":
             return settings.OPENAI_API_BASE or None
         return None
+
+    def _normalize_api_base(self, provider: str, api_base: Optional[str]) -> Optional[str]:
+        if not api_base:
+            return api_base
+        if provider not in ("custom", "openai"):
+            return api_base
+        parsed = urlsplit(str(api_base).strip().rstrip("/"))
+        if parsed.path in ("", "/"):
+            return urlunsplit((parsed.scheme, parsed.netloc, "/v1", "", ""))
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), parsed.query, parsed.fragment))
 
     def _gateway_status(self, config: Dict[str, Any], operation: str, status: str) -> Dict[str, Any]:
         return {

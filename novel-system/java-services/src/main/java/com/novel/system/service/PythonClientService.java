@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 import java.util.HashMap;
 import java.util.Map;
@@ -26,9 +27,10 @@ public class PythonClientService {
      */
     public Map<String, Object> callAgent(String agentName, Map<String, Object> request) {
         String normalizedAgentName = normalizeAgentName(agentName);
-        String url = pythonServiceUrl + "/api/agents/" + normalizedAgentName + "/run";
+        String agentSpecificUrl = pythonServiceUrl + "/api/agents/" + normalizedAgentName + "/run";
+        String legacyRunUrl = pythonServiceUrl + "/api/agents/run";
 
-        log.info("Calling Python agent: {} at {}", normalizedAgentName, url);
+        log.info("Calling Python agent: {} at {}", normalizedAgentName, agentSpecificUrl);
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -37,23 +39,36 @@ public class PythonClientService {
         HttpEntity<Map<String, Object>> entity = new HttpEntity<>(request, headers);
 
         try {
-            ResponseEntity<Map> response = restTemplate.exchange(
-                url,
-                HttpMethod.POST,
-                entity,
-                Map.class
+            return postAgentRequest(agentSpecificUrl, entity, normalizedAgentName);
+        } catch (HttpClientErrorException.NotFound e) {
+            log.warn(
+                "Agent-specific Python endpoint missing for {}; falling back to legacy endpoint: {}",
+                normalizedAgentName,
+                legacyRunUrl
             );
-
-            if (response.getStatusCode() == HttpStatus.OK) {
-                log.info("Agent call successful: {}", normalizedAgentName);
-                return response.getBody();
-            } else {
-                throw new RuntimeException("Agent调用失败，状态码: " + response.getStatusCode());
-            }
+            return postAgentRequest(legacyRunUrl, entity, normalizedAgentName);
         } catch (Exception e) {
             log.error("Failed to call agent: {}", normalizedAgentName, e);
             throw new RuntimeException("调用Python服务失败: " + e.getMessage(), e);
         }
+    }
+
+    private Map<String, Object> postAgentRequest(
+            String url,
+            HttpEntity<Map<String, Object>> entity,
+            String normalizedAgentName) {
+        ResponseEntity<Map> response = restTemplate.exchange(
+            url,
+            HttpMethod.POST,
+            entity,
+            Map.class
+        );
+
+        if (response.getStatusCode() == HttpStatus.OK) {
+            log.info("Agent call successful: {}", normalizedAgentName);
+            return response.getBody();
+        }
+        throw new RuntimeException("Agent调用失败，状态码: " + response.getStatusCode());
     }
 
     /**

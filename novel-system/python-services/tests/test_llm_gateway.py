@@ -224,6 +224,72 @@ async def test_llm_gateway_resolves_runtime_secret_reference(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_llm_gateway_forwards_litellm_num_retries(monkeypatch):
+    call_kwargs = {}
+
+    async def fake_acompletion(**kwargs):
+        call_kwargs.update(kwargs)
+        return FakeResponse(content="retry config ok")
+
+    monkeypatch.setattr(llm_client_module, "acompletion", fake_acompletion)
+    original_mock = settings.MOCK_LLM
+    settings.MOCK_LLM = False
+    try:
+        client = LLMClient(model_config={
+            "provider": "custom",
+            "model": "custom-model",
+            "api_key": "key",
+            "api_base": "https://example.invalid/v1",
+            "mock": False,
+        })
+        response = await client.generate("retry config smoke", num_retries=0, sdk_max_retries=0)
+    finally:
+        settings.MOCK_LLM = original_mock
+
+    assert response["content"] == "retry config ok"
+    assert call_kwargs["num_retries"] == 0
+    assert call_kwargs["max_retries"] == 0
+
+
+def test_llm_gateway_normalizes_openai_compatible_root_endpoint():
+    client = LLMClient()
+
+    custom_config = client._normalize_model_config({
+        "provider": "custom",
+        "model": "gpt-5.5",
+        "endpoint": "https://subapi.xiaoye.lol",
+        "apiKey": "secret",
+        "mock": False,
+    })
+    openai_config = client._normalize_model_config({
+        "provider": "openai",
+        "model": "gpt-4o",
+        "endpoint": "https://api.openai.com",
+        "apiKey": "secret",
+        "mock": False,
+    })
+    already_versioned = client._normalize_model_config({
+        "provider": "custom",
+        "model": "gpt-5.5",
+        "endpoint": "https://subapi.xiaoye.lol/v1",
+        "apiKey": "secret",
+        "mock": False,
+    })
+    non_root_path = client._normalize_model_config({
+        "provider": "custom",
+        "model": "gpt-5.5",
+        "endpoint": "https://subapi.xiaoye.lol/openai/v1",
+        "apiKey": "secret",
+        "mock": False,
+    })
+
+    assert custom_config["api_base"] == "https://subapi.xiaoye.lol/v1"
+    assert openai_config["api_base"] == "https://api.openai.com/v1"
+    assert already_versioned["api_base"] == "https://subapi.xiaoye.lol/v1"
+    assert non_root_path["api_base"] == "https://subapi.xiaoye.lol/openai/v1"
+
+
+@pytest.mark.asyncio
 async def test_llm_gateway_embedding_and_rerank_local_fallback(tmp_path):
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True)

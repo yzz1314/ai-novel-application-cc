@@ -17,6 +17,8 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -248,18 +250,39 @@ class TaskExecutorServiceCancellationTest {
 
         assertThat(tail)
             .containsEntry("path", "logs/tasks/task_log_tail.jsonl")
-            .containsEntry("requestedLines", 2)
-            .containsEntry("totalLines", 4)
-            .containsEntry("startLine", 3)
-            .containsEntry("lineCount", 2)
-            .containsEntry("truncated", true);
+            .containsEntry("requestedLines", 2);
+        assertThat((Integer) tail.get("totalLines")).isGreaterThanOrEqualTo(2);
         assertThat(lines).hasSize(2);
-        assertThat(lines.get(0)).contains("\"eventType\":\"started\"");
-        assertThat(lines.get(1))
-            .contains("\"eventType\":\"finished\"")
-            .contains("\"taskId\":\"task_log_tail\"");
         assertThat(events).extracting(event -> event.get("eventType"))
-            .contains("manual_retry_requested", "finished");
+            .contains("manual_retry_requested");
+    }
+
+    @Test
+    void retryTaskReturnsWithoutWaitingForPythonAgent() throws Exception {
+        Task task = task("task_manual_retry_async", TaskStatus.FAILED);
+        CountDownLatch pythonCallStarted = new CountDownLatch(1);
+        when(taskRepository.findById(task.getId())).thenReturn(Optional.of(task));
+        when(taskRepository.save(any(Task.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(pythonClientService.buildAgentRequest(
+            task.getId(),
+            task.getProjectId(),
+            task.getTaskType(),
+            task.getInputRefs(),
+            task.getParameters()
+        )).thenReturn(Map.of());
+        when(pythonClientService.callAgent(task.getAgentName(), Map.of())).thenAnswer(invocation -> {
+            pythonCallStarted.countDown();
+            Thread.sleep(500L);
+            return Map.of("status", "success");
+        });
+
+        long startedAt = System.currentTimeMillis();
+        Task retried = taskExecutorService.retryTask(task.getId());
+        long elapsedMs = System.currentTimeMillis() - startedAt;
+
+        assertThat(retried.getStatus()).isEqualTo(TaskStatus.PENDING);
+        assertThat(elapsedMs).isLessThan(250L);
+        assertThat(pythonCallStarted.await(1, TimeUnit.SECONDS)).isTrue();
     }
 
     @Test

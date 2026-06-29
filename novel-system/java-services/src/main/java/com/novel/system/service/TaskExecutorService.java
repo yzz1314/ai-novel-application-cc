@@ -27,6 +27,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 @Slf4j
 @Service
@@ -55,6 +57,7 @@ public class TaskExecutorService {
     private final GraphArtifactDbService graphArtifactDbService;
     private final RetrievalArtifactDbService retrievalArtifactDbService;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final Executor manualTaskExecutor = Executors.newCachedThreadPool();
 
     @Value("${file.storage.base-path:/workspace}")
     private String basePath;
@@ -657,7 +660,7 @@ public class TaskExecutorService {
         task.setFinishedAt(null);
         taskRepository.save(task);
         appendTaskEvent(task, "manual_retry_requested", Map.of("retryCount", task.getRetryCount()));
-        executeTaskAsync(task.getId());
+        dispatchTaskExecution(task.getId());
         return task;
     }
 
@@ -697,8 +700,12 @@ public class TaskExecutorService {
             "sourceTaskId", sourceTask.getId(),
             "checkpointRef", checkpointRef
         ));
-        executeTaskAsync(resumedTask.getId());
+        dispatchTaskExecution(resumedTask.getId());
         return resumedTask;
+    }
+
+    private void dispatchTaskExecution(String taskId) {
+        manualTaskExecutor.execute(() -> executeTaskAsync(taskId));
     }
 
     public Map<String, Object> getTaskLogs(String taskId) {

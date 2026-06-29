@@ -104,7 +104,11 @@ class PromptBuilder:
         # 汇总所有分析结果的关键信息
         summaries = []
         for i, result in enumerate(analysis_results[:10], 1):  # 只取前10个作为示例
-            summaries.append(f"{i}. {result.get('summary', 'N/A')}")
+            analysis = result.get("analysis") if isinstance(result, dict) else {}
+            summary = result.get("summary") if isinstance(result, dict) else None
+            if not summary and isinstance(analysis, dict):
+                summary = analysis.get("summary")
+            summaries.append(f"{i}. {summary or 'N/A'}")
 
         prompt = f"""
 你是一位专业的小说分析师。请基于以下逐块分析结果，生成一份完整的单书分析报告。

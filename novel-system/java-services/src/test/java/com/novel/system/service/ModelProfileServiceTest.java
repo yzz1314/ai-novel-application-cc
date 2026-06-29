@@ -20,8 +20,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
@@ -58,7 +65,7 @@ class ModelProfileServiceTest {
                 .filter(profile -> Boolean.TRUE.equals(profile.getDefaultProfile()))
                 .findFirst()
         );
-        when(modelProfileRepository.save(any(ModelProfile.class))).thenAnswer(invocation -> {
+        lenient().when(modelProfileRepository.save(any(ModelProfile.class))).thenAnswer(invocation -> {
             ModelProfile profile = invocation.getArgument(0);
             if (profile.getCreatedAt() == null) {
                 profile.setCreatedAt(LocalDateTime.now());
@@ -69,7 +76,7 @@ class ModelProfileServiceTest {
             profiles.put(profile.getProfileId(), profile);
             return profile;
         });
-        org.mockito.Mockito.doAnswer(invocation -> {
+        lenient().doAnswer(invocation -> {
             profiles.clear();
             return null;
         }).when(modelProfileRepository).deleteAll();
@@ -156,6 +163,50 @@ class ModelProfileServiceTest {
         assertThat(mainModel.get("hasApiKey")).isEqualTo(true);
     }
 
+    @Test
+    void initializesDefaultProfileOnlyOnceWhenProfileEndpointsLoadConcurrently() throws Exception {
+        AtomicInteger saveAttempts = new AtomicInteger();
+        when(modelProfileRepository.save(any(ModelProfile.class))).thenAnswer(invocation -> {
+            ModelProfile profile = invocation.getArgument(0);
+            ModelProfile existing = profiles.get(profile.getProfileId());
+            if (existing != null && existing != profile) {
+                throw new IllegalStateException("duplicate profile insert: " + profile.getProfileId());
+            }
+            if (existing == null && "default_mock".equals(profile.getProfileId())) {
+                saveAttempts.incrementAndGet();
+                TimeUnit.MILLISECONDS.sleep(75);
+            }
+            if (profile.getCreatedAt() == null) {
+                profile.setCreatedAt(LocalDateTime.now());
+            }
+            if (profile.getUpdatedAt() == null) {
+                profile.setUpdatedAt(LocalDateTime.now());
+            }
+            profiles.put(profile.getProfileId(), profile);
+            return profile;
+        });
+
+        ExecutorService executor = Executors.newFixedThreadPool(3);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> calls = List.of(
+            executor.submit(() -> callAfter(start, () -> modelProfileService.listProfiles())),
+            executor.submit(() -> callAfter(start, () -> modelProfileService.getDefaultProfile())),
+            executor.submit(() -> callAfter(start, () -> modelProfileService.listVersions()))
+        );
+
+        start.countDown();
+
+        assertThatCode(() -> {
+            for (Future<?> call : calls) {
+                call.get(5, TimeUnit.SECONDS);
+            }
+        }).doesNotThrowAnyException();
+        executor.shutdownNow();
+
+        assertThat(profiles).containsOnlyKeys("default_mock");
+        assertThat(saveAttempts.get()).isEqualTo(1);
+    }
+
     private void writeLegacyStore(Map<String, Object> profile, String defaultProfileId) throws Exception {
         Path configDir = tempDir.resolve("config");
         Files.createDirectories(configDir);
@@ -206,5 +257,19 @@ class ModelProfileServiceTest {
             config.put("apiKey", apiKey);
         }
         return config;
+    }
+
+    private Object callAfter(CountDownLatch start, ThrowingSupplier<?> supplier) {
+        try {
+            start.await();
+            return supplier.get();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @FunctionalInterface
+    private interface ThrowingSupplier<T> {
+        T get() throws Exception;
     }
 }

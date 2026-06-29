@@ -88,6 +88,7 @@ services:
       SPRING_JPA_HIBERNATE_DDL_AUTO: validate
       PYTHON_SERVICE_URL: http://python-ai:8000
       MODEL_PROFILE_ENCRYPTION_KEY: ${MODEL_PROFILE_ENCRYPTION_KEY:-novel-system-local-dev-key}
+      MANAGEMENT_HEALTH_MAIL_ENABLED: "false"
     volumes:
       - workspace-data:/workspace
     networks:

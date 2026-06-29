@@ -30,10 +30,12 @@ public class SampleController {
     @PostMapping
     public ResponseEntity<SampleResponse> uploadSample(
             @PathVariable String projectId,
-            @RequestParam("file") MultipartFile file) {
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(value = "sampleName", required = false) String sampleName,
+            @RequestParam(value = "title", required = false) String title) {
 
         // 1. 上传文件
-        Sample sample = sampleService.uploadSample(projectId, file);
+        Sample sample = sampleService.uploadSample(projectId, file, firstNonBlank(sampleName, title));
 
         // 2. 创建文本规范化任务
         Map<String, Object> inputRefs = Map.of(
@@ -53,6 +55,16 @@ public class SampleController {
 
         return ResponseEntity.status(HttpStatus.CREATED)
             .body(SampleResponse.from(sample));
+    }
+
+    private String firstNonBlank(String first, String second) {
+        if (first != null && !first.isBlank()) {
+            return first;
+        }
+        if (second != null && !second.isBlank()) {
+            return second;
+        }
+        return null;
     }
 
     /**

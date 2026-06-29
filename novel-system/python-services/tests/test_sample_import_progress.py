@@ -14,6 +14,34 @@ litellm_stub.acompletion = _unused_acompletion
 sys.modules.setdefault("litellm", litellm_stub)
 
 from agents.sample_import_agent import SampleImportAgent
+from text_processing import Chunker
+
+
+def test_chunk_by_chapters_assigns_globally_unique_ids():
+    text = ("第一章 起点\n" + "一段测试文本。" * 420 + "\n"
+            "第二章 余波\n" + "另一段测试文本。" * 420)
+    first_end = text.index("第二章")
+    chapters = [
+        {
+            "chapter_index": 1,
+            "title": "第一章 起点",
+            "start_offset": 0,
+            "end_offset": first_end,
+        },
+        {
+            "chapter_index": 2,
+            "title": "第二章 余波",
+            "start_offset": first_end,
+            "end_offset": len(text),
+        },
+    ]
+
+    chunks = Chunker(max_chunk_size=900, overlap=80).chunk_by_chapters(text, chapters)
+    chunk_ids = [chunk["id"] for chunk in chunks]
+
+    assert len(chunks) > 2
+    assert len(chunk_ids) == len(set(chunk_ids))
+    assert chunk_ids == [f"chunk_{index:06d}" for index in range(len(chunks))]
 
 
 async def test_sample_import_writes_progress_checkpoints(tmp_path):
@@ -62,6 +90,12 @@ async def test_sample_import_writes_progress_checkpoints(tmp_path):
         assert state["processed_steps"] == state["total_steps"]
         assert state["progress_percent"] == 100
         assert state["sample_id"] == sample_id
-        assert (tmp_path / "projects" / project_id / "samples" / "manifests" / f"{sample_id}_manifest.json").exists()
+        manifest_path = tmp_path / "projects" / project_id / "samples" / "manifests" / f"{sample_id}_manifest.json"
+        chunks_dir = tmp_path / "projects" / project_id / "samples" / "chunks" / sample_id
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chunk_files = list(chunks_dir.glob("*.json"))
+
+        assert manifest_path.exists()
+        assert len(chunk_files) == manifest["total_chunks"]
     finally:
         settings.PROJECT_BASE_PATH = original_base_path

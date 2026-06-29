@@ -49,7 +49,7 @@ class Chunker:
                 )
                 chunks.extend(sub_chunks)
 
-        return chunks
+        return self._renumber_chunks(chunks)
 
     def _split_long_chapter(self, text: str, base_offset: int,
                           chapter_index: int, chapter_title: str) -> List[Dict]:
@@ -92,7 +92,23 @@ class Chunker:
 
             part_index += 1
 
-        return chunks
+        return self._renumber_chunks(chunks)
+
+    def _renumber_chunks(self, chunks: List[Dict]) -> List[Dict]:
+        """Ensure chunk IDs are globally unique and stable by source order."""
+        ordered_chunks = sorted(
+            chunks,
+            key=lambda chunk: (
+                chunk.get("start_offset", 0),
+                chunk.get("end_offset", 0),
+                chunk.get("chapter_index", 0),
+                chunk.get("part_index", 0),
+            )
+        )
+        for index, chunk in enumerate(ordered_chunks):
+            chunk["id"] = f"chunk_{index:06d}"
+            chunk["chunk_index"] = index
+        return ordered_chunks
 
     def chunk_without_chapters(self, text: str) -> List[Dict]:
         """

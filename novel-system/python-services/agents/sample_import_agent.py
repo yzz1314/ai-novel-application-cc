@@ -3,6 +3,7 @@
 负责文本规范化、章节识别、分块处理
 """
 import json
+import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any
@@ -148,6 +149,7 @@ class SampleImportAgent(BaseAgent):
 
                 # 重新验证
                 coverage = self.coverage_validator.validate(len(normalized_text), chunks)
+            chunks = self._assign_stable_chunk_ids(chunks)
             checkpoint_ref = self._save_import_checkpoint(
                 request,
                 sample_id,
@@ -160,6 +162,7 @@ class SampleImportAgent(BaseAgent):
             )
 
             # 7. 保存chunks
+            self._invalidate_analysis_artifacts(project_id, sample_id)
             chunks_dir = await self._save_chunks(project_id, sample_id, chunks)
             checkpoint_ref = self._save_import_checkpoint(
                 request,
@@ -324,6 +327,9 @@ class SampleImportAgent(BaseAgent):
         chunks_dir = Path(settings.PROJECT_BASE_PATH) / "projects" / project_id / "samples" / "chunks" / sample_id
         chunks_dir.mkdir(parents=True, exist_ok=True)
 
+        for old_file in chunks_dir.glob("*.json"):
+            old_file.unlink()
+
         for chunk in chunks:
             chunk_file = chunks_dir / f"{chunk['id']}.json"
             with open(chunk_file, 'w', encoding='utf-8') as f:
@@ -331,6 +337,41 @@ class SampleImportAgent(BaseAgent):
 
         self.logger.info(f"Saved {len(chunks)} chunks to {chunks_dir}")
         return chunks_dir
+
+    def _assign_stable_chunk_ids(self, chunks: list) -> list:
+        """Assign globally unique chunk IDs after chapter splitting and repair."""
+        ordered_chunks = sorted(
+            chunks,
+            key=lambda chunk: (
+                chunk.get("start_offset", 0),
+                chunk.get("end_offset", 0),
+                chunk.get("chapter_index", 0),
+                chunk.get("part_index", 0),
+            )
+        )
+        for index, chunk in enumerate(ordered_chunks):
+            chunk["id"] = f"chunk_{index:06d}"
+            chunk["chunk_index"] = index
+        return ordered_chunks
+
+    def _invalidate_analysis_artifacts(self, project_id: str, sample_id: str):
+        """Remove stale analysis artifacts when a sample is re-imported."""
+        project_root = Path(settings.PROJECT_BASE_PATH) / "projects" / project_id
+        paths = [
+            project_root / "analysis" / "per_chunk" / sample_id,
+            project_root / "samples" / "analysis" / sample_id,
+            project_root / "analysis" / "coverage" / f"{sample_id}_coverage.json",
+            project_root / "analysis" / "per_book" / f"{sample_id}_report.md",
+            project_root / "samples" / "reports" / f"{sample_id}_report.md",
+        ]
+
+        for path in paths:
+            if path.is_dir():
+                shutil.rmtree(path)
+                self.logger.info(f"Removed stale analysis directory: {path}")
+            elif path.exists():
+                path.unlink()
+                self.logger.info(f"Removed stale analysis artifact: {path}")
 
     async def _save_manifest(self, project_id: str, sample_id: str, manifest: dict):
         """保存manifest"""

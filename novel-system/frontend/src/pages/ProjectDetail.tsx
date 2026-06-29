@@ -47,6 +47,7 @@ import {
 } from '@ant-design/icons';
 import { useNavigate, useParams } from 'react-router-dom';
 import { artifactApi, bookApi, projectApi, sampleApi, skillsApi, taskApi } from '../services/api';
+import SampleManagement from './SampleManagement';
 
 const { Paragraph, Text, Title } = Typography;
 const { TextArea } = Input;
@@ -906,6 +907,11 @@ const ProjectDetail: React.FC = () => {
       ),
     },
     {
+      key: 'samples',
+      label: <span><FileTextOutlined /> 样本</span>,
+      children: <SampleManagement />,
+    },
+    {
       key: 'workflow',
       label: <span><PartitionOutlined /> 工作流</span>,
       children: (
@@ -1190,7 +1196,16 @@ const ProjectDetail: React.FC = () => {
                 <Title level={3} style={{ marginBottom: 0 }}>{project?.name || projectId}</Title>
                 <Text type="secondary">{project?.description || '暂无描述'}</Text>
               </div>
-              <Button icon={<ReloadOutlined />} onClick={() => loadProjectData()}>刷新</Button>
+              <Space wrap>
+                <Button
+                  type="primary"
+                  icon={<FileTextOutlined />}
+                  onClick={() => navigate(`/projects/${projectId}/samples`)}
+                >
+                  样本管理
+                </Button>
+                <Button icon={<ReloadOutlined />} onClick={() => loadProjectData()}>刷新</Button>
+              </Space>
             </Space>
             <Steps current={currentStep} items={workflowSteps as any} />
           </Space>

@@ -45,6 +45,11 @@ public class SampleService {
 
     @Transactional
     public Sample uploadSample(String projectId, MultipartFile file) {
+        return uploadSample(projectId, file, null);
+    }
+
+    @Transactional
+    public Sample uploadSample(String projectId, MultipartFile file, String title) {
         log.info("Uploading sample for project: {}", projectId);
 
         try {
@@ -69,6 +74,7 @@ public class SampleService {
             // 5. 创建Sample记录
             Sample sample = new Sample();
             sample.setProjectId(projectId);
+            sample.setTitle(normalizeTitle(title, fileName));
             sample.setFileName(fileName);
             sample.setFilePath(rawFilePath.toString());
             sample.setFileHash(fileHash);
@@ -84,6 +90,17 @@ public class SampleService {
             log.error("Failed to upload sample", e);
             throw new RuntimeException("文件上传失败", e);
         }
+    }
+
+    private String normalizeTitle(String title, String fileName) {
+        if (title != null && !title.isBlank()) {
+            return title.trim();
+        }
+        if (fileName == null || fileName.isBlank()) {
+            return "未命名样本";
+        }
+        int dotIndex = fileName.lastIndexOf('.');
+        return dotIndex > 0 ? fileName.substring(0, dotIndex) : fileName;
     }
 
     private void validateFile(MultipartFile file) {
@@ -209,6 +226,12 @@ public class SampleService {
             "dbProcessedChunkCount", sampleChunkRepository.countBySampleIdAndProcessedTrue(sampleId),
             "sampleTotalChapters", sample.getTotalChapters() != null ? sample.getTotalChapters() : 0
         );
+    }
+
+    @Transactional
+    public void clearSampleAnalysisResults(String sampleId) {
+        getSample(sampleId);
+        analysisResultRepository.deleteBySampleId(sampleId);
     }
 
     private void syncChapters(String projectId, String sampleId, Map<String, Object> manifest) {

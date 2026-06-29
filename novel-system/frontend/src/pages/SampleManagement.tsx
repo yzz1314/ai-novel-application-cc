@@ -405,11 +405,11 @@ const SampleManagement: React.FC = () => {
     try {
       const sampleId = sample.sampleId || sample.id
       const [artifactsData, chunkData, reportData, coverageData, issuesData] = await Promise.all([
-        analysisApi.getSampleArtifacts(projectId, sampleId).catch(() => null),
-        analysisApi.getChunks(projectId, sampleId).catch(() => []),
-        analysisApi.getBookReport(projectId, sampleId).catch(() => null),
-        analysisApi.getCoverage(projectId, sampleId).catch(() => null),
-        analysisApi.getIssues(projectId, sampleId).catch(() => null),
+        analysisApi.getSampleArtifactsQuiet(projectId, sampleId).catch(() => null),
+        analysisApi.getChunksQuiet(projectId, sampleId).catch(() => []),
+        analysisApi.getBookReportQuiet(projectId, sampleId).catch(() => null),
+        analysisApi.getCoverageQuiet(projectId, sampleId).catch(() => null),
+        analysisApi.getIssuesQuiet(projectId, sampleId).catch(() => null),
       ])
       setSampleArtifacts(artifactsData)
       setChunks(chunkData || [])

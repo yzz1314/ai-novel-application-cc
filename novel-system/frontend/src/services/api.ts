@@ -1,6 +1,12 @@
 import axios from 'axios'
 import { message } from 'antd'
 
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    suppressErrorMessage?: boolean
+  }
+}
+
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || '/api',
   timeout: 60000,
@@ -37,7 +43,9 @@ api.interceptors.response.use(
   (response) => response.data,
   (error) => {
     const errorMessage = error.response?.data?.message || error.message || '请求失败'
-    message.error(errorMessage)
+    if (!error.config?.suppressErrorMessage) {
+      message.error(errorMessage)
+    }
     return Promise.reject(error)
   }
 )
@@ -486,10 +494,14 @@ export const analysisApi = {
     request(api.get(`/projects/${projectId}/analysis/cross-book`)),
   getSampleArtifacts: (projectId: string, sampleId: string) =>
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/artifacts`)),
+  getSampleArtifactsQuiet: (projectId: string, sampleId: string) =>
+    request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/artifacts`, { suppressErrorMessage: true })),
   getSampleManifest: (projectId: string, sampleId: string) =>
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/manifest`)),
   getChunks: (projectId: string, sampleId: string) =>
     request<any[]>(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/chunks`)),
+  getChunksQuiet: (projectId: string, sampleId: string) =>
+    request<any[]>(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/chunks`, { suppressErrorMessage: true })),
   getChunk: (projectId: string, sampleId: string, chunkId: string) =>
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/chunks/${chunkId}`)),
   getSampleAnalysis: (projectId: string, sampleId: string) =>
@@ -498,14 +510,20 @@ export const analysisApi = {
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/chunks/${chunkId}/analysis`)),
   getCoverage: (projectId: string, sampleId: string) =>
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/coverage`)),
+  getCoverageQuiet: (projectId: string, sampleId: string) =>
+    request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/coverage`, { suppressErrorMessage: true })),
   getIssues: (projectId: string, sampleId: string) =>
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/issues`)),
+  getIssuesQuiet: (projectId: string, sampleId: string) =>
+    request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/issues`, { suppressErrorMessage: true })),
   checkCoverage: (projectId: string, sampleId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/analysis/samples/${sampleId}/coverage/check`, data || {})),
   repairAnalysis: (projectId: string, sampleId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/analysis/samples/${sampleId}/repair`, data || {})),
   getBookReport: (projectId: string, sampleId: string) =>
     request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/book-report`)),
+  getBookReportQuiet: (projectId: string, sampleId: string) =>
+    request(api.get(`/projects/${projectId}/analysis/samples/${sampleId}/book-report`, { suppressErrorMessage: true })),
   importSample: (projectId: string, sampleId: string) =>
     request(api.post(`/projects/${projectId}/tasks/execute`, {
       agentName: 'sample_import',

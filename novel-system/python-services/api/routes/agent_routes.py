@@ -40,7 +40,7 @@ AGENT_REGISTRY = {
     "cross_book_synthesis": CrossBookSynthesisAgent(llm_client=llm_client),
     "skill_generation": SkillGeneratorAgent(llm_client=llm_client),
     "outline_generation": OutlineGeneratorAgent(llm_client=llm_client),
-    "outline_review": OutlineReviewAgent(),
+    "outline_review": OutlineReviewAgent(llm_client=llm_client),
     "chapter_writing": ChapterWriterAgent(llm_client=llm_client),
     "chapter_revision": RevisionAgent(llm_client=llm_client),
     "memory_extraction": MemoryExtractorAgent(llm_client=llm_client),

@@ -1264,6 +1264,25 @@ class LLMClient:
                 "needs_revision": False
             }
 
+        if "大纲语义质量评估" in prompt:
+            return {
+                "score": 86,
+                "status": "passed",
+                "summary": "大纲主线、章节边界和追读钩子整体清晰，可进入正文创作。",
+                "dimensions": {
+                    "soul_alignment": 8.5,
+                    "plot_causality": 8.0,
+                    "character_arc": 8.0,
+                    "worldbuilding_constraints": 8.0,
+                    "chapter_boundary_control": 9.0,
+                    "reader_hook": 8.5
+                },
+                "strengths": ["主线冲突明确", "章节停止点和章末钩子具备约束力"],
+                "issues": [],
+                "suggestions": ["可继续强化卷末反转与人物阶段性代价。"],
+                "pass_review": True
+            }
+
         if '"timeline_events"' in prompt and "提取关键信息" in prompt:
             return {
                 "characters": [

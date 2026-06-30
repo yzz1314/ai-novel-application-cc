@@ -1128,6 +1128,64 @@ const OutlineEditor: React.FC = () => {
     );
   };
 
+  const renderSemanticQuality = () => {
+    const semanticQuality = readAny(latestReview, 'semanticQuality', 'semantic_quality');
+    if (!semanticQuality || !readAny(semanticQuality, 'enabled')) return null;
+    const attempted = Boolean(readAny(semanticQuality, 'attempted'));
+    const status = textValue(readAny(semanticQuality, 'status'));
+    const score = readAny(semanticQuality, 'score');
+    const dimensions = readAny(semanticQuality, 'dimensions') || {};
+    const issues = Array.isArray(readAny(semanticQuality, 'issues')) ? readAny(semanticQuality, 'issues') : [];
+    const suggestions = Array.isArray(readAny(semanticQuality, 'suggestions')) ? readAny(semanticQuality, 'suggestions') : [];
+    const gateway = readAny(semanticQuality, 'modelGateway', 'model_gateway') || {};
+    return (
+      <Space direction="vertical" style={{ width: '100%' }} size="small">
+        <Alert
+          type={status === 'passed' ? 'success' : status === 'unavailable' ? 'warning' : 'info'}
+          showIcon
+          message={`LLM语义质量评估：${attempted ? status || 'unknown' : '未执行'}`}
+          description={readAny(semanticQuality, 'summary') || '暂无语义评估摘要'}
+        />
+        <Descriptions column={3} size="small" bordered>
+          <Descriptions.Item label="语义评分">{score ?? '-'}</Descriptions.Item>
+          <Descriptions.Item label="模型">{readAny(gateway, 'model') || '-'}</Descriptions.Item>
+          <Descriptions.Item label="Profile">{readAny(gateway, 'modelProfileId', 'model_profile_id') || '-'}</Descriptions.Item>
+          {Object.entries(dimensions).map(([key, value]) => (
+            <Descriptions.Item key={key} label={key}>{String(value)}</Descriptions.Item>
+          ))}
+        </Descriptions>
+        {(issues.length > 0 || suggestions.length > 0) && (
+          <Collapse>
+            {issues.length > 0 && (
+              <Panel key="semantic-issues" header={`语义问题 ${issues.length}`}>
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {issues.map((issue: any, index: number) => (
+                    <Alert
+                      key={`${issue.code || 'semantic'}-${index}`}
+                      type={issue.severity === 'error' ? 'error' : 'warning'}
+                      showIcon
+                      message={issue.message || issue.description || '语义质量问题'}
+                      description={issue.path || issue.code || ''}
+                    />
+                  ))}
+                </Space>
+              </Panel>
+            )}
+            {suggestions.length > 0 && (
+              <Panel key="semantic-suggestions" header={`修改建议 ${suggestions.length}`}>
+                <ul style={{ margin: 0, paddingLeft: 20 }}>
+                  {suggestions.map((item: any, index: number) => (
+                    <li key={`${item}-${index}`}>{String(item)}</li>
+                  ))}
+                </ul>
+              </Panel>
+            )}
+          </Collapse>
+        )}
+      </Space>
+    );
+  };
+
   const reviewColumns = [
     { title: '报告', dataIndex: 'id', key: 'id', ellipsis: true },
     {
@@ -1321,6 +1379,7 @@ const OutlineEditor: React.FC = () => {
                       : '未执行'}
                   </Descriptions.Item>
                 </Descriptions>
+                {renderSemanticQuality()}
                 <Collapse>
                   {(latestReview.findings || []).slice(0, 12).map((finding: any, index: number) => (
                     <Panel

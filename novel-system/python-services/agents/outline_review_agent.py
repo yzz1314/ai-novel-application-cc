@@ -1,18 +1,20 @@
 """
 大纲审查Agent
 
-对已生成的大纲和 Project Soul 做规则审查，重点检查文档要求的章节边界字段、
-基础结构完整性和明显的章纲冲突。该 Agent 不依赖 LLM，便于在 mock/离线环境下稳定运行。
+对已生成的大纲和 Project Soul 做规则审查，并在有模型配置时补充 LLM 语义质量评估。
+规则审查负责稳定检查章节边界字段、基础结构完整性和明显章纲冲突；LLM 评估负责判断
+题材一致性、主线推进、人物/世界观约束、卷章节奏和读者牵引。
 """
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from agents.base import BaseAgent
 from schemas.agent_request import AgentRequest
 from schemas.agent_response import AgentResponse
 from quality.outline_boundary import OutlineBoundaryCompleter
+from llm.client import LLMClient
 from config import settings
 from utils.logger import get_logger
 
@@ -45,10 +47,11 @@ class OutlineReviewAgent(BaseAgent):
         "ending_hook",
     ]
 
-    def __init__(self):
+    def __init__(self, llm_client: Optional[LLMClient] = None):
         super().__init__("OutlineReviewAgent")
         self.supported_tasks = ["outline_review"]
         self.boundary_completer = OutlineBoundaryCompleter()
+        self.llm_client = llm_client or LLMClient()
         self.logger = get_logger("OutlineReviewAgent")
 
     async def run(self, request: AgentRequest) -> AgentResponse:
@@ -87,11 +90,27 @@ class OutlineReviewAgent(BaseAgent):
                 outline = self._read_json(outline_path)
                 findings, metrics = self._review_outline(outline, project_soul, soul_path)
 
+            rule_errors = [item for item in findings if item["severity"] == "error"]
+            rule_warnings = [item for item in findings if item["severity"] == "warning"]
+            rule_score = self._score(rule_errors, rule_warnings, metrics)
+
+            semantic_quality = await self._evaluate_semantic_quality_if_enabled(
+                request,
+                outline,
+                project_soul,
+                metrics,
+            )
+            findings.extend(self._semantic_findings(semantic_quality))
+
             errors = [item for item in findings if item["severity"] == "error"]
             warnings = [item for item in findings if item["severity"] == "warning"]
             infos = [item for item in findings if item["severity"] == "info"]
-            score = self._score(errors, warnings, metrics)
-            status = "passed" if not errors and score >= 80 else "needs_revision"
+            score = self._combined_score(rule_score, semantic_quality)
+            semantic_needs_revision = (
+                semantic_quality.get("attempted")
+                and semantic_quality.get("status") == "needs_revision"
+            )
+            status = "passed" if not errors and score >= 80 and not semantic_needs_revision else "needs_revision"
             report = {
                 "review_type": "outline_review",
                 "project_id": project_id,
@@ -100,8 +119,10 @@ class OutlineReviewAgent(BaseAgent):
                 "project_soul_path": self._relative(project_id, soul_path) if soul_path.exists() else "",
                 "status": status,
                 "score": score,
-                "summary": self._summary(status, score, errors, warnings),
+                "rule_score": rule_score,
+                "summary": self._summary(status, score, errors, warnings, semantic_quality),
                 "metrics": metrics,
+                "semantic_quality": semantic_quality,
                 "auto_fix": fix_result,
                 "finding_count": len(findings),
                 "error_count": len(errors),
@@ -155,6 +176,217 @@ class OutlineReviewAgent(BaseAgent):
         findings.extend(self._check_duplicate_chapter_numbers(outline))
         findings.extend(self._check_boundary_conflicts(outline))
         return findings, metrics
+
+    async def _evaluate_semantic_quality_if_enabled(
+            self,
+            request: AgentRequest,
+            outline: Dict[str, Any],
+            project_soul: str,
+            metrics: Dict[str, Any]) -> Dict[str, Any]:
+        enabled = self._semantic_review_enabled(request)
+        if not enabled:
+            return {
+                "enabled": False,
+                "attempted": False,
+                "status": "skipped",
+                "summary": "未启用 LLM 语义质量评估。",
+            }
+
+        prompt = self._build_semantic_quality_prompt(outline, project_soul, metrics)
+        try:
+            llm_response = await self.llm_client.generate_with_retry(
+                prompt=prompt,
+                response_format="json",
+                max_retries=2,
+                task_type="outline_review",
+                max_tokens=1800,
+                temperature=0.2,
+            )
+            self.metrics["llm_calls"] += 1
+            self.metrics["input_tokens"] += int(llm_response.get("usage", {}).get("prompt_tokens", 0) or 0)
+            self.metrics["output_tokens"] += int(llm_response.get("usage", {}).get("completion_tokens", 0) or 0)
+            payload = self._parse_semantic_quality_payload(llm_response.get("content"))
+            payload.update({
+                "enabled": True,
+                "attempted": True,
+                "source": "llm_gateway",
+                "model_gateway": self.llm_client.current_model_metadata(),
+                "usage": llm_response.get("usage", {}),
+            })
+            return payload
+        except Exception as exc:
+            self.logger.warning(f"Outline semantic quality evaluation skipped after LLM failure: {exc}")
+            return {
+                "enabled": True,
+                "attempted": True,
+                "status": "unavailable",
+                "score": None,
+                "pass_review": None,
+                "source": "llm_gateway",
+                "summary": "LLM 语义质量评估不可用，已保留规则审查结果。",
+                "error": str(exc),
+                "model_gateway": self.llm_client.current_model_metadata(),
+            }
+
+    def _semantic_review_enabled(self, request: AgentRequest) -> bool:
+        for source in (request.parameters, request.config, request.input_refs):
+            for key in (
+                    "semantic_quality",
+                    "semanticQuality",
+                    "llm_quality",
+                    "llmQuality",
+                    "enable_llm_quality",
+                    "enableLlmQuality"):
+                if key in source:
+                    value = source.get(key)
+                    if isinstance(value, bool):
+                        return value
+                    return str(value).lower() in {"true", "1", "yes", "y", "on"}
+        return bool(request.model_profile_id)
+
+    def _build_semantic_quality_prompt(
+            self,
+            outline: Dict[str, Any],
+            project_soul: str,
+            metrics: Dict[str, Any]) -> str:
+        outline_snapshot = self._outline_semantic_snapshot(outline)
+        return f"""
+你是一位资深网文总编，请对以下小说大纲做“真实 LLM 语义质量评估”。
+
+请不要重复规则校验，而是判断这个大纲是否足以进入正文创作：
+1. Project Soul 与大纲是否一致
+2. 主线冲突、人物目标、世界观规则是否清晰
+3. 分卷/章节推进是否有因果递进，不只是事件罗列
+4. 章节边界是否能防止提前消耗后续章纲
+5. 爽点、悬念、章末牵引是否有可持续性
+
+## 规则审查指标
+{json.dumps(metrics, ensure_ascii=False, indent=2)}
+
+## Project Soul
+{project_soul[:3000] if project_soul else "未提供"}
+
+## 大纲摘要
+{json.dumps(outline_snapshot, ensure_ascii=False, indent=2)}
+
+请以 JSON 返回，字段必须包含：
+{{
+  "score": 0-100,
+  "status": "passed|needs_revision",
+  "summary": "一句话结论",
+  "dimensions": {{
+    "soul_alignment": 0-10,
+    "plot_causality": 0-10,
+    "character_arc": 0-10,
+    "worldbuilding_constraints": 0-10,
+    "chapter_boundary_control": 0-10,
+    "reader_hook": 0-10
+  }},
+  "strengths": ["优点"],
+  "issues": [
+    {{"severity": "warning|error", "code": "问题代码", "message": "问题说明", "path": "outline路径或章节"}}
+  ],
+  "suggestions": ["修改建议"],
+  "pass_review": true
+}}
+"""
+
+    def _outline_semantic_snapshot(self, outline: Dict[str, Any]) -> Dict[str, Any]:
+        volumes = []
+        for volume in outline.get("volumes") or []:
+            if not isinstance(volume, dict):
+                continue
+            chapters = []
+            for chapter in (volume.get("chapters") or [])[:12]:
+                if not isinstance(chapter, dict):
+                    continue
+                chapters.append({
+                    "chapter_number": chapter.get("chapter_number") or chapter.get("chapterNumber"),
+                    "chapter_title": chapter.get("chapter_title") or chapter.get("chapterTitle"),
+                    "plot_goal": chapter.get("plot_goal") or chapter.get("plotGoal"),
+                    "core_goal": chapter.get("core_goal") or chapter.get("coreGoal"),
+                    "stop_point": chapter.get("stop_point") or chapter.get("stopPoint"),
+                    "ending_hook": chapter.get("ending_hook") or chapter.get("endingHook"),
+                    "must_not_write": chapter.get("must_not_write") or chapter.get("mustNotWrite"),
+                    "reserved_for_future": chapter.get("reserved_for_future") or chapter.get("reservedForFuture"),
+                })
+            volumes.append({
+                "volume_number": volume.get("volume_number") or volume.get("volumeNumber"),
+                "volume_title": volume.get("volume_title") or volume.get("volumeTitle"),
+                "main_conflict": volume.get("main_conflict") or volume.get("mainConflict"),
+                "chapters": chapters,
+            })
+        return {
+            "book_id": outline.get("book_id") or outline.get("bookId"),
+            "book_title": outline.get("book_title") or outline.get("bookTitle"),
+            "genre": outline.get("genre"),
+            "core_concept": outline.get("core_concept") or outline.get("coreConcept"),
+            "world_view": outline.get("world_view") or outline.get("worldView"),
+            "main_conflict": outline.get("main_conflict") or outline.get("mainConflict"),
+            "characters": (outline.get("characters") or [])[:8],
+            "long_term_suspense": (outline.get("long_term_suspense") or outline.get("longTermSuspense") or [])[:8],
+            "volumes": volumes[:8],
+        }
+
+    def _parse_semantic_quality_payload(self, content: Any) -> Dict[str, Any]:
+        try:
+            payload = json.loads(str(content or "{}"))
+        except json.JSONDecodeError:
+            payload = {"summary": str(content or "").strip()}
+
+        score = self._clamp_int(payload.get("score"), 0, 100, default=0)
+        status = str(payload.get("status") or ("passed" if score >= 80 else "needs_revision"))
+        dimensions = payload.get("dimensions") if isinstance(payload.get("dimensions"), dict) else {}
+        issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+        strengths = payload.get("strengths") if isinstance(payload.get("strengths"), list) else []
+        suggestions = payload.get("suggestions") if isinstance(payload.get("suggestions"), list) else []
+        pass_review = payload.get("pass_review")
+        if pass_review is None:
+            pass_review = status == "passed" and score >= 80
+
+        return {
+            "score": score,
+            "status": "passed" if status == "passed" and bool(pass_review) else "needs_revision",
+            "summary": str(payload.get("summary") or "LLM 语义质量评估完成。"),
+            "dimensions": dimensions,
+            "strengths": strengths,
+            "issues": issues,
+            "suggestions": suggestions,
+            "pass_review": bool(pass_review),
+        }
+
+    def _semantic_findings(self, semantic_quality: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not semantic_quality.get("enabled") or not semantic_quality.get("attempted"):
+            return []
+        if semantic_quality.get("status") == "unavailable":
+            return [self._finding(
+                "warning",
+                "semantic_quality_unavailable",
+                semantic_quality.get("summary") or "LLM 语义质量评估不可用",
+                "semantic_quality",
+            )]
+
+        findings: List[Dict[str, Any]] = []
+        for index, issue in enumerate(semantic_quality.get("issues") or []):
+            if not isinstance(issue, dict):
+                continue
+            severity = str(issue.get("severity") or "warning").lower()
+            if severity not in {"info", "warning", "error"}:
+                severity = "warning"
+            findings.append(self._finding(
+                severity,
+                str(issue.get("code") or "semantic_quality_issue"),
+                str(issue.get("message") or issue.get("description") or "LLM 语义质量评估发现问题"),
+                str(issue.get("path") or f"semantic_quality.issues[{index}]"),
+            ))
+        if semantic_quality.get("status") == "needs_revision" and not findings:
+            findings.append(self._finding(
+                "warning",
+                "semantic_quality_needs_revision",
+                semantic_quality.get("summary") or "LLM 语义质量评估建议修改大纲",
+                "semantic_quality",
+            ))
+        return findings
 
     def _has_missing_boundary(self, findings: List[Dict[str, Any]]) -> bool:
         return any(item.get("code") == "missing_boundary_fields" for item in findings)
@@ -375,15 +607,29 @@ class OutlineReviewAgent(BaseAgent):
             score -= int((missing / total) * 15)
         return max(0, min(100, score))
 
+    def _combined_score(self, rule_score: int, semantic_quality: Dict[str, Any]) -> int:
+        semantic_score = semantic_quality.get("score")
+        if semantic_score is None or semantic_quality.get("status") == "unavailable":
+            return rule_score
+        semantic_score = self._clamp_int(semantic_score, 0, 100, default=rule_score)
+        return self._clamp_int(rule_score * 0.65 + semantic_score * 0.35, 0, 100, default=rule_score)
+
     def _summary(
             self,
             status: str,
             score: int,
             errors: List[Dict[str, Any]],
-            warnings: List[Dict[str, Any]]) -> str:
+            warnings: List[Dict[str, Any]],
+            semantic_quality: Dict[str, Any]) -> str:
+        semantic_score = semantic_quality.get("score")
+        semantic_suffix = ""
+        if semantic_quality.get("attempted") and semantic_quality.get("status") != "unavailable":
+            semantic_suffix = f"，LLM语义评分 {semantic_score}"
+        elif semantic_quality.get("status") == "unavailable":
+            semantic_suffix = "，LLM语义评估不可用"
         if status == "passed":
-            return f"大纲审查通过，评分 {score}。"
-        return f"大纲需要修改，评分 {score}，错误 {len(errors)} 个，警告 {len(warnings)} 个。"
+            return f"大纲审查通过，综合评分 {score}{semantic_suffix}。"
+        return f"大纲需要修改，综合评分 {score}{semantic_suffix}，错误 {len(errors)} 个，警告 {len(warnings)} 个。"
 
     def _write_report(self, project_id: str, book_id: str, report: Dict[str, Any]) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
@@ -479,6 +725,13 @@ class OutlineReviewAgent(BaseAgent):
                     return value
                 return str(value).lower() in {"true", "1", "yes", "y"}
         return default
+
+    def _clamp_int(self, value: Any, minimum: int, maximum: int, default: int = 0) -> int:
+        try:
+            parsed = int(round(float(value)))
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(maximum, parsed))
 
     def _is_empty(self, value: Any) -> bool:
         if value is None:

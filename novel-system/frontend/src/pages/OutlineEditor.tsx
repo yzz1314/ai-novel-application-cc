@@ -84,6 +84,16 @@ const readField = (record: Record<string, any> | undefined, camelKey: string, sn
   return record[camelKey] ?? record[snakeKey];
 };
 
+const readAny = (record: Record<string, any> | undefined, ...keys: string[]) => {
+  if (!record) return undefined;
+  for (const key of keys) {
+    if (record[key] !== undefined && record[key] !== null) {
+      return record[key];
+    }
+  }
+  return undefined;
+};
+
 const textValue = (value: any) => (value === undefined || value === null ? '' : String(value));
 
 const normalizeList = (value: any): string[] => {
@@ -150,6 +160,55 @@ const parseReservedMap = (value: any) => {
       }
     });
   return result;
+};
+
+const boundaryFieldLabels: Record<string, string> = {
+  core_goal: '核心目标',
+  coreGoal: '核心目标',
+  must_write: '必须写',
+  mustWrite: '必须写',
+  allowed_progress: '可铺垫',
+  allowedProgress: '可铺垫',
+  must_not_write: '禁止提前写',
+  mustNotWrite: '禁止提前写',
+  reserved_for_future: '后续保护',
+  reservedForFuture: '后续保护',
+  stop_point: '停止点',
+  stopPoint: '停止点',
+  ending_hook: '章末钩子',
+  endingHook: '章末钩子',
+};
+
+const normalizeFieldNames = (value: any): string[] => {
+  if (Array.isArray(value)) {
+    return value.map((item) => textValue(item).trim()).filter(Boolean);
+  }
+  return textValue(value)
+    .split(/[,\n，]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+};
+
+const renderBoundaryFieldTags = (value: any) => {
+  const fields = normalizeFieldNames(value);
+  if (!fields.length) return <Tag color="default">无</Tag>;
+  return (
+    <Space wrap size={[0, 4]}>
+      {fields.map((field) => (
+        <Tag key={field}>{boundaryFieldLabels[field] || field}</Tag>
+      ))}
+    </Space>
+  );
+};
+
+const getBoundaryCompletion = (review: any) => {
+  const autoFix = readAny(review, 'autoFix', 'auto_fix');
+  return readAny(autoFix, 'completion') || readAny(review, 'completion');
+};
+
+const getChangedBoundaryChapters = (completion: any) => {
+  const changed = readAny(completion, 'changedChapters', 'changed_chapters');
+  return Array.isArray(changed) ? changed : [];
 };
 
 const cloneEditableOutline = (source: any) => {
@@ -618,6 +677,7 @@ const OutlineEditor: React.FC = () => {
     volumeNumber: number,
     chapter: Chapter,
     decision: 'approved' | 'needs_revision' | 'rejected',
+    context?: { feedback?: string; note?: string },
   ) => {
     if (!projectId || !outline) return;
     if (outlineGovernance.locked) {
@@ -632,8 +692,8 @@ const OutlineEditor: React.FC = () => {
       await outlineApi.reviewChapter(projectId, bookId, volumeNumber, chapterNumber, {
         decision,
         reviewer: 'human',
-        note: `OutlineEditor ${decision}`,
-        feedback: decision === 'approved' ? '章纲已确认' : '章纲需要修改',
+        note: context?.note || `OutlineEditor ${decision}`,
+        feedback: context?.feedback || (decision === 'approved' ? '章纲已确认' : '章纲需要修改'),
         createVersionSnapshot: true,
       });
       message.success(decision === 'approved' ? '章纲已批准' : '章纲已退回修改');
@@ -857,7 +917,7 @@ const OutlineEditor: React.FC = () => {
               </Descriptions>
               <Space wrap>
                 <Button type="primary" onClick={() => openChapterWorkspace(volumeNumber, chapter)}>
-                  鍒涗綔/鏌ョ湅鏈珷
+                  创作/查看本章
                 </Button>
                 <Button
                   icon={<EditOutlined />}
@@ -903,6 +963,170 @@ const OutlineEditor: React.FC = () => {
   );
 
   const latestReview = outlineReviews[0];
+  const boundaryConfirmationReview = outlineReviews.find((review) => {
+    const reviewType = readAny(review, 'reviewType', 'review_type');
+    return reviewType === 'outline_boundary_fix' || Boolean(getBoundaryCompletion(review));
+  });
+  const boundaryCompletion = getBoundaryCompletion(boundaryConfirmationReview);
+  const changedBoundaryChapters = getChangedBoundaryChapters(boundaryCompletion);
+
+  const findOutlineChapter = (volumeNumber: number, chapterNumber: number) => {
+    const volumes = Array.isArray(outline?.volumes) ? outline.volumes : [];
+    const volume = volumes.find((item: any) => Number(readAny(item, 'volumeNumber', 'volume_number')) === volumeNumber);
+    const chapters = Array.isArray(volume?.chapters) ? volume.chapters : [];
+    return chapters.find((item: Chapter) => Number(readAny(item, 'chapterNumber', 'chapter_number')) === chapterNumber);
+  };
+
+  const boundaryCompletionColumns = [
+    {
+      title: '章节',
+      key: 'chapter',
+      width: 180,
+      render: (_: any, record: any) => {
+        const volumeNumber = Number(readAny(record, 'volumeNumber', 'volume_number', 'volume') || 0);
+        const chapterNumber = Number(readAny(record, 'chapterNumber', 'chapter_number', 'chapter') || 0);
+        const chapter = findOutlineChapter(volumeNumber, chapterNumber);
+        return (
+          <Space direction="vertical" size={0}>
+            <span>第{volumeNumber}卷 第{chapterNumber}章</span>
+            <span style={{ color: '#666' }}>{chapter?.chapterTitle || '当前大纲未找到章节标题'}</span>
+          </Space>
+        );
+      },
+    },
+    {
+      title: '改动字段',
+      key: 'changedFields',
+      render: (_: any, record: any) => renderBoundaryFieldTags(readAny(record, 'changedFields', 'changed_fields')),
+    },
+    {
+      title: '原缺失字段',
+      key: 'filledFields',
+      render: (_: any, record: any) => renderBoundaryFieldTags(readAny(record, 'filledFields', 'filled_fields')),
+    },
+    {
+      title: '剩余缺失',
+      key: 'remainingMissingFields',
+      render: (_: any, record: any) => {
+        const remaining = normalizeFieldNames(readAny(record, 'remainingMissingFields', 'remaining_missing_fields'));
+        if (!remaining.length) return <Tag color="success">无</Tag>;
+        return renderBoundaryFieldTags(remaining);
+      },
+    },
+    {
+      title: '确认状态',
+      key: 'reviewStatus',
+      width: 130,
+      render: (_: any, record: any) => {
+        const volumeNumber = Number(readAny(record, 'volumeNumber', 'volume_number', 'volume') || 0);
+        const chapterNumber = Number(readAny(record, 'chapterNumber', 'chapter_number', 'chapter') || 0);
+        const chapter = findOutlineChapter(volumeNumber, chapterNumber);
+        const reviewStatus = textValue(readField(chapter, 'outlineReviewStatus', 'outline_review_status')) || 'pending_review';
+        return renderOutlineReviewTag(reviewStatus);
+      },
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 230,
+      render: (_: any, record: any) => {
+        const volumeNumber = Number(readAny(record, 'volumeNumber', 'volume_number', 'volume') || 0);
+        const chapterNumber = Number(readAny(record, 'chapterNumber', 'chapter_number', 'chapter') || 0);
+        const chapter = findOutlineChapter(volumeNumber, chapterNumber) || {
+          chapterNumber,
+          chapterTitle: `第${chapterNumber}章`,
+          plotGoal: '',
+          targetWordCount: 0,
+        };
+        const changedFields = normalizeFieldNames(readAny(record, 'changedFields', 'changed_fields'));
+        const note = `Boundary completion confirmation: changed fields ${changedFields.join(', ') || 'none'}`;
+        const approveKey = `${volumeNumber}:${chapterNumber}:approved`;
+        const revisionKey = `${volumeNumber}:${chapterNumber}:needs_revision`;
+        const disabled = !!outlineGovernance.locked || !volumeNumber || !chapterNumber;
+        return (
+          <Space wrap>
+            <Popconfirm
+              title="确认本章补齐结果？"
+              okText="确认"
+              cancelText="取消"
+              onConfirm={() => handleReviewOutlineChapter(volumeNumber, chapter, 'approved', {
+                feedback: '边界补齐后章纲已确认',
+                note,
+              })}
+            >
+              <Button
+                size="small"
+                icon={<CheckCircleOutlined />}
+                disabled={disabled}
+                loading={reviewingChapterKey === approveKey}
+              >
+                确认
+              </Button>
+            </Popconfirm>
+            <Popconfirm
+              title="退回本章补齐结果？"
+              okText="退回"
+              cancelText="取消"
+              onConfirm={() => handleReviewOutlineChapter(volumeNumber, chapter, 'needs_revision', {
+                feedback: '边界补齐后章纲需要修改',
+                note,
+              })}
+            >
+              <Button
+                size="small"
+                danger
+                disabled={disabled}
+                loading={reviewingChapterKey === revisionKey}
+              >
+                退回
+              </Button>
+            </Popconfirm>
+          </Space>
+        );
+      },
+    },
+  ];
+
+  const renderBoundaryCompletionConfirmation = () => {
+    if (!boundaryCompletion || !changedBoundaryChapters.length) return null;
+    const changedCount = Number(readAny(
+      boundaryCompletion,
+      'changedChapterCount',
+      'changed_chapter_count',
+    ) || changedBoundaryChapters.length);
+    const chaptersWithBoundary = readAny(boundaryCompletion, 'chaptersWithBoundary', 'chapters_with_boundary');
+    const totalChapters = readAny(boundaryCompletion, 'totalChapters', 'total_chapters');
+    const autoFix = readAny(boundaryConfirmationReview, 'autoFix', 'auto_fix');
+    const reportPath = readAny(boundaryConfirmationReview, 'path', 'reportPath', 'report_path') || '-';
+    const snapshotPath = readAny(boundaryConfirmationReview, 'snapshotPath', 'snapshot_path')
+      || readAny(autoFix, 'snapshotPath', 'snapshot_path')
+      || '-';
+    return (
+      <Card title="边界补齐确认">
+        <Space direction="vertical" style={{ width: '100%' }} size="middle">
+          <Alert
+            type="info"
+            showIcon
+            message={`本次边界补齐改动 ${changedCount} 章`}
+            description={totalChapters
+              ? `当前 ${chaptersWithBoundary || 0}/${totalChapters} 章具备完整边界字段，请逐章确认补齐结果。`
+              : '请逐章确认补齐结果。'}
+          />
+          <Descriptions column={2} size="small" bordered>
+            <Descriptions.Item label="补齐报告" span={2}>{reportPath}</Descriptions.Item>
+            <Descriptions.Item label="补齐前快照" span={2}>{snapshotPath}</Descriptions.Item>
+          </Descriptions>
+          <Table
+            size="small"
+            columns={boundaryCompletionColumns}
+            dataSource={changedBoundaryChapters}
+            rowKey={(record: any, index) => `${readAny(record, 'volumeNumber', 'volume_number', 'volume')}-${readAny(record, 'chapterNumber', 'chapter_number', 'chapter')}-${index}`}
+            pagination={changedBoundaryChapters.length > 6 ? { pageSize: 6 } : false}
+          />
+        </Space>
+      </Card>
+    );
+  };
 
   const reviewColumns = [
     { title: '报告', dataIndex: 'id', key: 'id', ellipsis: true },
@@ -1114,6 +1338,7 @@ const OutlineEditor: React.FC = () => {
               <p>暂无大纲审查报告</p>
             </Card>
           )}
+          {renderBoundaryCompletionConfirmation()}
           <Table
             columns={reviewColumns}
             dataSource={outlineReviews}

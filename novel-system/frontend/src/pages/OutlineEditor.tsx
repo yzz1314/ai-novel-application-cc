@@ -4,6 +4,7 @@ import {
   Tabs,
   Button,
   Modal,
+  Drawer,
   Form,
   Input,
   InputNumber,
@@ -18,7 +19,7 @@ import {
   Alert,
   Progress,
 } from 'antd';
-import { BookOutlined, UserOutlined, GlobalOutlined, FileTextOutlined, PlusOutlined, EditOutlined, CheckCircleOutlined, ToolOutlined, LockOutlined, UnlockOutlined, HistoryOutlined } from '@ant-design/icons';
+import { BookOutlined, UserOutlined, GlobalOutlined, FileTextOutlined, PlusOutlined, EditOutlined, CheckCircleOutlined, ToolOutlined, LockOutlined, UnlockOutlined, HistoryOutlined, SaveOutlined } from '@ant-design/icons';
 import { useNavigate, useParams } from 'react-router-dom';
 import { bookApi, outlineApi, taskApi } from '../services/api';
 
@@ -56,7 +57,120 @@ interface Chapter {
   chapterTitle: string;
   plotGoal: string;
   targetWordCount: number;
+  coreGoal?: string;
+  mustWrite?: string[] | string;
+  allowedProgress?: string[] | string;
+  mustNotWrite?: string[] | string;
+  reservedForFuture?: Record<string, string> | string[] | string;
+  stopPoint?: string;
+  endingHook?: string;
+  outlineReviewStatus?: string;
+  outlineReviewNote?: string;
+  outlineReviewer?: string;
+  outlineReviewedAt?: string;
+  [key: string]: any;
 }
+
+interface ChapterEditRef {
+  volumeIndex: number;
+  chapterIndex: number;
+  volumeNumber: number;
+  chapterNumber: number;
+  chapterTitle: string;
+}
+
+const readField = (record: Record<string, any> | undefined, camelKey: string, snakeKey: string) => {
+  if (!record) return undefined;
+  return record[camelKey] ?? record[snakeKey];
+};
+
+const textValue = (value: any) => (value === undefined || value === null ? '' : String(value));
+
+const normalizeList = (value: any): string[] => {
+  if (Array.isArray(value)) {
+    return value.map((item) => textValue(item).trim()).filter(Boolean);
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value).map((item) => textValue(item).trim()).filter(Boolean);
+  }
+  return textValue(value)
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+};
+
+const normalizeReserved = (value: any): Array<[string, string]> => {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value
+      .map((item, index) => [`chapter_${index + 1}`, textValue(item).trim()] as [string, string])
+      .filter(([, item]) => Boolean(item));
+  }
+  if (typeof value === 'object') {
+    return Object.entries(value)
+      .map(([key, item]) => [key, textValue(item).trim()] as [string, string])
+      .filter(([, item]) => Boolean(item));
+  }
+  return textValue(value)
+    .split(/\r?\n/)
+    .map((line, index) => {
+      const trimmed = line.trim();
+      const separator = trimmed.search(/[:：=]/);
+      if (separator > 0) {
+        return [trimmed.slice(0, separator).trim(), trimmed.slice(separator + 1).trim()] as [string, string];
+      }
+      return [`chapter_${index + 1}`, trimmed] as [string, string];
+    })
+    .filter(([, item]) => Boolean(item));
+};
+
+const toMultiline = (value: any) => normalizeList(value).join('\n');
+
+const reservedToMultiline = (value: any) =>
+  normalizeReserved(value).map(([key, item]) => `${key}: ${item}`).join('\n');
+
+const parseMultilineList = (value: any) =>
+  textValue(value)
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const parseReservedMap = (value: any) => {
+  const result: Record<string, string> = {};
+  textValue(value)
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((line, index) => {
+      const separator = line.search(/[:：=]/);
+      const key = separator > 0 ? line.slice(0, separator).trim() : `chapter_${index + 1}`;
+      const item = separator > 0 ? line.slice(separator + 1).trim() : line;
+      if (key && item) {
+        result[key] = item;
+      }
+    });
+  return result;
+};
+
+const cloneEditableOutline = (source: any) => {
+  const editable = JSON.parse(JSON.stringify(source || {}));
+  delete editable.outlinePath;
+  delete editable.projectSoul;
+  delete editable.projectSoulPath;
+  delete editable.projectSoulGovernance;
+  delete editable.outlineGovernance;
+  return editable;
+};
+
+const isChapterBoundaryComplete = (chapter: Chapter) => (
+  textValue(readField(chapter, 'coreGoal', 'core_goal')).trim() !== ''
+  && normalizeList(readField(chapter, 'mustWrite', 'must_write')).length > 0
+  && normalizeList(readField(chapter, 'allowedProgress', 'allowed_progress')).length > 0
+  && normalizeList(readField(chapter, 'mustNotWrite', 'must_not_write')).length > 0
+  && normalizeReserved(readField(chapter, 'reservedForFuture', 'reserved_for_future')).length > 0
+  && textValue(readField(chapter, 'stopPoint', 'stop_point')).trim() !== ''
+  && textValue(readField(chapter, 'endingHook', 'ending_hook')).trim() !== ''
+);
 
 const OutlineEditor: React.FC = () => {
   const { projectId } = useParams<{ projectId: string }>();
@@ -78,9 +192,13 @@ const OutlineEditor: React.FC = () => {
   const [soulVersions, setSoulVersions] = useState<any[]>([]);
   const [soulVersionOpen, setSoulVersionOpen] = useState(false);
   const [soulVersionPreview, setSoulVersionPreview] = useState<any>(null);
+  const [chapterBoundaryOpen, setChapterBoundaryOpen] = useState(false);
+  const [editingChapterRef, setEditingChapterRef] = useState<ChapterEditRef | null>(null);
+  const [savingChapterBoundary, setSavingChapterBoundary] = useState(false);
   const [soulGovernanceLoading, setSoulGovernanceLoading] = useState(false);
   const [outlineGovernanceLoading, setOutlineGovernanceLoading] = useState(false);
   const [form] = Form.useForm();
+  const [chapterBoundaryForm] = Form.useForm();
 
   useEffect(() => {
     loadOutline();
@@ -172,10 +290,7 @@ const OutlineEditor: React.FC = () => {
 
   const openEditModal = () => {
     if (!outline) return;
-    const editableOutline = { ...outline };
-    delete editableOutline.outlinePath;
-    delete editableOutline.projectSoul;
-    delete editableOutline.projectSoulPath;
+    const editableOutline = cloneEditableOutline(outline);
     setOutlineJson(JSON.stringify(editableOutline, null, 2));
     setProjectSoulText(outline.projectSoul || '');
     setEditNote('');
@@ -396,6 +511,93 @@ const OutlineEditor: React.FC = () => {
     navigate(`/projects/${projectId}/chapters?${params.toString()}`);
   };
 
+  const openChapterBoundaryEditor = (
+    volumeNumber: number,
+    volumeIndex: number,
+    chapter: Chapter,
+    chapterIndex: number,
+  ) => {
+    if (!outline || outlineGovernance.locked) return;
+    const ref = {
+      volumeIndex,
+      chapterIndex,
+      volumeNumber,
+      chapterNumber: chapter.chapterNumber,
+      chapterTitle: chapter.chapterTitle,
+    };
+    setEditingChapterRef(ref);
+    chapterBoundaryForm.setFieldsValue({
+      chapterTitle: chapter.chapterTitle,
+      plotGoal: chapter.plotGoal,
+      targetWordCount: chapter.targetWordCount || 3000,
+      coreGoal: textValue(readField(chapter, 'coreGoal', 'core_goal')),
+      mustWrite: toMultiline(readField(chapter, 'mustWrite', 'must_write')),
+      allowedProgress: toMultiline(readField(chapter, 'allowedProgress', 'allowed_progress')),
+      mustNotWrite: toMultiline(readField(chapter, 'mustNotWrite', 'must_not_write')),
+      reservedForFuture: reservedToMultiline(readField(chapter, 'reservedForFuture', 'reserved_for_future')),
+      stopPoint: textValue(readField(chapter, 'stopPoint', 'stop_point')),
+      endingHook: textValue(readField(chapter, 'endingHook', 'ending_hook')),
+      outlineReviewStatus: textValue(readField(chapter, 'outlineReviewStatus', 'outline_review_status')) || 'pending_review',
+      outlineReviewNote: textValue(readField(chapter, 'outlineReviewNote', 'outline_review_note')),
+    });
+    setChapterBoundaryOpen(true);
+  };
+
+  const handleSaveChapterBoundary = async () => {
+    if (!projectId || !outline || !editingChapterRef) return;
+    if (outlineGovernance.locked) {
+      message.error('大纲已锁定，请先解锁后再编辑章节边界');
+      return;
+    }
+
+    try {
+      const values = await chapterBoundaryForm.validateFields();
+      const editableOutline = cloneEditableOutline(outline);
+      const volumes = Array.isArray(editableOutline.volumes) ? editableOutline.volumes : [];
+      const targetVolume = volumes[editingChapterRef.volumeIndex];
+      const chapters = Array.isArray(targetVolume?.chapters) ? targetVolume.chapters : [];
+      const targetChapter = chapters[editingChapterRef.chapterIndex];
+      if (!targetChapter) {
+        message.error('未找到要保存的章节');
+        return;
+      }
+
+      const now = new Date().toISOString();
+      targetChapter.chapterTitle = textValue(values.chapterTitle).trim();
+      targetChapter.plotGoal = textValue(values.plotGoal).trim();
+      targetChapter.targetWordCount = Number(values.targetWordCount || targetChapter.targetWordCount || 3000);
+      targetChapter.coreGoal = textValue(values.coreGoal).trim();
+      targetChapter.mustWrite = parseMultilineList(values.mustWrite);
+      targetChapter.allowedProgress = parseMultilineList(values.allowedProgress);
+      targetChapter.mustNotWrite = parseMultilineList(values.mustNotWrite);
+      targetChapter.reservedForFuture = parseReservedMap(values.reservedForFuture);
+      targetChapter.stopPoint = textValue(values.stopPoint).trim();
+      targetChapter.endingHook = textValue(values.endingHook).trim();
+      targetChapter.outlineReviewStatus = values.outlineReviewStatus || 'pending_review';
+      targetChapter.outlineReviewNote = textValue(values.outlineReviewNote).trim();
+      targetChapter.outlineReviewer = 'human';
+      targetChapter.outlineReviewedAt = now;
+
+      setSavingChapterBoundary(true);
+      const bookId = selectedBookId || outline.bookId || 'default';
+      await outlineApi.update(projectId, bookId, {
+        outline: editableOutline,
+        editNote: `Structured chapter outline edit: volume ${editingChapterRef.volumeNumber}, chapter ${editingChapterRef.chapterNumber}`,
+        editor: 'human',
+        createVersionSnapshot: true,
+      });
+      message.success('章节结构化信息已保存');
+      setChapterBoundaryOpen(false);
+      setEditingChapterRef(null);
+      chapterBoundaryForm.resetFields();
+      await loadOutline();
+    } catch (error) {
+      message.error('保存章节结构化信息失败');
+    } finally {
+      setSavingChapterBoundary(false);
+    }
+  };
+
   const characterColumns = [
     {
       key: 'soul',
@@ -512,24 +714,104 @@ const OutlineEditor: React.FC = () => {
     },
   ];
 
-  const renderChapterList = (volumeNumber: number, chapters: Chapter[]) => (
+  const renderListTags = (items: string[]) => {
+    if (!items.length) return <Tag color="warning">未填写</Tag>;
+    return (
+      <Space wrap size={[0, 4]}>
+        {items.slice(0, 4).map((item, index) => (
+          <Tag key={`${item}-${index}`}>{item}</Tag>
+        ))}
+        {items.length > 4 && <Tag>+{items.length - 4}</Tag>}
+      </Space>
+    );
+  };
+
+  const renderReservedTags = (entries: Array<[string, string]>) => {
+    if (!entries.length) return <Tag color="warning">未填写</Tag>;
+    return (
+      <Space direction="vertical" size={2}>
+        {entries.slice(0, 4).map(([key, item]) => (
+          <span key={key}>
+            <Tag>{key}</Tag>
+            {item}
+          </span>
+        ))}
+        {entries.length > 4 && <Tag>+{entries.length - 4}</Tag>}
+      </Space>
+    );
+  };
+
+  const renderOutlineReviewTag = (status: string) => {
+    const colorMap: Record<string, string> = {
+      approved: 'success',
+      needs_revision: 'error',
+      pending_review: 'warning',
+      draft: 'default',
+    };
+    return <Tag color={colorMap[status] || 'default'}>{status || 'pending_review'}</Tag>;
+  };
+
+  const renderChapterList = (volumeNumber: number, chapters: Chapter[], volumeIndex: number) => (
     <Collapse>
-      {chapters.map((chapter) => (
-        <Panel
-          key={chapter.chapterNumber}
-          header={`第${chapter.chapterNumber}章 ${chapter.chapterTitle}`}
-        >
-          <Space direction="vertical" style={{ width: '100%' }}>
-            <Descriptions column={1} size="small">
-              <Descriptions.Item label="剧情目标">{chapter.plotGoal}</Descriptions.Item>
-              <Descriptions.Item label="目标字数">{chapter.targetWordCount}字</Descriptions.Item>
-            </Descriptions>
-            <Button type="primary" onClick={() => openChapterWorkspace(volumeNumber, chapter)}>
-              创作/查看本章
-            </Button>
-          </Space>
-        </Panel>
-      ))}
+      {chapters.map((chapter, chapterIndex) => {
+        const complete = isChapterBoundaryComplete(chapter);
+        const reviewStatus = textValue(readField(chapter, 'outlineReviewStatus', 'outline_review_status')) || 'pending_review';
+        return (
+          <Panel
+            key={chapter.chapterNumber}
+            header={`第${chapter.chapterNumber}章 ${chapter.chapterTitle}`}
+            extra={
+              <Space onClick={(event) => event.stopPropagation()}>
+                <Tag color={complete ? 'success' : 'warning'}>{complete ? '边界完整' : '边界缺失'}</Tag>
+                {renderOutlineReviewTag(reviewStatus)}
+              </Space>
+            }
+          >
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Descriptions column={2} size="small" bordered>
+                <Descriptions.Item label="剧情目标" span={2}>{chapter.plotGoal}</Descriptions.Item>
+                <Descriptions.Item label="目标字数">{chapter.targetWordCount}字</Descriptions.Item>
+                <Descriptions.Item label="核心目标">
+                  {textValue(readField(chapter, 'coreGoal', 'core_goal')) || <Tag color="warning">未填写</Tag>}
+                </Descriptions.Item>
+                <Descriptions.Item label="必须写" span={2}>
+                  {renderListTags(normalizeList(readField(chapter, 'mustWrite', 'must_write')))}
+                </Descriptions.Item>
+                <Descriptions.Item label="可铺垫但不完成" span={2}>
+                  {renderListTags(normalizeList(readField(chapter, 'allowedProgress', 'allowed_progress')))}
+                </Descriptions.Item>
+                <Descriptions.Item label="禁止提前写" span={2}>
+                  {renderListTags(normalizeList(readField(chapter, 'mustNotWrite', 'must_not_write')))}
+                </Descriptions.Item>
+                <Descriptions.Item label="后续章纲保护" span={2}>
+                  {renderReservedTags(normalizeReserved(readField(chapter, 'reservedForFuture', 'reserved_for_future')))}
+                </Descriptions.Item>
+                <Descriptions.Item label="停止点">
+                  {textValue(readField(chapter, 'stopPoint', 'stop_point')) || <Tag color="warning">未填写</Tag>}
+                </Descriptions.Item>
+                <Descriptions.Item label="章末钩子">
+                  {textValue(readField(chapter, 'endingHook', 'ending_hook')) || <Tag color="warning">未填写</Tag>}
+                </Descriptions.Item>
+                <Descriptions.Item label="确认备注" span={2}>
+                  {textValue(readField(chapter, 'outlineReviewNote', 'outline_review_note')) || '-'}
+                </Descriptions.Item>
+              </Descriptions>
+              <Space wrap>
+                <Button type="primary" onClick={() => openChapterWorkspace(volumeNumber, chapter)}>
+                  鍒涗綔/鏌ョ湅鏈珷
+                </Button>
+                <Button
+                  icon={<EditOutlined />}
+                  disabled={!!outlineGovernance.locked}
+                  onClick={() => openChapterBoundaryEditor(volumeNumber, volumeIndex, chapter, chapterIndex)}
+                >
+                  结构化编辑
+                </Button>
+              </Space>
+            </Space>
+          </Panel>
+        );
+      })}
     </Collapse>
   );
 
@@ -688,7 +970,7 @@ const OutlineEditor: React.FC = () => {
             rowKey="volumeNumber"
             pagination={false}
             expandable={{
-              expandedRowRender: (record: any) => renderChapterList(record.volumeNumber, record.chapters || []),
+              expandedRowRender: (record: any, index: number) => renderChapterList(record.volumeNumber, record.chapters || [], index),
             }}
           />
         </div>
@@ -1020,6 +1302,123 @@ const OutlineEditor: React.FC = () => {
           </Card>
         )}
       </Modal>
+
+      <Drawer
+        title={editingChapterRef ? `第${editingChapterRef.chapterNumber}章结构化编辑` : '章节结构化编辑'}
+        open={chapterBoundaryOpen}
+        width={760}
+        onClose={() => {
+          setChapterBoundaryOpen(false);
+          setEditingChapterRef(null);
+          chapterBoundaryForm.resetFields();
+        }}
+        extra={
+          <Space>
+            <Button onClick={() => setChapterBoundaryOpen(false)}>
+              取消
+            </Button>
+            <Button
+              type="primary"
+              icon={<SaveOutlined />}
+              loading={savingChapterBoundary}
+              disabled={!!outlineGovernance.locked}
+              onClick={handleSaveChapterBoundary}
+            >
+              保存
+            </Button>
+          </Space>
+        }
+      >
+        <Form form={chapterBoundaryForm} layout="vertical">
+          <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
+            <Descriptions.Item label="卷号">{editingChapterRef?.volumeNumber || '-'}</Descriptions.Item>
+            <Descriptions.Item label="章号">{editingChapterRef?.chapterNumber || '-'}</Descriptions.Item>
+          </Descriptions>
+          <Form.Item
+            name="chapterTitle"
+            label="章节标题"
+            rules={[{ required: true, message: '请输入章节标题' }]}
+          >
+            <Input disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+          <Form.Item
+            name="plotGoal"
+            label="剧情目标"
+            rules={[{ required: true, message: '请输入剧情目标' }]}
+          >
+            <TextArea rows={3} disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+          <Form.Item
+            name="targetWordCount"
+            label="目标字数"
+            rules={[{ required: true, message: '请输入目标字数' }]}
+          >
+            <InputNumber min={500} max={50000} style={{ width: '100%' }} disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+          <Form.Item
+            name="coreGoal"
+            label="本章核心目标"
+            rules={[{ required: true, message: '请输入本章核心目标' }]}
+          >
+            <TextArea rows={2} disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+          <Form.Item
+            name="mustWrite"
+            label="必须写"
+            rules={[{ required: true, message: '请输入必须写内容' }]}
+          >
+            <TextArea rows={4} disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+          <Form.Item
+            name="allowedProgress"
+            label="可铺垫但不完成"
+            rules={[{ required: true, message: '请输入可铺垫内容' }]}
+          >
+            <TextArea rows={3} disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+          <Form.Item
+            name="mustNotWrite"
+            label="禁止提前写"
+            rules={[{ required: true, message: '请输入禁止提前写内容' }]}
+          >
+            <TextArea rows={3} disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+          <Form.Item
+            name="reservedForFuture"
+            label="后续章纲保护"
+            rules={[{ required: true, message: '请输入后续章纲保护内容' }]}
+          >
+            <TextArea rows={4} disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+          <Form.Item
+            name="stopPoint"
+            label="停止点"
+            rules={[{ required: true, message: '请输入停止点' }]}
+          >
+            <TextArea rows={2} disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+          <Form.Item
+            name="endingHook"
+            label="章末钩子"
+            rules={[{ required: true, message: '请输入章末钩子' }]}
+          >
+            <TextArea rows={2} disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+          <Form.Item name="outlineReviewStatus" label="章纲确认状态">
+            <Select
+              disabled={!!outlineGovernance.locked}
+              options={[
+                { label: '待确认', value: 'pending_review' },
+                { label: '已确认', value: 'approved' },
+                { label: '需修改', value: 'needs_revision' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item name="outlineReviewNote" label="确认备注">
+            <TextArea rows={3} disabled={!!outlineGovernance.locked} />
+          </Form.Item>
+        </Form>
+      </Drawer>
     </div>
   );
 };

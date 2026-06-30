@@ -92,6 +92,7 @@ const ProjectDetail: React.FC = () => {
   const [skillDrawer, setSkillDrawer] = useState<any>(null);
   const [skillConflicts, setSkillConflicts] = useState<any>(null);
   const [skillConflictReportLoading, setSkillConflictReportLoading] = useState(false);
+  const [skillConflictResolveLoading, setSkillConflictResolveLoading] = useState(false);
   const [skillRegenerating, setSkillRegenerating] = useState(false);
   const [skillGenerationDrawer, setSkillGenerationDrawer] = useState<any>(null);
   const [skillReportDrawer, setSkillReportDrawer] = useState<any>(null);
@@ -247,6 +248,24 @@ const ProjectDetail: React.FC = () => {
       message.error('生成Skill冲突报告失败');
     } finally {
       setSkillConflictReportLoading(false);
+    }
+  };
+
+  const resolveSkillConflicts = async () => {
+    if (!projectId) return;
+    try {
+      setSkillConflictResolveLoading(true);
+      const result: any = await skillsApi.resolveConflicts(projectId, {
+        resolvedBy: 'human',
+        resolveScopeOverlap: true,
+      });
+      setSkillConflicts(result);
+      message.success(`已自动处理 ${result.appliedCount || 0} 项可安全Skill冲突`);
+      await loadProjectData(true);
+    } catch (error) {
+      message.error('自动处理Skill冲突失败');
+    } finally {
+      setSkillConflictResolveLoading(false);
     }
   };
 
@@ -1034,6 +1053,14 @@ const ProjectDetail: React.FC = () => {
             >
               生成冲突报告
             </Button>
+            <Button
+              icon={<SafetyCertificateOutlined />}
+              loading={skillConflictResolveLoading}
+              disabled={!conflictCount}
+              onClick={resolveSkillConflicts}
+            >
+              自动处理可安全冲突
+            </Button>
           </Space>
           {!hasCrossBook && (
             <Alert
@@ -1076,6 +1103,12 @@ const ProjectDetail: React.FC = () => {
                     {(skillConflicts.reportPath || skillConflicts.latestConflictReportPath) && (
                       renderSkillReportActions(skillConflicts.reportPath || skillConflicts.latestConflictReportPath, 'Skill冲突报告')
                     )}
+                    {(skillConflicts.latestConflictResolutionPath || skillConflicts.latestConflictResolution?.path) && (
+                      renderSkillReportActions(
+                        skillConflicts.latestConflictResolutionPath || skillConflicts.latestConflictResolution.path,
+                        'Skill冲突处理报告'
+                      )
+                    )}
                     <List
                       size="small"
                       dataSource={(skillConflicts.conflicts || []).slice(0, 5)}
@@ -1100,9 +1133,29 @@ const ProjectDetail: React.FC = () => {
                 type="success"
                 showIcon
                 message="当前启用Skill未检测到冲突"
-                description={(skillConflicts.reportPath || skillConflicts.latestConflictReportPath)
-                  ? renderSkillReportActions(skillConflicts.reportPath || skillConflicts.latestConflictReportPath, 'Skill冲突报告')
-                  : undefined}
+                description={
+                  (skillConflicts.reportPath
+                    || skillConflicts.latestConflictReportPath
+                    || skillConflicts.latestConflictResolutionPath
+                    || skillConflicts.latestConflictResolution?.path)
+                    ? (
+                      <Space size="small" wrap>
+                        {(skillConflicts.reportPath || skillConflicts.latestConflictReportPath) && (
+                          renderSkillReportActions(
+                            skillConflicts.reportPath || skillConflicts.latestConflictReportPath,
+                            'Skill冲突报告'
+                          )
+                        )}
+                        {(skillConflicts.latestConflictResolutionPath || skillConflicts.latestConflictResolution?.path) && (
+                          renderSkillReportActions(
+                            skillConflicts.latestConflictResolutionPath || skillConflicts.latestConflictResolution.path,
+                            'Skill冲突处理报告'
+                          )
+                        )}
+                      </Space>
+                    )
+                    : undefined
+                }
               />
             )
           )}

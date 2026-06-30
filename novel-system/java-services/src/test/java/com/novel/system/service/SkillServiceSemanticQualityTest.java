@@ -173,6 +173,76 @@ class SkillServiceSemanticQualityTest {
 
     @Test
     @SuppressWarnings("unchecked")
+    void resolveConflictsAdjustsPriorityAndPersistsResolutionReport() throws Exception {
+        writeProjectFile("skills/local/backup_skill.md", semanticWritingSkill());
+        writeProjectFile("skills/enabled.yaml", """
+            version: 1.0.0
+            project_id: project_skill_semantic
+            skills:
+              - name: writing_skill
+                type: writing
+                path: skills/local/writing_skill.md
+                enabled: true
+                priority: 100
+                scope:
+                  - chapter_writing
+              - name: backup_skill
+                type: writing
+                path: skills/local/backup_skill.md
+                enabled: true
+                priority: 100
+                scope:
+                  - chapter_writing
+            """);
+
+        Map<String, Object> result = skillService.resolveConflicts(
+            PROJECT_ID,
+            Map.of("resolvedBy", "unit-test")
+        );
+
+        assertThat(result)
+            .containsEntry("projectId", PROJECT_ID)
+            .containsEntry("resolvedBy", "unit-test")
+            .containsKey("reportPath");
+        assertThat((Integer) result.get("appliedCount")).isGreaterThanOrEqualTo(1);
+        assertThat((List<Map<String, Object>>) result.get("appliedActions"))
+            .anySatisfy(item -> assertThat(item)
+                .containsEntry("type", "priority_tie")
+                .containsEntry("action", "adjust_priority")
+                .containsEntry("skillName", "backup_skill")
+                .containsEntry("fromPriority", 100)
+                .containsEntry("toPriority", 99));
+
+        String reportPath = String.valueOf(result.get("reportPath"));
+        Map<String, Object> report = jsonMapper.readValue(projectRoot().resolve(reportPath).toFile(), Map.class);
+        assertThat(report)
+            .containsEntry("review_type", "skill_conflict_resolution")
+            .containsEntry("skill_name", "conflicts")
+            .containsEntry("resolved_by", "unit-test")
+            .containsKey("applied_actions");
+
+        String enabledYaml = Files.readString(projectRoot().resolve("skills/enabled.yaml"), StandardCharsets.UTF_8);
+        assertThat(enabledYaml)
+            .contains("backup_skill")
+            .contains("priority: 99");
+
+        Map<String, Object> after = skillService.detectConflicts(PROJECT_ID);
+        assertThat((List<Map<String, Object>>) after.get("conflicts"))
+            .noneSatisfy(item -> assertThat(item).containsEntry("type", "priority_tie"));
+
+        Map<String, Object> profile = (Map<String, Object>) result.get("skillProfile");
+        Map<String, Object> metadata = (Map<String, Object>) profile.get("skillMetadata");
+        assertThat(metadata)
+            .containsEntry("latestConflictResolutionPath", reportPath)
+            .containsKey("latestConflictResolution");
+        assertThat((Map<String, Object>) metadata.get("latestConflictResolution"))
+            .containsEntry("path", reportPath)
+            .containsEntry("resolvedBy", "unit-test")
+            .containsEntry("appliedCount", result.get("appliedCount"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
     void diffSkillVersionWithCurrentReturnsLineDiff() throws Exception {
         writeProjectFile("skills/versions/writing_skill/writing_skill_baseline.md", """
             ---

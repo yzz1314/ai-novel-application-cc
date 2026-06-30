@@ -184,11 +184,17 @@ public class SkillService {
         response.put("checkedAt", LocalDateTime.now().toString());
         skillProfileRepository.findByProjectIdAndName(projectId, "default")
             .map(SkillProfile::getSkillMetadata)
-            .map(metadata -> asMap(metadata.get("latestConflictReport")))
-            .filter(metadata -> !metadata.isEmpty())
-            .ifPresent(latest -> {
-                response.put("latestConflictReport", latest);
-                response.put("latestConflictReportPath", latest.getOrDefault("path", ""));
+            .ifPresent(metadata -> {
+                Map<String, Object> latestReport = asMap(metadata.get("latestConflictReport"));
+                if (!latestReport.isEmpty()) {
+                    response.put("latestConflictReport", latestReport);
+                    response.put("latestConflictReportPath", latestReport.getOrDefault("path", ""));
+                }
+                Map<String, Object> latestResolution = asMap(metadata.get("latestConflictResolution"));
+                if (!latestResolution.isEmpty()) {
+                    response.put("latestConflictResolution", latestResolution);
+                    response.put("latestConflictResolutionPath", latestResolution.getOrDefault("path", ""));
+                }
             });
         return response;
     }
@@ -239,6 +245,109 @@ public class SkillService {
         response.put("reportPath", relativeReportPath);
         response.put("checkedBy", checkedBy);
         response.put("checkedAt", checkedAt);
+        response.put("skillProfile", toSkillProfileMap(profile));
+        return response;
+    }
+
+    public Map<String, Object> resolveConflicts(String projectId, Map<String, Object> request) {
+        projectService.getProject(projectId);
+        Map<String, Object> options = request == null ? Map.of() : request;
+        String resolvedBy = asString(options.get("resolvedBy"), asString(options.get("operator"), "system"));
+        boolean resolveScopeOverlap = asBooleanFlexible(options.get("resolveScopeOverlap"), true);
+        String resolvedAt = LocalDateTime.now().toString();
+
+        List<SkillResponse> beforeSkills = listSkills(projectId);
+        List<Map<String, Object>> beforeConflicts = detectSkillConflicts(projectId, beforeSkills);
+        Map<String, Object> config = mutableEnabledConfig(projectId);
+        List<Map<String, Object>> entries = mutableSkillEntries(config);
+        Map<String, Map<String, Object>> entriesByName = skillEntriesByName(entries);
+        List<Map<String, Object>> appliedActions = new ArrayList<>();
+        List<Map<String, Object>> skippedActions = new ArrayList<>();
+
+        for (Map<String, Object> conflict : beforeConflicts) {
+            String type = asString(conflict.get("type"), "");
+            if ("priority_tie".equals(type)) {
+                resolvePriorityTie(conflict, entries, entriesByName, appliedActions, skippedActions);
+            }
+        }
+
+        for (Map<String, Object> conflict : beforeConflicts) {
+            String type = asString(conflict.get("type"), "");
+            if ("scope_overlap".equals(type)) {
+                resolveScopeOverlap(conflict, entriesByName, resolveScopeOverlap, appliedActions, skippedActions);
+            } else if (!"priority_tie".equals(type)) {
+                skippedActions.add(conflictResolutionSkip(conflict, "manual_required"));
+            }
+        }
+
+        Path enabledFile = enabledConfigFile(projectId);
+        Path snapshotPath = null;
+        if (!appliedActions.isEmpty()) {
+            snapshotPath = Files.exists(enabledFile)
+                ? archiveSkillConfig(projectId, enabledFile, "before_skill_conflict_resolution")
+                : null;
+            config.put("updated_at", LocalDateTime.now().toString());
+            writeYaml(enabledFile, config);
+        }
+
+        List<SkillResponse> afterSkills = listSkills(projectId);
+        List<Map<String, Object>> afterConflicts = detectSkillConflicts(projectId, afterSkills);
+        Map<String, Object> severityCounts = conflictSeverityCounts(afterConflicts);
+
+        Map<String, Object> reportDetails = new LinkedHashMap<>();
+        reportDetails.put("project_id", projectId);
+        reportDetails.put("resolved_by", resolvedBy);
+        reportDetails.put("resolved_at", resolvedAt);
+        reportDetails.put("auto_scope_overlap_enabled", resolveScopeOverlap);
+        reportDetails.put("before_conflict_count", beforeConflicts.size());
+        reportDetails.put("after_conflict_count", afterConflicts.size());
+        reportDetails.put("applied_count", appliedActions.size());
+        reportDetails.put("skipped_count", skippedActions.size());
+        reportDetails.put("config_snapshot_path", snapshotPath != null ? relative(projectId, snapshotPath) : "");
+        reportDetails.put("applied_actions", appliedActions);
+        reportDetails.put("skipped_actions", skippedActions);
+        reportDetails.put("before_conflicts", beforeConflicts);
+        reportDetails.put("after_conflicts", afterConflicts);
+        reportDetails.put("severity_counts", severityCounts);
+        Path reportPath = writeSkillReport(projectId, "conflicts", "skill_conflict_resolution", reportDetails);
+        String relativeReportPath = relative(projectId, reportPath);
+
+        SkillProfile profile = syncProjectSkillProfile(projectId);
+        Map<String, Object> metadata = new LinkedHashMap<>(
+            profile.getSkillMetadata() != null ? profile.getSkillMetadata() : Map.of()
+        );
+        Map<String, Object> latestResolution = new LinkedHashMap<>();
+        latestResolution.put("path", relativeReportPath);
+        latestResolution.put("resolvedBy", resolvedBy);
+        latestResolution.put("resolvedAt", resolvedAt);
+        latestResolution.put("appliedCount", appliedActions.size());
+        latestResolution.put("skippedCount", skippedActions.size());
+        latestResolution.put("beforeConflictCount", beforeConflicts.size());
+        latestResolution.put("afterConflictCount", afterConflicts.size());
+        latestResolution.put("configSnapshotPath", snapshotPath != null ? relative(projectId, snapshotPath) : "");
+        metadata.put("latestConflictResolution", latestResolution);
+        metadata.put("latestConflictResolutionPath", relativeReportPath);
+        metadata.put("conflictCount", afterConflicts.size());
+        profile.setSkillMetadata(metadata);
+        profile.setUpdatedAt(LocalDateTime.now());
+        skillProfileRepository.save(profile);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("beforeConflictCount", beforeConflicts.size());
+        response.put("afterConflictCount", afterConflicts.size());
+        response.put("conflictCount", afterConflicts.size());
+        response.put("severityCounts", severityCounts);
+        response.put("appliedCount", appliedActions.size());
+        response.put("skippedCount", skippedActions.size());
+        response.put("appliedActions", appliedActions);
+        response.put("skippedActions", skippedActions);
+        response.put("beforeConflicts", beforeConflicts);
+        response.put("conflicts", afterConflicts);
+        response.put("reportPath", relativeReportPath);
+        response.put("configSnapshotPath", snapshotPath != null ? relative(projectId, snapshotPath) : null);
+        response.put("resolvedBy", resolvedBy);
+        response.put("resolvedAt", resolvedAt);
         response.put("skillProfile", toSkillProfileMap(profile));
         return response;
     }
@@ -1168,6 +1277,202 @@ public class SkillService {
         entry.put("scope", defaultScope(type));
         entries.add(entry);
         return entry;
+    }
+
+    private Map<String, Map<String, Object>> skillEntriesByName(List<Map<String, Object>> entries) {
+        Map<String, Map<String, Object>> byName = new LinkedHashMap<>();
+        for (Map<String, Object> entry : entries) {
+            String name = asString(entry.get("name"), "");
+            if (!name.isBlank()) {
+                byName.put(name, entry);
+            }
+        }
+        return byName;
+    }
+
+    private void resolvePriorityTie(
+            Map<String, Object> conflict,
+            List<Map<String, Object>> entries,
+            Map<String, Map<String, Object>> entriesByName,
+            List<Map<String, Object>> appliedActions,
+            List<Map<String, Object>> skippedActions) {
+        String skillA = asString(conflict.get("skillA"), "");
+        String skillB = asString(conflict.get("skillB"), "");
+        Map<String, Object> left = entriesByName.get(skillA);
+        Map<String, Object> right = entriesByName.get(skillB);
+        if (left == null || right == null) {
+            skippedActions.add(conflictResolutionSkip(conflict, "missing_skill_config"));
+            return;
+        }
+
+        String secondaryName = secondarySkillNameForPriorityTie(skillA, left, skillB, right);
+        String primaryName = secondaryName.equals(skillA) ? skillB : skillA;
+        Map<String, Object> primary = entriesByName.get(primaryName);
+        Map<String, Object> secondary = entriesByName.get(secondaryName);
+        int primaryPriority = skillPriority(primary);
+        int secondaryPriority = skillPriority(secondary);
+        if (primaryPriority != secondaryPriority) {
+            skippedActions.add(conflictResolutionSkip(conflict, "already_resolved"));
+            return;
+        }
+
+        int newPriority = nextAvailablePriority(secondaryPriority - 1, secondaryName, asStringList(secondary.get("scope")), entries);
+        secondary.put("priority", newPriority);
+
+        Map<String, Object> action = new LinkedHashMap<>();
+        action.put("type", "priority_tie");
+        action.put("action", "adjust_priority");
+        action.put("skillName", secondaryName);
+        action.put("preservedSkillName", primaryName);
+        action.put("fromPriority", secondaryPriority);
+        action.put("toPriority", newPriority);
+        action.put("reason", "同 scope 同优先级会造成 Skill 路由不稳定，自动降低备用 Skill 优先级");
+        action.put("conflict", conflictSummary(conflict));
+        appliedActions.add(action);
+    }
+
+    private String secondarySkillNameForPriorityTie(
+            String skillA,
+            Map<String, Object> left,
+            String skillB,
+            Map<String, Object> right) {
+        boolean leftLooksSecondary = looksLikeSecondarySkill(skillA);
+        boolean rightLooksSecondary = looksLikeSecondarySkill(skillB);
+        if (leftLooksSecondary != rightLooksSecondary) {
+            return leftLooksSecondary ? skillA : skillB;
+        }
+
+        String leftType = asString(left.get("type"), inferType(skillA));
+        String rightType = asString(right.get("type"), inferType(skillB));
+        boolean leftIsCanonical = skillA.equals(leftType + "_skill");
+        boolean rightIsCanonical = skillB.equals(rightType + "_skill");
+        if (leftIsCanonical != rightIsCanonical) {
+            return leftIsCanonical ? skillB : skillA;
+        }
+
+        return skillB;
+    }
+
+    private boolean looksLikeSecondarySkill(String skillName) {
+        String normalized = skillName.toLowerCase(Locale.ROOT);
+        return normalized.contains("backup")
+            || normalized.contains("fallback")
+            || normalized.contains("draft")
+            || normalized.contains("candidate")
+            || normalized.contains("legacy");
+    }
+
+    private void resolveScopeOverlap(
+            Map<String, Object> conflict,
+            Map<String, Map<String, Object>> entriesByName,
+            boolean enabled,
+            List<Map<String, Object>> appliedActions,
+            List<Map<String, Object>> skippedActions) {
+        if (!enabled) {
+            skippedActions.add(conflictResolutionSkip(conflict, "scope_overlap_auto_resolution_disabled"));
+            return;
+        }
+
+        String skillA = asString(conflict.get("skillA"), "");
+        String skillB = asString(conflict.get("skillB"), "");
+        Map<String, Object> left = entriesByName.get(skillA);
+        Map<String, Object> right = entriesByName.get(skillB);
+        if (left == null || right == null) {
+            skippedActions.add(conflictResolutionSkip(conflict, "missing_skill_config"));
+            return;
+        }
+
+        List<String> leftScope = new ArrayList<>(asStringList(left.get("scope")));
+        List<String> rightScope = new ArrayList<>(asStringList(right.get("scope")));
+        Set<String> overlap = new LinkedHashSet<>(leftScope);
+        overlap.retainAll(rightScope);
+        if (overlap.isEmpty()) {
+            skippedActions.add(conflictResolutionSkip(conflict, "already_resolved"));
+            return;
+        }
+
+        int leftPriority = skillPriority(left);
+        int rightPriority = skillPriority(right);
+        if (leftPriority == rightPriority) {
+            skippedActions.add(conflictResolutionSkip(conflict, "priority_still_tied"));
+            return;
+        }
+
+        Map<String, Object> lowerPriorityEntry = leftPriority < rightPriority ? left : right;
+        String lowerSkillName = asString(lowerPriorityEntry.get("name"), "");
+        List<String> currentScope = new ArrayList<>(asStringList(lowerPriorityEntry.get("scope")));
+        List<String> narrowedScope = currentScope.stream()
+            .filter(scope -> !overlap.contains(scope))
+            .toList();
+        if (narrowedScope.isEmpty()) {
+            skippedActions.add(conflictResolutionSkip(conflict, "scope_narrowing_would_disable_skill"));
+            return;
+        }
+
+        lowerPriorityEntry.put("scope", narrowedScope);
+
+        Map<String, Object> action = new LinkedHashMap<>();
+        action.put("type", "scope_overlap");
+        action.put("action", "narrow_scope");
+        action.put("skillName", lowerSkillName);
+        action.put("removedScope", new ArrayList<>(overlap));
+        action.put("fromScope", currentScope);
+        action.put("toScope", narrowedScope);
+        action.put("reason", "低优先级 Skill 仍保留非重叠 scope，自动移除重叠路由范围");
+        action.put("conflict", conflictSummary(conflict));
+        appliedActions.add(action);
+    }
+
+    private int skillPriority(Map<String, Object> entry) {
+        return asInteger(entry.get("priority"), defaultPriority(asString(entry.get("type"), inferType(asString(entry.get("name"), "")))));
+    }
+
+    private int nextAvailablePriority(
+            int preferredPriority,
+            String skillName,
+            List<String> scope,
+            List<Map<String, Object>> entries) {
+        int candidate = preferredPriority;
+        Set<String> scopeSet = new LinkedHashSet<>(scope);
+        for (int attempts = 0; attempts < 1000; attempts++) {
+            boolean used = false;
+            for (Map<String, Object> entry : entries) {
+                if (skillName.equals(asString(entry.get("name"), "")) || !asBooleanFlexible(entry.get("enabled"), true)) {
+                    continue;
+                }
+                Set<String> otherScope = new LinkedHashSet<>(asStringList(entry.get("scope")));
+                otherScope.retainAll(scopeSet);
+                if (!otherScope.isEmpty() && skillPriority(entry) == candidate) {
+                    used = true;
+                    break;
+                }
+            }
+            if (!used) {
+                return candidate;
+            }
+            candidate--;
+        }
+        return preferredPriority - 1000;
+    }
+
+    private Map<String, Object> conflictResolutionSkip(Map<String, Object> conflict, String reason) {
+        Map<String, Object> skipped = new LinkedHashMap<>();
+        skipped.put("type", asString(conflict.get("type"), ""));
+        skipped.put("skillA", asString(conflict.get("skillA"), ""));
+        skipped.put("skillB", asString(conflict.get("skillB"), ""));
+        skipped.put("reason", reason);
+        skipped.put("suggestion", conflict.getOrDefault("suggestion", ""));
+        return skipped;
+    }
+
+    private Map<String, Object> conflictSummary(Map<String, Object> conflict) {
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("type", asString(conflict.get("type"), ""));
+        summary.put("severity", asString(conflict.get("severity"), ""));
+        summary.put("skillA", asString(conflict.get("skillA"), ""));
+        summary.put("skillB", asString(conflict.get("skillB"), ""));
+        summary.put("message", asString(conflict.get("message"), ""));
+        return summary;
     }
 
     private List<Map<String, Object>> detectSkillConflicts(String projectId, List<SkillResponse> skills) {

@@ -108,9 +108,25 @@ class RevisionAgent(BaseAgent):
                 boundary_control,
                 future_protection,
             )
+            revision_quality = await self._verify_revision_quality(
+                revision_request,
+                original_snapshot,
+                revised,
+                chapter_outline,
+                final_boundary.to_dict(),
+            )
+            quality_passed = self._revision_quality_passed(revision_quality, revision_request.min_quality_score)
+            if iteration_records:
+                iteration_records[-1]["quality_review"] = revision_quality
+            if revised.revision_history:
+                revised.revision_history[-1]["quality_review"] = revision_quality
+
             revised.boundary_check = final_boundary.to_dict()
-            revised.review_status = "reviewed" if final_boundary.passed else "needs_revision"
-            revised.review_comments = [issue.get("message", "") for issue in final_boundary.blocking_errors]
+            revised.revision_quality = revision_quality
+            if revision_quality.get("score") is not None:
+                revised.quality_score = revision_quality.get("score")
+            revised.review_status = "reviewed" if final_boundary.passed and quality_passed else "needs_revision"
+            revised.review_comments = self._final_review_comments(final_boundary, revision_quality, quality_passed)
             revised.updated_at = datetime.now()
 
             self._write_chapter(chapter_file, revised)
@@ -121,6 +137,7 @@ class RevisionAgent(BaseAgent):
                 revised,
                 pre_boundary.to_dict(),
                 final_boundary.to_dict(),
+                revision_quality,
                 issues,
                 snapshot_path,
                 iteration_records,
@@ -136,6 +153,9 @@ class RevisionAgent(BaseAgent):
                 "revision_count": len(revised.revision_history),
                 "new_revision_count": len(iteration_records),
                 "boundary_passed": final_boundary.passed,
+                "quality_passed": quality_passed,
+                "quality_score": revision_quality.get("score"),
+                "revision_quality": revision_quality,
                 "boundary_blocking_errors": len(final_boundary.blocking_errors),
                 "boundary_warnings": len(final_boundary.warnings),
                 "word_count_before": original_content.word_count,
@@ -144,7 +164,7 @@ class RevisionAgent(BaseAgent):
 
             return self._build_response(
                 request=request,
-                status="success" if final_boundary.passed else "partial",
+                status="success" if final_boundary.passed and quality_passed else "partial",
                 output_refs=[str(chapter_file), str(review_path)] + ([str(snapshot_path)] if snapshot_path else []),
                 structured_output=structured_output,
                 warnings=final_boundary.warnings,
@@ -277,6 +297,207 @@ class RevisionAgent(BaseAgent):
             issues.extend(boundary_result.warnings)
         return issues
 
+    async def _verify_revision_quality(
+            self,
+            revision_request: ChapterRevisionRequest,
+            before: ChapterContent,
+            after: ChapterContent,
+            chapter_outline: ChapterOutlineSchema,
+            final_boundary: Dict[str, Any]) -> Dict[str, Any]:
+        if not revision_request.auto_quality_review:
+            return {
+                "enabled": False,
+                "attempted": False,
+                "status": "skipped",
+                "summary": "返修后 LLM 质量复核未启用。",
+            }
+
+        prompt = self._build_revision_quality_prompt(
+            revision_request,
+            before,
+            after,
+            chapter_outline,
+            final_boundary,
+        )
+        try:
+            llm_response = await self.llm_client.generate_with_retry(
+                prompt=prompt,
+                response_format="json",
+                max_retries=2,
+                max_tokens=2000,
+                temperature=0.2,
+                task_type="chapter_revision",
+            )
+            self.metrics["llm_calls"] += 1
+            self.metrics["input_tokens"] += int(llm_response.get("usage", {}).get("prompt_tokens", 0) or 0)
+            self.metrics["output_tokens"] += int(llm_response.get("usage", {}).get("completion_tokens", 0) or 0)
+            quality = self._parse_revision_quality(llm_response.get("content"))
+            quality.update({
+                "enabled": True,
+                "attempted": True,
+                "source": "llm_gateway",
+                "min_score": revision_request.min_quality_score,
+                "model_gateway": self.llm_client.current_model_metadata(),
+                "usage": llm_response.get("usage", {}),
+            })
+            return quality
+        except Exception as exc:
+            self.logger.warning("Revision quality review unavailable: %s", exc)
+            return {
+                "enabled": True,
+                "attempted": True,
+                "status": "unavailable",
+                "score": None,
+                "pass_review": None,
+                "source": "llm_gateway",
+                "min_score": revision_request.min_quality_score,
+                "summary": "返修后 LLM 质量复核不可用，已保留边界检查结果。",
+                "error": str(exc),
+                "model_gateway": self.llm_client.current_model_metadata(),
+            }
+
+    def _build_revision_quality_prompt(
+            self,
+            revision_request: ChapterRevisionRequest,
+            before: ChapterContent,
+            after: ChapterContent,
+            chapter_outline: ChapterOutlineSchema,
+            final_boundary: Dict[str, Any]) -> str:
+        return f"""
+你是一位专业的小说编辑。请审查以下章节内容（返修后版本），判断返修是否真正解决问题。
+
+## 返修目标
+{revision_request.user_instruction or "按审查问题完成必要返修。"}
+
+## 章节大纲
+- 标题：{chapter_outline.chapter_title}
+- 剧情目标：{chapter_outline.plot_goal}
+- 人物发展：{chapter_outline.character_development}
+- 信息揭示：{chapter_outline.info_reveal}
+- 冲突：{chapter_outline.conflict}
+- 爽点：{chapter_outline.appeal_point}
+- 停止点：{chapter_outline.stop_point}
+- 章末钩子：{chapter_outline.ending_hook}
+- 禁止提前写：{json.dumps(chapter_outline.must_not_write, ensure_ascii=False)}
+
+## 最终边界检查
+{json.dumps(final_boundary, ensure_ascii=False, indent=2)}
+
+## 返修前正文片段
+{before.content[:1200]}
+
+## 返修后正文
+{after.content[:5000]}
+
+请以 JSON 返回：
+{{
+  "style_consistency": 0-10,
+  "technique_usage": 0-10,
+  "quality_level": 0-10,
+  "continuity": 0-10,
+  "structure": 0-10,
+  "boundary_control": 0-10,
+  "revision_effectiveness": 0-10,
+  "score": 0-100,
+  "overall_rating": "excellent|good|pass|fail",
+  "summary": "一句话结论",
+  "issues": [
+    {{"severity": "warning|error", "type": "问题类型", "message": "问题说明", "evidence": "证据", "suggestion": "建议"}}
+  ],
+  "suggestions": ["后续修改建议"],
+  "strengths": ["返修后的优点"],
+  "pass_review": true,
+  "needs_revision": false
+}}
+"""
+
+    def _parse_revision_quality(self, content: Any) -> Dict[str, Any]:
+        try:
+            data = json.loads(str(content or "{}"))
+        except json.JSONDecodeError:
+            data = {"summary": str(content or "").strip(), "score": 0}
+
+        score = self._clamp_int(
+            data.get("score", data.get("quality_score")),
+            0,
+            100,
+            default=self._score_from_total(data.get("total_score")),
+        )
+        issues = data.get("issues") if isinstance(data.get("issues"), list) else []
+        suggestions = data.get("suggestions") if isinstance(data.get("suggestions"), list) else []
+        strengths = data.get("strengths") if isinstance(data.get("strengths"), list) else []
+        pass_review = data.get("pass_review")
+        needs_revision = bool(data.get("needs_revision"))
+        if pass_review is None:
+            pass_review = score >= 70 and not any(
+                str(issue.get("severity", "")).lower() == "error"
+                for issue in issues
+                if isinstance(issue, dict)
+            )
+        status = "passed" if bool(pass_review) and not needs_revision else "needs_revision"
+
+        dimensions = {
+            key: data.get(key)
+            for key in (
+                "style_consistency",
+                "technique_usage",
+                "quality_level",
+                "continuity",
+                "structure",
+                "boundary_control",
+                "revision_effectiveness",
+            )
+            if data.get(key) is not None
+        }
+        return {
+            "status": status,
+            "score": score,
+            "overall_rating": data.get("overall_rating", "pass" if status == "passed" else "fail"),
+            "summary": data.get("summary") or "返修后质量复核完成。",
+            "dimensions": dimensions,
+            "issues": issues,
+            "suggestions": suggestions,
+            "strengths": strengths,
+            "pass_review": bool(pass_review),
+            "needs_revision": needs_revision or status != "passed",
+        }
+
+    def _revision_quality_passed(self, revision_quality: Dict[str, Any], min_score: int) -> bool:
+        if not revision_quality.get("enabled") or revision_quality.get("status") == "unavailable":
+            return True
+        if revision_quality.get("status") != "passed":
+            return False
+        score = revision_quality.get("score")
+        return score is None or float(score) >= min_score
+
+    def _final_review_comments(self, final_boundary, revision_quality: Dict[str, Any], quality_passed: bool) -> List[str]:
+        comments = [issue.get("message", "") for issue in final_boundary.blocking_errors if issue.get("message")]
+        if revision_quality.get("status") == "unavailable":
+            comments.append(revision_quality.get("summary") or "返修后 LLM 质量复核不可用")
+        elif not quality_passed:
+            comments.append(revision_quality.get("summary") or "返修后质量复核未通过")
+            for issue in revision_quality.get("issues") or []:
+                if isinstance(issue, dict):
+                    comments.append(issue.get("message") or issue.get("description") or "")
+            comments.extend(str(item) for item in (revision_quality.get("suggestions") or [])[:3])
+        return [item for item in comments if item]
+
+    def _score_from_total(self, total_score: Any) -> int:
+        if total_score is None:
+            return 0
+        try:
+            total = float(total_score)
+        except (TypeError, ValueError):
+            return 0
+        return self._clamp_int(total * 2 if total <= 50 else total, 0, 100, default=0)
+
+    def _clamp_int(self, value: Any, minimum: int, maximum: int, default: int = 0) -> int:
+        try:
+            parsed = int(round(float(value)))
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(maximum, parsed))
+
     def _load_outline(self, project_root: Path, book_id: str) -> BookOutlineSchema:
         candidates = [
             project_root / "novel" / "outline" / f"{book_id}_outline.json",
@@ -361,6 +582,7 @@ class RevisionAgent(BaseAgent):
             after: ChapterContent,
             pre_boundary: Dict[str, Any],
             final_boundary: Dict[str, Any],
+            revision_quality: Dict[str, Any],
             issues: List[Dict[str, Any]],
             snapshot_path: Optional[Path],
             iteration_records: List[Dict[str, Any]]) -> Path:
@@ -389,6 +611,7 @@ class RevisionAgent(BaseAgent):
             "issues": issues,
             "pre_boundary": pre_boundary,
             "final_boundary": final_boundary,
+            "revision_quality": revision_quality,
             "iterations": iteration_records,
         }
         review_file.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")

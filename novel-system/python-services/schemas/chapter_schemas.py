@@ -48,6 +48,8 @@ class ChapterRevisionRequest(BaseModel):
     use_project_skills: bool = Field(default=True, description="是否使用项目Skills")
     max_iterations: int = Field(default=1, description="返修轮数")
     create_version_snapshot: bool = Field(default=True, description="返修前是否归档版本快照")
+    auto_quality_review: bool = Field(default=True, description="返修后是否调用LLM做质量复核")
+    min_quality_score: int = Field(default=70, description="返修质量复核通过的最低0-100分")
 
 
 class ChapterContent(BaseModel):
@@ -75,6 +77,7 @@ class ChapterContent(BaseModel):
     review_status: str = Field(default="draft", description="审查状态：draft/reviewed/approved")
     review_comments: List[str] = Field(default_factory=list, description="审查意见")
     boundary_check: Dict[str, Any] = Field(default_factory=dict, description="章节边界检查结果")
+    revision_quality: Dict[str, Any] = Field(default_factory=dict, description="返修后质量复核结果")
     revision_history: List[Dict[str, Any]] = Field(default_factory=list, description="返修历史")
 
     # 元数据

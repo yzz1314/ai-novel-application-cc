@@ -40,6 +40,33 @@ import { bookApi, chapterApi, retrievalApi } from '../services/api';
 
 const { TextArea } = Input;
 
+const readAny = (record: any, ...keys: string[]) => {
+  if (!record) return undefined;
+  for (const key of keys) {
+    if (record[key] !== undefined && record[key] !== null) {
+      return record[key];
+    }
+  }
+  return undefined;
+};
+
+const getRevisionQuality = (record: any) => readAny(record, 'revisionQuality', 'revision_quality') || {};
+
+const revisionQualityColor = (status?: string) => {
+  if (status === 'passed') return 'green';
+  if (status === 'needs_revision') return 'orange';
+  if (status === 'unavailable') return 'gold';
+  if (status === 'skipped') return 'default';
+  return 'blue';
+};
+
+const renderRevisionQualityTag = (quality: any) => {
+  if (!quality || Object.keys(quality).length === 0) return <Tag>未复核</Tag>;
+  const status = readAny(quality, 'status') || 'unknown';
+  const score = readAny(quality, 'score');
+  return <Tag color={revisionQualityColor(status)}>{status}{score !== undefined && score !== null ? ` ${score}` : ''}</Tag>;
+};
+
 interface Chapter {
   id: string;
   volumeNumber: number;
@@ -53,6 +80,7 @@ interface Chapter {
   reviewStatus?: string;
   humanReviewStatus?: string;
   boundaryCheck?: any;
+  revisionQuality?: any;
   revisionHistory?: any[];
   humanReviewHistory?: any[];
   createdAt: string;
@@ -954,6 +982,9 @@ const ChapterWriter: React.FC = () => {
                 <Descriptions.Item label="质量评分">
                   {currentChapter.qualityScore ? `${currentChapter.qualityScore}分` : '-'}
                 </Descriptions.Item>
+                <Descriptions.Item label="返修复核">
+                  {renderRevisionQualityTag(getRevisionQuality(currentChapter))}
+                </Descriptions.Item>
                 <Descriptions.Item label="返修次数">
                   {currentChapter.revisionHistory?.length || 0}
                 </Descriptions.Item>
@@ -1117,6 +1148,51 @@ const ChapterWriter: React.FC = () => {
               </Card>
             )}
 
+            {Object.keys(getRevisionQuality(currentChapter)).length > 0 && (
+              <Card title="返修质量复核" size="small">
+                <Space direction="vertical" style={{ width: '100%' }}>
+                  {(() => {
+                    const quality = getRevisionQuality(currentChapter);
+                    const status = readAny(quality, 'status');
+                    const issues = Array.isArray(readAny(quality, 'issues')) ? readAny(quality, 'issues') : [];
+                    const suggestions = Array.isArray(readAny(quality, 'suggestions')) ? readAny(quality, 'suggestions') : [];
+                    return (
+                      <>
+                        <Alert
+                          type={status === 'passed' ? 'success' : status === 'unavailable' ? 'warning' : 'info'}
+                          showIcon
+                          message={`返修质量复核：${status || 'unknown'}`}
+                          description={readAny(quality, 'summary') || '暂无复核摘要'}
+                        />
+                        <Descriptions column={3} size="small" bordered>
+                          <Descriptions.Item label="评分">{readAny(quality, 'score') ?? '-'}</Descriptions.Item>
+                          <Descriptions.Item label="最低通过分">{readAny(quality, 'minScore', 'min_score') ?? '-'}</Descriptions.Item>
+                          <Descriptions.Item label="评级">{readAny(quality, 'overallRating', 'overall_rating') || '-'}</Descriptions.Item>
+                        </Descriptions>
+                        {issues.map((issue: any, index: number) => (
+                          <Alert
+                            key={`revision-quality-issue-${index}`}
+                            type={issue.severity === 'error' ? 'error' : 'warning'}
+                            showIcon
+                            message={issue.message || issue.description || '返修质量问题'}
+                            description={issue.suggestion || issue.evidence || ''}
+                          />
+                        ))}
+                        {suggestions.length > 0 && (
+                          <List
+                            size="small"
+                            header="复核建议"
+                            dataSource={suggestions}
+                            renderItem={(item: any) => <List.Item>{String(item)}</List.Item>}
+                          />
+                        )}
+                      </>
+                    );
+                  })()}
+                </Space>
+              </Card>
+            )}
+
             {(currentChapter.revisionHistory || []).length > 0 && (
               <Card title="返修历史" size="small">
                 <Space direction="vertical" style={{ width: '100%' }}>
@@ -1132,6 +1208,9 @@ const ChapterWriter: React.FC = () => {
                         </Descriptions.Item>
                         <Descriptions.Item label="字数变化">
                           {`${item.wordCountBefore || item.word_count_before} -> ${item.wordCountAfter || item.word_count_after}`}
+                        </Descriptions.Item>
+                        <Descriptions.Item label="质量复核">
+                          {renderRevisionQualityTag(readAny(item, 'qualityReview', 'quality_review'))}
                         </Descriptions.Item>
                       </Descriptions>
                     </Card>

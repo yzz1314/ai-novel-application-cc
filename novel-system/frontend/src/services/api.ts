@@ -211,6 +211,11 @@ export const outlineApi = {
     request(api.post(`/projects/${projectId}/outline/review`, data || {})),
   getReviews: (projectId: string, bookId: string) =>
     request<any[]>(api.get(`/projects/${projectId}/books/${bookId}/outline/reviews`)),
+  reviewChapter: (projectId: string, bookId: string, volumeNumber: number, chapterNumber: number, data?: any) =>
+    request(api.post(
+      `/projects/${projectId}/books/${bookId}/outline/chapters/${volumeNumber}/${chapterNumber}/review`,
+      data || {}
+    )),
   getSoul: (projectId: string, bookId: string) =>
     request(api.get(`/projects/${projectId}/books/${bookId}/soul`)),
   getSoulVersions: (projectId: string, bookId: string) =>

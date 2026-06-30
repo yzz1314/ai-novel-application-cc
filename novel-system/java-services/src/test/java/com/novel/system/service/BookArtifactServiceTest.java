@@ -428,6 +428,140 @@ class BookArtifactServiceTest {
     }
 
     @Test
+    void reviewOutlineChapterWritesStatusHistorySnapshotAndReport() throws Exception {
+        writeProjectFile("novel/outline/book_1_outline.json", """
+            {
+              "project_id": "project_soul_restore",
+              "book_id": "book_1",
+              "book_title": "Chapter Review Outline",
+              "genre": "xuanhuan",
+              "target_word_count": 100000,
+              "total_volumes": 1,
+              "total_chapters": 2,
+              "volumes": [
+                {
+                  "volume_number": 1,
+                  "volume_title": "Volume One",
+                  "chapters": [
+                    {
+                      "chapter_number": 1,
+                      "chapter_title": "First Gate",
+                      "plot_goal": "open the first gate",
+                      "core_goal": "Open the case",
+                      "must_write": ["trial gate"],
+                      "allowed_progress": ["find the token"],
+                      "must_not_write": ["final culprit"],
+                      "reserved_for_future": {"chapter_2": "city conspiracy"},
+                      "stop_point": "door opens",
+                      "ending_hook": "a hidden lamp burns"
+                    },
+                    {
+                      "chapter_number": 2,
+                      "chapter_title": "Second Gate",
+                      "plot_goal": "enter the city"
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+        when(outlineArtifactService.syncOutlineFromWorkspace(eq(PROJECT_ID), eq(BOOK_ID)))
+            .thenReturn(Map.of("status", "synced"));
+
+        Map<String, Object> response = bookArtifactService.reviewOutlineChapter(
+            PROJECT_ID,
+            BOOK_ID,
+            1,
+            1,
+            Map.of(
+                "decision", "approved",
+                "reviewer", "outline-lead",
+                "feedback", "boundary ready",
+                "note", "approve chapter outline"
+            )
+        );
+
+        assertThat(response)
+            .containsEntry("decision", "approved")
+            .containsEntry("reviewer", "outline-lead")
+            .containsEntry("volumeNumber", 1)
+            .containsEntry("chapterNumber", 1);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> summary = (Map<String, Object>) response.get("reviewSummary");
+        assertThat(summary)
+            .containsEntry("status", "pending_review")
+            .containsEntry("totalChapters", 2)
+            .containsEntry("approvedCount", 1)
+            .containsEntry("pendingCount", 1);
+
+        String snapshotPath = String.valueOf(response.get("snapshotPath"));
+        String reportPath = String.valueOf(response.get("reportPath"));
+        assertThat(snapshotPath).startsWith("novel/outline/versions/book_1/book_1_outline_");
+        assertThat(reportPath).startsWith("novel/reviews/book_1/outline/outline_chapter_review_");
+        assertThat(Files.readString(projectRoot().resolve(snapshotPath))).contains("Chapter Review Outline");
+
+        String outline = Files.readString(projectRoot().resolve("novel/outline/book_1_outline.json"));
+        assertThat(outline)
+            .contains("\"outline_review_status\" : \"approved\"")
+            .contains("\"outline_reviewer\" : \"outline-lead\"")
+            .contains("\"outline_review_history\"");
+
+        String report = Files.readString(projectRoot().resolve(reportPath));
+        assertThat(report)
+            .contains("\"review_type\" : \"outline_chapter_review\"")
+            .contains("\"decision\" : \"approved\"")
+            .contains("\"approvedCount\" : 1");
+
+        String meta = Files.readString(projectRoot().resolve("novel/outline/book_1_outline_meta.json"));
+        assertThat(meta)
+            .contains("\"chapter_review_status\" : \"pending_review\"")
+            .contains("\"last_chapter_reviewed_by\" : \"outline-lead\"");
+    }
+
+    @Test
+    void lockedOutlineRejectsChapterReviewWithoutOverride() throws Exception {
+        writeProjectFile("novel/outline/book_1_outline.json", """
+            {
+              "project_id": "project_soul_restore",
+              "book_id": "book_1",
+              "book_title": "Locked Chapter Review Outline",
+              "volumes": [
+                {
+                  "volume_number": 1,
+                  "chapters": [
+                    {
+                      "chapter_number": 1,
+                      "chapter_title": "Locked Chapter"
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+        writeProjectFile("novel/outline/book_1_outline_meta.json", """
+            {
+              "book_id": "book_1",
+              "locked": true,
+              "approval_status": "approved"
+            }
+            """);
+
+        assertThatThrownBy(() -> bookArtifactService.reviewOutlineChapter(
+            PROJECT_ID,
+            BOOK_ID,
+            1,
+            1,
+            Map.of("decision", "approved", "reviewer", "tester")
+        ))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("locked");
+
+        assertThat(Files.readString(projectRoot().resolve("novel/outline/book_1_outline.json")))
+            .doesNotContain("outline_review_status");
+    }
+
+    @Test
     void diffsDraftAndFinalChapterWithSummaryAndLineHunks() throws Exception {
         writeChapterFile("novel/chapters/drafts/book_1/volume_1/chapter_2.json", """
             {

@@ -606,6 +606,122 @@ public class BookArtifactService {
         return response;
     }
 
+    public Map<String, Object> reviewOutlineChapter(
+            String projectId,
+            String bookId,
+            Integer volumeNumber,
+            Integer chapterNumber,
+            Map<String, Object> request) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        if (volumeNumber == null || volumeNumber < 1 || chapterNumber == null || chapterNumber < 1) {
+            throw new IllegalArgumentException("Volume number and chapter number must be greater than 0.");
+        }
+
+        Map<String, Object> options = request == null ? Map.of() : request;
+        Map<String, Object> governance = readOutlineGovernance(projectId, resolvedBookId);
+        if (booleanValue(governance.get("locked"), false)
+                && !booleanOption(options, "overrideOutlineLock", false)) {
+            throw new IllegalArgumentException("Outline is locked; unlock it before reviewing chapters.");
+        }
+
+        Path outlineFile = resolveOutlineFile(projectId, resolvedBookId);
+        Map<String, Object> outline = readJson(outlineFile);
+        Map<String, Object> chapter = findOutlineChapter(outline, volumeNumber, chapterNumber);
+        String decision = normalizeReviewDecision(stringValue(
+            valueOf(options, "decision", "decision"),
+            stringValue(valueOf(options, "review_status", "reviewStatus"), "approved")
+        ));
+        String reviewer = stringValue(
+            valueOf(options, "reviewer", "reviewer"),
+            stringValue(valueOf(options, "actor", "actor"), "human")
+        );
+        String feedback = stringValue(valueOf(options, "feedback", "feedback"), "");
+        String note = stringValue(valueOf(options, "note", "note"), "");
+        String reviewedAt = LocalDateTime.now().toString();
+
+        Path snapshotPath = null;
+        if (booleanOption(options, "createVersionSnapshot", true)) {
+            snapshotPath = archiveOutlineSnapshot(
+                projectId,
+                resolvedBookId,
+                outlineFile,
+                outline,
+                "before_outline_chapter_review"
+            );
+        }
+
+        Map<String, Object> decisionRecord = new LinkedHashMap<>();
+        decisionRecord.put("review_type", "outline_chapter_review");
+        decisionRecord.put("decision", decision);
+        decisionRecord.put("reviewer", reviewer);
+        decisionRecord.put("feedback", feedback);
+        decisionRecord.put("note", note);
+        decisionRecord.put("reviewed_at", reviewedAt);
+        decisionRecord.put("volume_number", volumeNumber);
+        decisionRecord.put("chapter_number", chapterNumber);
+        decisionRecord.put("chapter_title", valueOf(chapter, "chapter_title", "chapterTitle"));
+        decisionRecord.put("snapshot_path", snapshotPath != null ? relative(projectId, snapshotPath) : null);
+
+        chapter.put("outline_review_status", decision);
+        chapter.put("outline_reviewer", reviewer);
+        chapter.put("outline_feedback", feedback);
+        chapter.put("outline_review_note", note);
+        chapter.put("outline_reviewed_at", reviewedAt);
+        chapter.put("needs_outline_revision", "needs_revision".equals(decision) || "rejected".equals(decision));
+        appendHistory(chapter, "outline_review_history", decisionRecord);
+
+        outline.put("updated_at", reviewedAt);
+        outline.put("edited_at", reviewedAt);
+        outline.put("edited_by", reviewer);
+        outline.put("edit_note", "Outline chapter review: volume " + volumeNumber + ", chapter " + chapterNumber);
+        if (snapshotPath != null) {
+            outline.put("previous_snapshot_path", relative(projectId, snapshotPath));
+        }
+
+        Map<String, Object> reviewSummary = summarizeOutlineChapterReviews(outline);
+        governance.put("bookId", resolvedBookId);
+        governance.put("chapterReviewStatus", reviewSummary.get("status"));
+        governance.put("chapterReviewSummary", reviewSummary);
+        governance.put("lastChapterReviewedBy", reviewer);
+        governance.put("lastChapterReviewedAt", reviewedAt);
+        governance.put("lastChapterReviewNote", note);
+        governance.put("updatedAt", reviewedAt);
+        if (!"approved".equals(reviewSummary.get("status"))) {
+            governance.put("approvalStatus", "pending_review");
+        }
+
+        writeJson(outlineFile, outline);
+        writeJson(outlineGovernanceFile(projectId, resolvedBookId), decamelizeMap(governance));
+
+        Path reportPath = writeOutlineChapterReviewReport(
+            projectId,
+            resolvedBookId,
+            outlineFile,
+            chapter,
+            decisionRecord,
+            reviewSummary,
+            snapshotPath
+        );
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("bookId", resolvedBookId);
+        response.put("volumeNumber", volumeNumber);
+        response.put("chapterNumber", chapterNumber);
+        response.put("decision", decision);
+        response.put("reviewer", reviewer);
+        response.put("feedback", feedback);
+        response.put("note", note);
+        response.put("reviewedAt", reviewedAt);
+        response.put("chapter", camelizeMap(chapter));
+        response.put("reviewSummary", reviewSummary);
+        response.put("outline", getOutline(projectId, resolvedBookId));
+        response.put("outlineDb", outlineArtifactService.syncOutlineFromWorkspace(projectId, resolvedBookId));
+        response.put("snapshotPath", snapshotPath != null ? relative(projectId, snapshotPath) : null);
+        response.put("reportPath", relative(projectId, reportPath));
+        return response;
+    }
+
     public List<Map<String, Object>> listOutlineReviews(String projectId, String bookId) {
         projectService.getProject(projectId);
         String resolvedBookId = resolveBookId(projectId, bookId);
@@ -2129,6 +2245,37 @@ public class BookArtifactService {
         return reportFile;
     }
 
+    private Path writeOutlineChapterReviewReport(
+            String projectId,
+            String bookId,
+            Path outlineFile,
+            Map<String, Object> chapter,
+            Map<String, Object> decisionRecord,
+            Map<String, Object> reviewSummary,
+            Path snapshotPath) {
+        Path reviewsDir = projectRoot(projectId).resolve("novel").resolve("reviews")
+            .resolve(bookId).resolve("outline");
+        String timestamp = LocalDateTime.now().format(SNAPSHOT_TIMESTAMP);
+        Path reportFile = reviewsDir.resolve("outline_chapter_review_" + timestamp + ".json");
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("review_type", "outline_chapter_review");
+        report.put("book_id", bookId);
+        report.put("outline_path", relative(projectId, outlineFile));
+        report.put("created_at", LocalDateTime.now().toString());
+        report.put("volume_number", decisionRecord.get("volume_number"));
+        report.put("chapter_number", decisionRecord.get("chapter_number"));
+        report.put("chapter_title", valueOf(chapter, "chapter_title", "chapterTitle"));
+        report.put("decision", decisionRecord.get("decision"));
+        report.put("reviewer", decisionRecord.get("reviewer"));
+        report.put("feedback", decisionRecord.get("feedback"));
+        report.put("note", decisionRecord.get("note"));
+        report.put("reviewed_at", decisionRecord.get("reviewed_at"));
+        report.put("snapshot_path", snapshotPath != null ? relative(projectId, snapshotPath) : null);
+        report.put("review_summary", reviewSummary);
+        writeJson(reportFile, report);
+        return reportFile;
+    }
+
     private String normalizeReviewDecision(String rawDecision) {
         String decision = rawDecision == null ? "approved" : rawDecision.trim().toLowerCase();
         return switch (decision) {
@@ -2137,6 +2284,94 @@ public class BookArtifactService {
             case "reject", "rejected", "fail", "failed" -> "rejected";
             default -> throw new IllegalArgumentException("人工审查决策仅支持 approved/needs_revision/rejected");
         };
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> findOutlineChapter(
+            Map<String, Object> outline,
+            int volumeNumber,
+            int chapterNumber) {
+        Object volumesValue = valueOf(outline, "volumes", "volumes");
+        if (volumesValue instanceof List<?> volumes) {
+            for (Object volumeValue : volumes) {
+                if (!(volumeValue instanceof Map<?, ?> rawVolume)) {
+                    continue;
+                }
+                Map<String, Object> volume = (Map<String, Object>) rawVolume;
+                int currentVolume = intValue(valueOf(volume, "volume_number", "volumeNumber"));
+                if (currentVolume != volumeNumber) {
+                    continue;
+                }
+                Object chaptersValue = valueOf(volume, "chapters", "chapters");
+                if (chaptersValue instanceof List<?> chapters) {
+                    for (Object chapterValue : chapters) {
+                        if (chapterValue instanceof Map<?, ?> rawChapter) {
+                            Map<String, Object> chapter = (Map<String, Object>) rawChapter;
+                            if (intValue(valueOf(chapter, "chapter_number", "chapterNumber")) == chapterNumber) {
+                                return chapter;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Object directChapters = valueOf(outline, "chapters", "chapters");
+        if (directChapters instanceof List<?> chapters) {
+            for (Object chapterValue : chapters) {
+                if (chapterValue instanceof Map<?, ?> rawChapter) {
+                    Map<String, Object> chapter = (Map<String, Object>) rawChapter;
+                    int chapterVolume = intValue(valueOf(chapter, "volume_number", "volumeNumber"));
+                    if ((chapterVolume == 0 || chapterVolume == volumeNumber)
+                            && intValue(valueOf(chapter, "chapter_number", "chapterNumber")) == chapterNumber) {
+                        return chapter;
+                    }
+                }
+            }
+        }
+
+        throw new ResourceNotFoundException(
+            "Outline chapter not found: volume " + volumeNumber + ", chapter " + chapterNumber
+        );
+    }
+
+    private Map<String, Object> summarizeOutlineChapterReviews(Map<String, Object> outline) {
+        List<Map<String, Object>> chapters = outlineChapters(outline);
+        int approved = 0;
+        int needsRevision = 0;
+        int rejected = 0;
+        int pending = 0;
+        for (Map<String, Object> chapter : chapters) {
+            String status = stringValue(valueOf(chapter, "outline_review_status", "outlineReviewStatus"), "");
+            switch (status) {
+                case "approved" -> approved += 1;
+                case "needs_revision" -> needsRevision += 1;
+                case "rejected" -> rejected += 1;
+                default -> pending += 1;
+            }
+        }
+
+        String status;
+        if (chapters.isEmpty()) {
+            status = "missing_chapters";
+        } else if (rejected > 0 || needsRevision > 0) {
+            status = "needs_revision";
+        } else if (approved == chapters.size()) {
+            status = "approved";
+        } else {
+            status = "pending_review";
+        }
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("status", status);
+        summary.put("totalChapters", chapters.size());
+        summary.put("approvedCount", approved);
+        summary.put("needsRevisionCount", needsRevision);
+        summary.put("rejectedCount", rejected);
+        summary.put("pendingCount", pending);
+        summary.put("reviewedCount", approved + needsRevision + rejected);
+        summary.put("checkedAt", LocalDateTime.now().toString());
+        return summary;
     }
 
     @SuppressWarnings("unchecked")

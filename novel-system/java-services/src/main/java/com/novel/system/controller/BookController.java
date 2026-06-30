@@ -126,6 +126,22 @@ public class BookController {
         return ResponseEntity.ok(bookArtifactService.listOutlineReviews(projectId, bookId));
     }
 
+    @PostMapping("/{bookId}/outline/chapters/{volumeNumber}/{chapterNumber}/review")
+    public ResponseEntity<Map<String, Object>> reviewOutlineChapter(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @PathVariable Integer volumeNumber,
+            @PathVariable Integer chapterNumber,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return ResponseEntity.ok(bookArtifactService.reviewOutlineChapter(
+            projectId,
+            bookId,
+            volumeNumber,
+            chapterNumber,
+            request == null ? Map.of() : request
+        ));
+    }
+
     @GetMapping("/{bookId}/soul")
     public ResponseEntity<Map<String, Object>> getProjectSoul(
             @PathVariable String projectId,

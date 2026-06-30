@@ -195,6 +195,7 @@ const OutlineEditor: React.FC = () => {
   const [chapterBoundaryOpen, setChapterBoundaryOpen] = useState(false);
   const [editingChapterRef, setEditingChapterRef] = useState<ChapterEditRef | null>(null);
   const [savingChapterBoundary, setSavingChapterBoundary] = useState(false);
+  const [reviewingChapterKey, setReviewingChapterKey] = useState('');
   const [soulGovernanceLoading, setSoulGovernanceLoading] = useState(false);
   const [outlineGovernanceLoading, setOutlineGovernanceLoading] = useState(false);
   const [form] = Form.useForm();
@@ -537,7 +538,6 @@ const OutlineEditor: React.FC = () => {
       reservedForFuture: reservedToMultiline(readField(chapter, 'reservedForFuture', 'reserved_for_future')),
       stopPoint: textValue(readField(chapter, 'stopPoint', 'stop_point')),
       endingHook: textValue(readField(chapter, 'endingHook', 'ending_hook')),
-      outlineReviewStatus: textValue(readField(chapter, 'outlineReviewStatus', 'outline_review_status')) || 'pending_review',
       outlineReviewNote: textValue(readField(chapter, 'outlineReviewNote', 'outline_review_note')),
     });
     setChapterBoundaryOpen(true);
@@ -573,10 +573,9 @@ const OutlineEditor: React.FC = () => {
       targetChapter.reservedForFuture = parseReservedMap(values.reservedForFuture);
       targetChapter.stopPoint = textValue(values.stopPoint).trim();
       targetChapter.endingHook = textValue(values.endingHook).trim();
-      targetChapter.outlineReviewStatus = values.outlineReviewStatus || 'pending_review';
       targetChapter.outlineReviewNote = textValue(values.outlineReviewNote).trim();
-      targetChapter.outlineReviewer = 'human';
-      targetChapter.outlineReviewedAt = now;
+      targetChapter.outlineEditedAt = now;
+      targetChapter.outlineEditor = 'human';
 
       setSavingChapterBoundary(true);
       const bookId = selectedBookId || outline.bookId || 'default';
@@ -595,6 +594,37 @@ const OutlineEditor: React.FC = () => {
       message.error('保存章节结构化信息失败');
     } finally {
       setSavingChapterBoundary(false);
+    }
+  };
+
+  const handleReviewOutlineChapter = async (
+    volumeNumber: number,
+    chapter: Chapter,
+    decision: 'approved' | 'needs_revision' | 'rejected',
+  ) => {
+    if (!projectId || !outline) return;
+    if (outlineGovernance.locked) {
+      message.error('大纲已锁定，请先解锁后再审批章纲');
+      return;
+    }
+    const chapterNumber = chapter.chapterNumber;
+    const reviewKey = `${volumeNumber}:${chapterNumber}:${decision}`;
+    try {
+      setReviewingChapterKey(reviewKey);
+      const bookId = selectedBookId || outline.bookId || 'default';
+      await outlineApi.reviewChapter(projectId, bookId, volumeNumber, chapterNumber, {
+        decision,
+        reviewer: 'human',
+        note: `OutlineEditor ${decision}`,
+        feedback: decision === 'approved' ? '章纲已确认' : '章纲需要修改',
+        createVersionSnapshot: true,
+      });
+      message.success(decision === 'approved' ? '章纲已批准' : '章纲已退回修改');
+      await loadOutline();
+    } catch (error) {
+      message.error('章纲审批失败');
+    } finally {
+      setReviewingChapterKey('');
     }
   };
 
@@ -756,6 +786,13 @@ const OutlineEditor: React.FC = () => {
       {chapters.map((chapter, chapterIndex) => {
         const complete = isChapterBoundaryComplete(chapter);
         const reviewStatus = textValue(readField(chapter, 'outlineReviewStatus', 'outline_review_status')) || 'pending_review';
+        const reviewer = textValue(readField(chapter, 'outlineReviewer', 'outline_reviewer'));
+        const reviewedAt = textValue(readField(chapter, 'outlineReviewedAt', 'outline_reviewed_at'));
+        const reviewHistory = Array.isArray(readField(chapter, 'outlineReviewHistory', 'outline_review_history'))
+          ? readField(chapter, 'outlineReviewHistory', 'outline_review_history')
+          : [];
+        const approveKey = `${volumeNumber}:${chapter.chapterNumber}:approved`;
+        const revisionKey = `${volumeNumber}:${chapter.chapterNumber}:needs_revision`;
         return (
           <Panel
             key={chapter.chapterNumber}
@@ -795,6 +832,11 @@ const OutlineEditor: React.FC = () => {
                 <Descriptions.Item label="确认备注" span={2}>
                   {textValue(readField(chapter, 'outlineReviewNote', 'outline_review_note')) || '-'}
                 </Descriptions.Item>
+                <Descriptions.Item label="审批人">{reviewer || '-'}</Descriptions.Item>
+                <Descriptions.Item label="审批时间">{reviewedAt || '-'}</Descriptions.Item>
+                <Descriptions.Item label="审批历史" span={2}>
+                  {reviewHistory.length ? `${reviewHistory.length} 次` : '-'}
+                </Descriptions.Item>
               </Descriptions>
               <Space wrap>
                 <Button type="primary" onClick={() => openChapterWorkspace(volumeNumber, chapter)}>
@@ -807,6 +849,34 @@ const OutlineEditor: React.FC = () => {
                 >
                   结构化编辑
                 </Button>
+                <Popconfirm
+                  title="批准本章章纲？"
+                  okText="批准"
+                  cancelText="取消"
+                  onConfirm={() => handleReviewOutlineChapter(volumeNumber, chapter, 'approved')}
+                >
+                  <Button
+                    icon={<CheckCircleOutlined />}
+                    disabled={!!outlineGovernance.locked}
+                    loading={reviewingChapterKey === approveKey}
+                  >
+                    批准章纲
+                  </Button>
+                </Popconfirm>
+                <Popconfirm
+                  title="退回本章章纲？"
+                  okText="退回"
+                  cancelText="取消"
+                  onConfirm={() => handleReviewOutlineChapter(volumeNumber, chapter, 'needs_revision')}
+                >
+                  <Button
+                    danger
+                    disabled={!!outlineGovernance.locked}
+                    loading={reviewingChapterKey === revisionKey}
+                  >
+                    退回修改
+                  </Button>
+                </Popconfirm>
               </Space>
             </Space>
           </Panel>
@@ -1403,16 +1473,6 @@ const OutlineEditor: React.FC = () => {
             rules={[{ required: true, message: '请输入章末钩子' }]}
           >
             <TextArea rows={2} disabled={!!outlineGovernance.locked} />
-          </Form.Item>
-          <Form.Item name="outlineReviewStatus" label="章纲确认状态">
-            <Select
-              disabled={!!outlineGovernance.locked}
-              options={[
-                { label: '待确认', value: 'pending_review' },
-                { label: '已确认', value: 'approved' },
-                { label: '需修改', value: 'needs_revision' },
-              ]}
-            />
           </Form.Item>
           <Form.Item name="outlineReviewNote" label="确认备注">
             <TextArea rows={3} disabled={!!outlineGovernance.locked} />

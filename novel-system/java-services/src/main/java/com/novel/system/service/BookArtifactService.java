@@ -425,6 +425,65 @@ public class BookArtifactService {
         return response;
     }
 
+    public Map<String, Object> diffOutlineVersion(String projectId, String bookId, String versionId) {
+        projectService.getProject(projectId);
+        String resolvedBookId = resolveBookId(projectId, bookId);
+        Path versionFile = resolveOutlineVersionFile(projectId, resolvedBookId, versionId);
+        Path currentFile = resolveOutlineFile(projectId, resolvedBookId);
+        Map<String, Object> versionOutline = readJson(versionFile);
+        Map<String, Object> currentOutline = readJson(currentFile);
+
+        String versionText = prettyJson(versionOutline);
+        String currentText = prettyJson(currentOutline);
+        List<Map<String, Object>> hunks = chapterLineDiff(contentLines(versionText), contentLines(currentText));
+
+        long addedLines = hunks.stream().filter(item -> "added".equals(item.get("type"))).count();
+        long removedLines = hunks.stream().filter(item -> "removed".equals(item.get("type"))).count();
+        long changedLines = hunks.stream().filter(item -> "changed".equals(item.get("type"))).count();
+        long unchangedLines = hunks.stream().filter(item -> "equal".equals(item.get("type"))).count();
+
+        Map<String, Object> summary = new LinkedHashMap<>();
+        summary.put("bookTitleChanged", !String.valueOf(versionOutline.getOrDefault("book_title", ""))
+            .equals(String.valueOf(currentOutline.getOrDefault("book_title", ""))));
+        summary.put("totalChaptersDelta",
+            intValue(currentOutline.get("total_chapters")) - intValue(versionOutline.get("total_chapters")));
+        summary.put("targetWordCountDelta",
+            intValue(currentOutline.get("target_word_count")) - intValue(versionOutline.get("target_word_count")));
+        summary.put("addedLines", addedLines);
+        summary.put("removedLines", removedLines);
+        summary.put("changedLines", changedLines);
+        summary.put("unchangedLines", unchangedLines);
+        summary.put("versionLineCount", contentLines(versionText).size());
+        summary.put("currentLineCount", contentLines(currentText).size());
+        summary.put("contentChanged", addedLines > 0 || removedLines > 0 || changedLines > 0);
+
+        Map<String, Object> from = new LinkedHashMap<>();
+        from.put("kind", "version");
+        from.put("versionId", stripSuffix(versionFile.getFileName().toString(), ".json"));
+        from.put("path", relative(projectId, versionFile));
+        from.put("bookTitle", versionOutline.getOrDefault("book_title", resolvedBookId));
+        from.put("totalChapters", versionOutline.getOrDefault("total_chapters", 0));
+        from.put("archivedAt", stringValue(versionOutline.get("archived_at"), modifiedAt(versionFile)));
+        from.put("archiveReason", versionOutline.getOrDefault("archive_reason", ""));
+
+        Map<String, Object> to = new LinkedHashMap<>();
+        to.put("kind", "current");
+        to.put("path", relative(projectId, currentFile));
+        to.put("bookTitle", currentOutline.getOrDefault("book_title", resolvedBookId));
+        to.put("totalChapters", currentOutline.getOrDefault("total_chapters", 0));
+        to.put("updatedAt", currentOutline.getOrDefault("updated_at", modifiedAt(currentFile)));
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("projectId", projectId);
+        response.put("bookId", resolvedBookId);
+        response.put("from", from);
+        response.put("to", to);
+        response.put("summary", summary);
+        response.put("hunks", hunks);
+        response.put("comparedAt", LocalDateTime.now().toString());
+        return response;
+    }
+
     public Map<String, Object> restoreOutlineVersion(
             String projectId,
             String bookId,
@@ -2441,6 +2500,14 @@ public class BookArtifactService {
             return objectMapper.readValue(file.toFile(), new TypeReference<>() {});
         } catch (IOException e) {
             throw new RuntimeException("读取JSON文件失败: " + file.getFileName(), e);
+        }
+    }
+
+    private String prettyJson(Map<String, Object> value) {
+        try {
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(value);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to serialize JSON for diff", e);
         }
     }
 

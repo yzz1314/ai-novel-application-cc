@@ -189,6 +189,8 @@ const OutlineEditor: React.FC = () => {
   const [outlineVersions, setOutlineVersions] = useState<any[]>([]);
   const [outlineVersionOpen, setOutlineVersionOpen] = useState(false);
   const [outlineVersionPreview, setOutlineVersionPreview] = useState<any>(null);
+  const [outlineVersionDiff, setOutlineVersionDiff] = useState<any>(null);
+  const [outlineVersionDiffOpen, setOutlineVersionDiffOpen] = useState(false);
   const [soulVersions, setSoulVersions] = useState<any[]>([]);
   const [soulVersionOpen, setSoulVersionOpen] = useState(false);
   const [soulVersionPreview, setSoulVersionPreview] = useState<any>(null);
@@ -416,6 +418,21 @@ const OutlineEditor: React.FC = () => {
       await loadOutline();
     } catch (error) {
       message.error('恢复大纲版本失败');
+    } finally {
+      setOutlineGovernanceLoading(false);
+    }
+  };
+
+  const diffOutlineVersion = async (version: any) => {
+    if (!projectId || !outline) return;
+    try {
+      setOutlineGovernanceLoading(true);
+      const bookId = selectedBookId || outline.bookId || 'default';
+      const diff = await outlineApi.diffVersion(projectId, bookId, version.id);
+      setOutlineVersionDiff(diff);
+      setOutlineVersionDiffOpen(true);
+    } catch (error) {
+      message.error('加载大纲版本差异失败');
     } finally {
       setOutlineGovernanceLoading(false);
     }
@@ -1307,6 +1324,22 @@ const OutlineEditor: React.FC = () => {
             { title: '原因', dataIndex: 'archiveReason', key: 'archiveReason', width: 160 },
             { title: '归档时间', dataIndex: 'archivedAt', key: 'archivedAt', width: 190 },
             { title: '章节数', dataIndex: 'totalChapters', key: 'totalChapters', width: 90 },
+            {
+              title: '操作',
+              key: 'action',
+              width: 120,
+              render: (_: any, record: any) => (
+                <Button
+                  type="link"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    diffOutlineVersion(record);
+                  }}
+                >
+                  对比当前
+                </Button>
+              ),
+            },
           ]}
           locale={{ emptyText: '暂无大纲历史版本' }}
         />
@@ -1328,6 +1361,73 @@ const OutlineEditor: React.FC = () => {
               <ParagraphText content={JSON.stringify(outlineVersionPreview.outline || {}, null, 2)} />
             </Space>
           </Card>
+        )}
+      </Modal>
+
+      <Modal
+        title="大纲版本差异"
+        open={outlineVersionDiffOpen}
+        footer={null}
+        width={1100}
+        onCancel={() => setOutlineVersionDiffOpen(false)}
+      >
+        {outlineVersionDiff && (
+          <Space direction="vertical" style={{ width: '100%' }} size="middle">
+            <Descriptions column={2} size="small" bordered>
+              <Descriptions.Item label="历史版本">{outlineVersionDiff.from?.versionId || '-'}</Descriptions.Item>
+              <Descriptions.Item label="对比时间">{outlineVersionDiff.comparedAt || '-'}</Descriptions.Item>
+              <Descriptions.Item label="历史路径" span={2}>{outlineVersionDiff.from?.path || '-'}</Descriptions.Item>
+              <Descriptions.Item label="当前路径" span={2}>{outlineVersionDiff.to?.path || '-'}</Descriptions.Item>
+              <Descriptions.Item label="书名变化">
+                {outlineVersionDiff.summary?.bookTitleChanged ? <Tag color="warning">已变化</Tag> : <Tag color="success">未变化</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="章节数变化">
+                {outlineVersionDiff.summary?.totalChaptersDelta || 0}
+              </Descriptions.Item>
+              <Descriptions.Item label="目标字数变化">
+                {outlineVersionDiff.summary?.targetWordCountDelta || 0}
+              </Descriptions.Item>
+              <Descriptions.Item label="行级变化">
+                <Space wrap>
+                  <Tag color="green">新增 {outlineVersionDiff.summary?.addedLines || 0}</Tag>
+                  <Tag color="red">删除 {outlineVersionDiff.summary?.removedLines || 0}</Tag>
+                  <Tag color="orange">修改 {outlineVersionDiff.summary?.changedLines || 0}</Tag>
+                </Space>
+              </Descriptions.Item>
+            </Descriptions>
+            <Table
+              size="small"
+              rowKey={(_, index) => String(index)}
+              dataSource={outlineVersionDiff.hunks || []}
+              pagination={{ pageSize: 12 }}
+              columns={[
+                {
+                  title: '类型',
+                  dataIndex: 'type',
+                  key: 'type',
+                  width: 90,
+                  render: (type: string) => {
+                    const color = type === 'added' ? 'green' : type === 'removed' ? 'red' : type === 'changed' ? 'orange' : 'default';
+                    return <Tag color={color}>{type}</Tag>;
+                  },
+                },
+                { title: '旧行', dataIndex: 'oldLineNumber', key: 'oldLineNumber', width: 80 },
+                { title: '新行', dataIndex: 'newLineNumber', key: 'newLineNumber', width: 80 },
+                {
+                  title: '历史版本',
+                  dataIndex: 'oldText',
+                  key: 'oldText',
+                  render: (text: string) => <ParagraphText content={text || ''} />,
+                },
+                {
+                  title: '当前版本',
+                  dataIndex: 'newText',
+                  key: 'newText',
+                  render: (text: string) => <ParagraphText content={text || ''} />,
+                },
+              ]}
+            />
+          </Space>
         )}
       </Modal>
 

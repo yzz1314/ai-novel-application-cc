@@ -205,6 +205,8 @@ export const outlineApi = {
     request<any[]>(api.get(`/projects/${projectId}/books/${bookId}/outline/versions`)),
   getVersion: (projectId: string, bookId: string, versionId: string) =>
     request(api.get(`/projects/${projectId}/books/${bookId}/outline/versions/${versionId}`)),
+  diffVersion: (projectId: string, bookId: string, versionId: string) =>
+    request(api.get(`/projects/${projectId}/books/${bookId}/outline/versions/${versionId}/diff`)),
   restoreVersion: (projectId: string, bookId: string, versionId: string, data?: any) =>
     request(api.post(`/projects/${projectId}/books/${bookId}/outline/versions/${versionId}/restore`, data || {})),
   review: (projectId: string, data?: any) =>

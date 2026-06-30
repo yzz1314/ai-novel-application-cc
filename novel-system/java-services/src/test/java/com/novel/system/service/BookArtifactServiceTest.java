@@ -428,6 +428,75 @@ class BookArtifactServiceTest {
     }
 
     @Test
+    void diffsOutlineVersionAgainstCurrentOutline() throws Exception {
+        writeProjectFile("novel/outline/book_1_outline.json", """
+            {
+              "project_id": "project_soul_restore",
+              "book_id": "book_1",
+              "book_title": "Current Outline",
+              "genre": "xuanhuan",
+              "target_word_count": 150000,
+              "total_chapters": 2,
+              "volumes": [
+                {
+                  "volume_number": 1,
+                  "chapters": [
+                    {
+                      "chapter_number": 1,
+                      "chapter_title": "New Chapter",
+                      "plot_goal": "new goal"
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+        writeProjectFile("novel/outline/versions/book_1/book_1_outline_20260626010101000.json", """
+            {
+              "project_id": "project_soul_restore",
+              "book_id": "book_1",
+              "book_title": "Archived Outline",
+              "genre": "xuanhuan",
+              "target_word_count": 100000,
+              "total_chapters": 1,
+              "archived_at": "2026-06-26T01:01:01",
+              "archive_reason": "before_outline_edit",
+              "volumes": []
+            }
+            """);
+
+        Map<String, Object> response = bookArtifactService.diffOutlineVersion(
+            PROJECT_ID,
+            BOOK_ID,
+            "book_1_outline_20260626010101000"
+        );
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> from = (Map<String, Object>) response.get("from");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> to = (Map<String, Object>) response.get("to");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> summary = (Map<String, Object>) response.get("summary");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> hunks = (List<Map<String, Object>>) response.get("hunks");
+
+        assertThat(from)
+            .containsEntry("kind", "version")
+            .containsEntry("versionId", "book_1_outline_20260626010101000")
+            .containsEntry("bookTitle", "Archived Outline");
+        assertThat(to)
+            .containsEntry("kind", "current")
+            .containsEntry("bookTitle", "Current Outline");
+        assertThat(summary)
+            .containsEntry("bookTitleChanged", true)
+            .containsEntry("totalChaptersDelta", 1)
+            .containsEntry("targetWordCountDelta", 50000)
+            .containsEntry("contentChanged", true);
+        assertThat(hunks).extracting(item -> item.get("type"))
+            .contains("changed");
+    }
+
+    @Test
     void reviewOutlineChapterWritesStatusHistorySnapshotAndReport() throws Exception {
         writeProjectFile("novel/outline/book_1_outline.json", """
             {

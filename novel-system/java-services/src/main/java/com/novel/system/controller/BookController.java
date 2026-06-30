@@ -105,6 +105,14 @@ public class BookController {
         return ResponseEntity.ok(bookArtifactService.getOutlineVersion(projectId, bookId, versionId));
     }
 
+    @GetMapping("/{bookId}/outline/versions/{versionId}/diff")
+    public ResponseEntity<Map<String, Object>> diffOutlineVersion(
+            @PathVariable String projectId,
+            @PathVariable String bookId,
+            @PathVariable String versionId) {
+        return ResponseEntity.ok(bookArtifactService.diffOutlineVersion(projectId, bookId, versionId));
+    }
+
     @PostMapping("/{bookId}/outline/versions/{versionId}/restore")
     public ResponseEntity<Map<String, Object>> restoreOutlineVersion(
             @PathVariable String projectId,
